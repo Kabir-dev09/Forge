@@ -1,6 +1,6 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use forge_core::cell::{Cell, CellWidth, GraphemeCluster};
+use forge_core::cell::{Cell, CellWidth};
 use forge_core::color::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -13,7 +13,7 @@ use forge_core::cell::SelectionRange;
 
 #[derive(Clone)]
 pub struct Row {
-    pub cells: Vec<Cell>,
+    pub cells: Box<[Cell]>,
     pub wrapped: bool,
 }
 
@@ -55,30 +55,27 @@ impl ScreenBuffer {
     
 
     pub fn default_cell(&self) -> Cell {
-        Cell {
-            grapheme: forge_core::cell::GraphemeCluster::from_str(" "),
+        let mut cell = Cell {
+            c: ' ',
             fg: self.current_fg,
             bg: self.current_bg,
-            bold: false,
-            italic: false,
-            underline: false,
-            strikethrough: false,
-            width: forge_core::cell::CellWidth::Narrow,
-        }
+            flags: 0,
+        };
+        if self.attr_bold { cell.set_bold(true); }
+        if self.attr_italic { cell.set_italic(true); }
+        if self.attr_underline { cell.set_underline(true); }
+        if self.attr_strikethrough { cell.set_strikethrough(true); }
+        cell
     }
 
     pub fn new(cols: usize, rows: usize, max_scrollback: usize, default_fg: Color, default_bg: Color) -> Self {
         let default_cell = Cell {
-            grapheme: forge_core::cell::GraphemeCluster::from_str(" "),
+            c: ' ',
             fg: default_fg,
             bg: default_bg,
-            bold: false,
-            italic: false,
-            underline: false,
-            strikethrough: false,
-            width: forge_core::cell::CellWidth::Narrow,
+            flags: 0,
         };
-        let grid = vec![Row { cells: vec![default_cell; cols], wrapped: false }; rows];
+        let grid = vec![Row { cells: vec![default_cell; cols].into_boxed_slice(), wrapped: false }; rows];
         let dirty_rows = vec![true; rows];
         let palette = forge_core::color::ANSI_16;
         ScreenBuffer {
@@ -140,16 +137,18 @@ impl ScreenBuffer {
         let r = self.cursor.row;
         let c = self.cursor.col;
 
-        self.grid[r].cells[c] = Cell {
-            grapheme: GraphemeCluster::from_str(grapheme),
+        let mut cell = Cell {
+            c: grapheme.chars().next().unwrap_or(' '),
             fg: self.current_fg,
             bg: self.current_bg,
-            bold: self.attr_bold,
-            italic: self.attr_italic,
-            underline: self.attr_underline,
-            strikethrough: self.attr_strikethrough,
-            width: width_type,
+            flags: 0,
         };
+        if self.attr_bold { cell.set_bold(true); }
+        if self.attr_italic { cell.set_italic(true); }
+        if self.attr_underline { cell.set_underline(true); }
+        if self.attr_strikethrough { cell.set_strikethrough(true); }
+        cell.set_width(width_type);
+        self.grid[r].cells[c] = cell;
         self.dirty_rows[r] = true;
 
         if display_width >= 2 {
@@ -193,7 +192,7 @@ impl ScreenBuffer {
                 }
                 self.scrollback.push(row);
             }
-            self.grid.insert(bottom, Row { cells: vec![self.default_cell(); self.cols], wrapped: false });
+            self.grid.insert(bottom, Row { cells: vec![self.default_cell(); self.cols].into_boxed_slice(), wrapped: false });
         }
         for r in top..=bottom {
             self.dirty_rows[r] = true;
@@ -207,7 +206,7 @@ impl ScreenBuffer {
 
         for _ in 0..n {
             self.grid.remove(bottom);
-            self.grid.insert(top, Row { cells: vec![self.default_cell(); self.cols], wrapped: false });
+            self.grid.insert(top, Row { cells: vec![self.default_cell(); self.cols].into_boxed_slice(), wrapped: false });
         }
         for r in top..=bottom {
             self.dirty_rows[r] = true;
@@ -221,7 +220,7 @@ impl ScreenBuffer {
         let count = n.min(bottom - top + 1);
         for _ in 0..count {
             self.grid.remove(bottom);
-            self.grid.insert(top, Row { cells: vec![self.default_cell(); self.cols], wrapped: false });
+            self.grid.insert(top, Row { cells: vec![self.default_cell(); self.cols].into_boxed_slice(), wrapped: false });
         }
         for r in top..=bottom {
             self.dirty_rows[r] = true;
@@ -235,7 +234,7 @@ impl ScreenBuffer {
         let count = n.min(bottom - top + 1);
         for _ in 0..count {
             self.grid.remove(top);
-            self.grid.insert(bottom, Row { cells: vec![self.default_cell(); self.cols], wrapped: false });
+            self.grid.insert(bottom, Row { cells: vec![self.default_cell(); self.cols].into_boxed_slice(), wrapped: false });
         }
         for r in top..=bottom {
             self.dirty_rows[r] = true;
@@ -444,14 +443,14 @@ impl ScreenBuffer {
                 if let Some(c_off) = line.cursor_offset {
                     new_cursor = CursorPos { row: reflowed_rows.len(), col: c_off };
                 }
-                reflowed_rows.push(Row { cells: vec![self.default_cell(); new_cols], wrapped: false });
+                reflowed_rows.push(Row { cells: vec![self.default_cell(); new_cols].into_boxed_slice(), wrapped: false });
                 continue;
             }
 
             while i < cells.len() {
                 let chunk_len = (cells.len() - i).min(new_cols);
                 let mut new_row = Row {
-                    cells: vec![self.default_cell(); new_cols],
+                    cells: vec![self.default_cell(); new_cols].into_boxed_slice(),
                     wrapped: i + chunk_len < cells.len(),
                 };
                 new_row.cells[..chunk_len].clone_from_slice(&cells[i..i + chunk_len]);
@@ -473,7 +472,7 @@ impl ScreenBuffer {
         let mut new_grid_rows = Vec::new();
         new_grid_rows.extend_from_slice(&reflowed_rows[grid_start..total_rows]);
         while new_grid_rows.len() < new_rows {
-            new_grid_rows.push(Row { cells: vec![self.default_cell(); new_cols], wrapped: false });
+            new_grid_rows.push(Row { cells: vec![self.default_cell(); new_cols].into_boxed_slice(), wrapped: false });
         }
 
         let mut new_scrollback = Vec::new();
@@ -527,6 +526,10 @@ impl ScreenBuffer {
         }
     }
 
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
     /// Retrieves a visible row based on the current scroll offset.
     /// `index` is 0-indexed from the top of the viewport.
     pub fn visible_row(&self, index: usize) -> &[Cell] {
@@ -574,9 +577,11 @@ impl ScreenBuffer {
         if self.use_alt_buffer {
             self.use_alt_buffer = false;
             if let Some(mut grid) = self.saved_primary_grid.take() {
-                grid.resize(self.rows, Row { cells: vec![self.default_cell(); self.cols], wrapped: false });
+                grid.resize(self.rows, Row { cells: vec![self.default_cell(); self.cols].into_boxed_slice(), wrapped: false });
                 for row in &mut grid {
-                    row.cells.resize(self.cols, self.default_cell());
+                    let mut vec = std::mem::replace(&mut row.cells, Box::new([])).into_vec();
+                    vec.resize(self.cols, self.default_cell());
+                    row.cells = vec.into_boxed_slice();
                 }
                 self.grid = grid;
             }
@@ -633,7 +638,9 @@ impl ScreenBuffer {
             for col in start..=end {
                 if col < grid_row.cells.len() {
                     let cell = &grid_row.cells[col];
-                    line.push_str(cell.grapheme.as_str());
+                    if cell.c != '\0' {
+                        line.push(cell.c);
+                    }
                 }
             }
 
@@ -705,8 +712,8 @@ mod tests {
         buf.write_str("Hello");
         assert_eq!(buf.cursor.row, 0);
         assert_eq!(buf.cursor.col, 5);
-        assert_eq!(buf.grid[0].cells[0].grapheme.0.as_slice(), b"H");
-        assert_eq!(buf.grid[0].cells[4].grapheme.0.as_slice(), b"o");
+        assert_eq!(buf.grid[0].cells[0].c, 'H');
+        assert_eq!(buf.grid[0].cells[4].c, 'o');
     }
 
     #[test]
@@ -714,8 +721,8 @@ mod tests {
         let mut buf = ScreenBuffer::new(10, 10, 100, forge_core::color::Color { r: 192, g: 202, b: 245, a: 255 }, forge_core::color::Color { r: 30, g: 30, b: 46, a: 255 });
         buf.write_str("中");
         assert_eq!(buf.cursor.col, 2);
-        assert_eq!(buf.grid[0].cells[0].width, CellWidth::Wide);
-        assert_eq!(buf.grid[0].cells[1].grapheme.0.as_slice(), b"\0");
+        assert_eq!(buf.grid[0].cells[0].width(), CellWidth::Wide);
+        assert_eq!(buf.grid[0].cells[1].c, '\0');
     }
 
     #[test]
@@ -730,11 +737,11 @@ mod tests {
         buf.write_str("Line 3");
         
         assert_eq!(buf.scrollback.len(), 1);
-        assert_eq!(buf.scrollback[0].cells[0].grapheme.0.as_slice(), b"L");
-        assert_eq!(buf.scrollback[0].cells[5].grapheme.0.as_slice(), b"1");
+        assert_eq!(buf.scrollback[0].cells[0].c, 'L');
+        assert_eq!(buf.scrollback[0].cells[5].c, '1');
         
-        assert_eq!(buf.grid[0].cells[5].grapheme.0.as_slice(), b"2");
-        assert_eq!(buf.grid[1].cells[5].grapheme.0.as_slice(), b"3");
+        assert_eq!(buf.grid[0].cells[5].c, '2');
+        assert_eq!(buf.grid[1].cells[5].c, '3');
     }
 
     #[test]
@@ -743,7 +750,7 @@ mod tests {
         buf.write_str("12345");
         buf.cursor.col = 2;
         buf.erase_to_end_of_line();
-        assert_eq!(buf.grid[0].cells[1].grapheme.0.as_slice(), b"2");
+        assert_eq!(buf.grid[0].cells[1].c, '2');
         assert!(buf.grid[0].cells[2].is_empty());
         assert!(buf.grid[0].cells[3].is_empty());
     }
@@ -755,7 +762,7 @@ mod tests {
         buf.resize_reflow(10, 10);
         assert_eq!(buf.cols, 10);
         assert_eq!(buf.rows, 10);
-        assert_eq!(buf.grid[0].cells[0].grapheme.0.as_slice(), b"1");
+        assert_eq!(buf.grid[0].cells[0].c, '1');
         assert!(buf.grid[0].cells[6].is_empty());
     }
 
@@ -791,8 +798,8 @@ mod tests {
         }
         assert_eq!(buf.scrollback.len(), 5);
         // The last lines pushed out should be 90 to 94 (since 95-99 are visible)
-        assert_eq!(buf.scrollback[4].cells[5].grapheme.0.as_slice(), b"9");
-        assert_eq!(buf.scrollback[4].cells[6].grapheme.0.as_slice(), b"5");
+        assert_eq!(buf.scrollback[4].cells[5].c, '9');
+        assert_eq!(buf.scrollback[4].cells[6].c, '5');
     }
 }
 
@@ -832,7 +839,7 @@ mod reflow_tests {
         buf.move_cursor_to(0, 2);
         buf.insert_chars(2);
         let row = buf.visible_row(0);
-        let chars: String = row.iter().map(|c| c.grapheme.0.as_slice()).map(|s| std::str::from_utf8(s).unwrap_or("")).collect();
+        let chars: String = row.iter().map(|c| c.c).collect();
         assert_eq!(chars, "12  345   ");
     }
 
@@ -843,7 +850,7 @@ mod reflow_tests {
         buf.move_cursor_to(0, 2);
         buf.delete_chars(3);
         let row = buf.visible_row(0);
-        let chars: String = row.iter().map(|c| c.grapheme.0.as_slice()).map(|s| std::str::from_utf8(s).unwrap_or("")).collect();
+        let chars: String = row.iter().map(|c| c.c).collect();
         assert_eq!(chars, "1267      ");
     }
 }

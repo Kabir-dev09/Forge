@@ -28,7 +28,6 @@ pub struct Renderer {
     pub sync: SyncPrimitives,
     pub current_frame: usize,
 
-    pub font_rasterizer: Option<FontRasterizer>,
     pub atlas: GlyphAtlas,
     pub atlas_texture: Texture,
     pub descriptor_pool: vk::DescriptorPool,
@@ -117,7 +116,7 @@ impl Renderer {
             &instance, physical_device, &device, command_pool, graphics_queue,
             1, 1, &atlas.pixels
         )?;
-        let font_rasterizer = None;
+        atlas.clear_pixels(); // We don't need the RAM copy anymore!
 
         // Descriptor Pool
         let pool_sizes = [vk::DescriptorPoolSize {
@@ -182,7 +181,7 @@ impl Renderer {
             physical_device, device, graphics_queue, present_queue,
             queue_indices, swapchain, render_pass, pipeline, framebuffers,
             command_pool, command_buffers, sync, current_frame: 0,
-            font_rasterizer, atlas, atlas_texture, descriptor_pool, descriptor_set,
+            atlas, atlas_texture, descriptor_pool, descriptor_set,
             tessellator, vertex_buffer, vertex_memory, max_vertices,
             cell_width, cell_height, baseline,
         })
@@ -200,6 +199,7 @@ impl Renderer {
     pub fn render_grid(
         &mut self,
         grid: &[&[forge_core::cell::Cell]],
+        dirty_rows: &[bool],
         cursor: Option<(usize, usize)>,
         cursor_style: forge_core::config_registry::CursorStyle,
         cursor_visible_phase: bool,
@@ -214,11 +214,14 @@ impl Renderer {
         effective_cell_h: f32,
         scale_x: f32,
         scale_y: f32,
+        scrollbar: Option<(f32, f32, f32, f32, f32, f32)>,
+        braille_style: forge_core::config_registry::BrailleStyle,
     ) -> Result<bool> {
         // Always clear self.tessellator.vertices, always re-tessellate the entire screen, and always upload the full buffer.
         let effective_baseline = self.baseline as f32 * scale_y;
         self.tessellator.tessellate(
             grid,
+            dirty_rows,
             &self.atlas,
             effective_cell_w,
             effective_cell_h,
@@ -236,6 +239,7 @@ impl Renderer {
             pad_y,
             scale_x,
             scale_y,
+            scrollbar,
         );
 
         // Upload vertices
@@ -316,8 +320,14 @@ impl Renderer {
             if !self.tessellator.vertices.is_empty() {
                 self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline.graphics_pipeline);
                 
+                let config_flags = match braille_style {
+                    forge_core::config_registry::BrailleStyle::Solid => 1,
+                    forge_core::config_registry::BrailleStyle::Dots => 0,
+                };
                 let pc = crate::pipeline::PushConstants {
                     cell_size: [self.cell_width as f32, self.cell_height as f32],
+                    config_flags,
+                    _pad: 0,
                 };
                 self.device.cmd_push_constants(
                     cmd,
@@ -440,7 +450,7 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn update_font_data(&mut self, rasterizer: FontRasterizer, atlas: GlyphAtlas) -> Result<()> {
+    pub fn update_font_data(&mut self, rasterizer: FontRasterizer, mut atlas: GlyphAtlas) -> Result<()> {
         unsafe { self.device.device_wait_idle() }.map_err(|e| ForgeError::Vulkan(e.to_string()))?;
         
         self.atlas_texture.destroy(&self.device);
@@ -455,7 +465,7 @@ impl Renderer {
         self.cell_height = rasterizer.cell_height;
         self.baseline = rasterizer.baseline;
 
-        self.font_rasterizer = Some(rasterizer);
+        atlas.clear_pixels(); // Free the RAM! We only need it on the GPU.
         self.atlas = atlas;
         
         let image_info = vk::DescriptorImageInfo {

@@ -15,6 +15,8 @@ pub struct GlyphVertex {
 #[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
 pub struct PushConstants {
     pub cell_size: [f32; 2],
+    pub config_flags: u32,
+    pub _pad: u32,
 }
 
 impl GlyphVertex {

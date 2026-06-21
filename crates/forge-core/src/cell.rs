@@ -1,5 +1,4 @@
 use crate::color::Color;
-use smallvec::SmallVec;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectionRange {
@@ -9,68 +8,82 @@ pub struct SelectionRange {
     pub end_col: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct GraphemeCluster(pub SmallVec<[u8; 4]>);
-
-impl GraphemeCluster {
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Self {
-        GraphemeCluster(SmallVec::from_slice(s.as_bytes()))
-    }
-    
-    pub fn as_str(&self) -> &str {
-        debug_assert!(std::str::from_utf8(&self.0).is_ok());
-        // SAFETY: bytes were validated as UTF-8 at construction time
-        unsafe { std::str::from_utf8_unchecked(&self.0) }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CellWidth {
     Narrow,
     Wide,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cell {
-    pub grapheme: GraphemeCluster,
+    pub c: char,
     pub fg: Color,
     pub bg: Color,
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub strikethrough: bool,
-    pub width: CellWidth,
+    pub flags: u8,
+}
+
+impl Cell {
+    pub const FLAG_BOLD: u8          = 0b0000_0001;
+    pub const FLAG_ITALIC: u8        = 0b0000_0010;
+    pub const FLAG_UNDERLINE: u8     = 0b0000_0100;
+    pub const FLAG_STRIKETHROUGH: u8 = 0b0000_1000;
+    pub const FLAG_WIDE: u8          = 0b0001_0000;
+
+    #[inline(always)]
+    pub fn is_bold(&self) -> bool { self.flags & Self::FLAG_BOLD != 0 }
+    #[inline(always)]
+    pub fn is_italic(&self) -> bool { self.flags & Self::FLAG_ITALIC != 0 }
+    #[inline(always)]
+    pub fn is_underline(&self) -> bool { self.flags & Self::FLAG_UNDERLINE != 0 }
+    #[inline(always)]
+    pub fn is_strikethrough(&self) -> bool { self.flags & Self::FLAG_STRIKETHROUGH != 0 }
+    #[inline(always)]
+    pub fn width(&self) -> CellWidth {
+        if self.flags & Self::FLAG_WIDE != 0 { CellWidth::Wide } else { CellWidth::Narrow }
+    }
+
+    #[inline(always)]
+    pub fn set_bold(&mut self, val: bool) {
+        if val { self.flags |= Self::FLAG_BOLD; } else { self.flags &= !Self::FLAG_BOLD; }
+    }
+    #[inline(always)]
+    pub fn set_italic(&mut self, val: bool) {
+        if val { self.flags |= Self::FLAG_ITALIC; } else { self.flags &= !Self::FLAG_ITALIC; }
+    }
+    #[inline(always)]
+    pub fn set_underline(&mut self, val: bool) {
+        if val { self.flags |= Self::FLAG_UNDERLINE; } else { self.flags &= !Self::FLAG_UNDERLINE; }
+    }
+    #[inline(always)]
+    pub fn set_strikethrough(&mut self, val: bool) {
+        if val { self.flags |= Self::FLAG_STRIKETHROUGH; } else { self.flags &= !Self::FLAG_STRIKETHROUGH; }
+    }
+    #[inline(always)]
+    pub fn set_width(&mut self, val: CellWidth) {
+        if val == CellWidth::Wide { self.flags |= Self::FLAG_WIDE; } else { self.flags &= !Self::FLAG_WIDE; }
+    }
 }
 
 impl Default for Cell {
     fn default() -> Self {
         Cell {
-            grapheme: GraphemeCluster::from_str(" "),
+            c: ' ',
             fg: Color::WHITE,
             bg: Color::BLACK,
-            bold: false,
-            italic: false,
-            underline: false,
-            strikethrough: false,
-            width: CellWidth::Narrow,
+            flags: 0,
         }
     }
 }
 
 impl Cell {
     pub fn is_empty(&self) -> bool {
-        self.grapheme.0.as_slice() == b" "
-            && !self.bold
-            && !self.italic
-            && !self.underline
-            && !self.strikethrough
+        self.c == ' ' && self.flags == 0
     }
 
     pub fn wide_placeholder() -> Self {
         Cell {
-            grapheme: GraphemeCluster::from_str("\0"),
-            width: CellWidth::Wide,
+            c: '\0',
+            flags: Self::FLAG_WIDE,
             ..Default::default()
         }
     }
@@ -81,8 +94,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_cell_grapheme() {
+    fn test_default_cell_c() {
         let cell = Cell::default();
-        assert_eq!(cell.grapheme.as_str(), " ");
+        assert_eq!(cell.c, ' ');
     }
 }

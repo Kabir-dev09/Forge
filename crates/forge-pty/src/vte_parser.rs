@@ -306,8 +306,8 @@ mod tests {
         processor.process(b"Hello, World!\r\n", &mut buf);
         assert_eq!(buf.cursor.row, 1);
         assert_eq!(buf.cursor.col, 0);
-        assert_eq!(buf.visible_row(0)[0].grapheme.0.as_slice(), b"H");
-        assert_eq!(buf.visible_row(0)[1].grapheme.0.as_slice(), b"e");
+        assert_eq!(buf.visible_row(0)[0].c, 'H');
+        assert_eq!(buf.visible_row(0)[1].c, 'e');
     }
 
     #[test]

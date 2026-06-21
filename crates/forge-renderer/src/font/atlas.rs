@@ -21,6 +21,11 @@ pub struct GlyphAtlas {
 }
 
 impl GlyphAtlas {
+    pub fn clear_pixels(&mut self) {
+        self.pixels = Vec::new();
+        self.pixels.shrink_to_fit();
+    }
+
     pub fn build(rasterizer: &FontRasterizer, bold_rasterizer: Option<&FontRasterizer>, px_size: f32, fast_mode: bool) -> Result<Self> {
         // Fast mode: Only rasterize ASCII to boot instantly (under 20ms)
         // Full mode: Rasterize ASCII + Box Drawing + 6,400+ Nerd Font icons (takes ~800ms)

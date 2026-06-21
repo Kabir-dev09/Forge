@@ -10,6 +10,7 @@ layout(set = 0, binding = 0) uniform sampler2D glyph_atlas;
 
 layout(push_constant) uniform PushConstants {
     vec2 cell_size;
+    uint config_flags;
 } pc;
 
 void main() {
@@ -24,7 +25,7 @@ void main() {
             return;
         }
         
-        if (proc_id <= -100.0) {
+        if (proc_id <= -100.0 && proc_id > -500.0) {
             int data = int(abs(proc_id) - 100.0);
             int u = data & 3;
             int d = (data >> 2) & 3;
@@ -104,6 +105,102 @@ void main() {
             
             if (alpha <= 0.0) discard;
             out_color = vec4(v_fg_color.rgb, alpha * v_fg_color.a);
+            return;
+        } else if (proc_id == -30.0 || proc_id == -31.0) {
+            // DA06m - Magically recover the exact physical pixel dimensions of this quad!
+            float w = 1.0 / fwidth(local.x); // This will be 8.0
+            float h = 1.0 / fwidth(local.y);
+
+            float px_x = local.x * w;
+            float px_y = local.y * h;
+
+            // Calculate distance to the center line of the Pill shape
+            float r = w / 2.0; // Radius is 4.0
+            float cy = clamp(px_y, r, h - r);
+            float dx = px_x - r;
+            float dy = px_y - cy;
+            float dist = sqrt(dx*dx + dy*dy);
+
+            // Anti-aliased outer edge (Is the pixel inside the pill?)
+            float shape_alpha = smoothstep(r + 0.5, r - 0.5, dist);
+            if (shape_alpha <= 0.0) discard;
+
+            if (proc_id == -30.0) {
+                // Track: Solid Color #2C2B2F with a 1px Dark Grey border
+                vec3 border_color = vec3(0.0055, 0.0055, 0.0066); // #18181A
+                vec3 track_color = vec3(0.021, 0.020, 0.024);
+
+                // The border is 1 pixel wide. We mix between border and fill based on distance!
+                float fill_alpha = smoothstep(r - 1.0 + 0.5, r - 1.0 - 0.5, dist);
+                vec3 final_color = mix(border_color, track_color, fill_alpha);
+
+                float global_alpha = v_fg_color.a;
+                out_color = vec4(final_color, shape_alpha * global_alpha);
+            } else {
+                // Thumb: #464447 Fill with a 1px Dark Grey border
+                vec3 border_color = vec3(0.0055, 0.0055, 0.0066); // #18181A
+                vec3 fill_color = vec3(0.058, 0.055, 0.060);   // #464447
+
+                // The border is 1 pixel wide. We mix between border and fill based on distance!
+                float fill_alpha = smoothstep(r - 1.0 + 0.5, r - 1.0 - 0.5, dist);
+                vec3 final_color = mix(border_color, fill_color, fill_alpha);
+
+                float global_alpha = v_fg_color.a;
+                out_color = vec4(final_color, shape_alpha * global_alpha);
+            }
+            return;
+        } else if (proc_id <= -500.0 && proc_id > -800.0) {
+            int pattern = int(abs(proc_id) - 500.0);
+            
+            float W = pc.cell_size.x;
+            float H = pc.cell_size.y;
+            
+            // Standard braille layout has 2 columns, 4 rows.
+            // Width per cell: W/2. Height per cell: H/4.
+            float cell_w = W / 2.0;
+            float cell_h = H / 4.0;
+            
+            float px = local.x * W;
+            float py = local.y * H;
+            
+            int col = int(px / cell_w);
+            int row = int(py / cell_h);
+            
+            // Clamp to prevent out-of-bounds just in case
+            col = clamp(col, 0, 1);
+            row = clamp(row, 0, 3);
+            
+            // Dot index:
+            // Col 0: row 0=1, row 1=2, row 2=4, row 3=64
+            // Col 1: row 0=8, row 1=16, row 2=32, row 3=128
+            int dot_val = 0;
+            if (col == 0) {
+                if (row == 0) dot_val = 1;
+                else if (row == 1) dot_val = 2;
+                else if (row == 2) dot_val = 4;
+                else if (row == 3) dot_val = 64;
+            } else {
+                if (row == 0) dot_val = 8;
+                else if (row == 1) dot_val = 16;
+                else if (row == 2) dot_val = 32;
+                else if (row == 3) dot_val = 128;
+            }
+            
+            if ((pattern & dot_val) != 0) {
+                if (pc.config_flags == 1) { // Solid
+                    out_color = vec4(v_fg_color.rgb, v_fg_color.a);
+                } else { // Dots (0)
+                    float dot_radius = min(cell_w, cell_h) * 0.25; // 50% diameter
+                    float cx = (float(col) + 0.5) * cell_w;
+                    float cy = (float(row) + 0.5) * cell_h;
+                    float d = length(vec2(px - cx, py - cy));
+                    float alpha = smoothstep(dot_radius + 0.5, dot_radius - 0.5, d);
+                    if (alpha <= 0.0) discard;
+                    out_color = vec4(v_fg_color.rgb, alpha * v_fg_color.a);
+                }
+            } else {
+                discard;
+            }
             return;
         } else if (proc_id < -1.0) {
             float d = 0.0;

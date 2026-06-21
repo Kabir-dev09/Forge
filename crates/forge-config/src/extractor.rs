@@ -226,6 +226,17 @@ pub fn extract_config(root: Table, config: &mut ForgeConfig) {
         if let Some(h) = get_bool(&behavior_t, "hide_mouse_when_typing") { config.behavior.hide_mouse_when_typing = h; }
     }
 
+    // Render
+    if let Ok(Value::Table(render_t)) = root.get::<_, Value>("render") {
+        if let Some(s) = get_string(&render_t, "braille_style") {
+            match s.to_lowercase().as_str() {
+                "solid" => config.render.braille_style = forge_core::config_registry::BrailleStyle::Solid,
+                "dots" => config.render.braille_style = forge_core::config_registry::BrailleStyle::Dots,
+                _ => {}
+            }
+        }
+    }
+
     if config.behavior.disable_default_keybindings {
         config.keybindings.clear();
     }

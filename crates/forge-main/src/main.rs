@@ -251,7 +251,7 @@ fn run() -> forge_core::Result<()> {
         wayland_state,
         event_queue,
         pty,
-        screen_buffer,
+        std::sync::Arc::new(std::sync::RwLock::new(screen_buffer)),
         vte_processor,
         key_rx,
         pointer_rx,

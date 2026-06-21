@@ -50,6 +50,7 @@ pub struct WaylandState {
     pub frame_ready: bool,
     pub frame_callback_pending: bool,
     pub needs_flush: bool,
+    pub force_redraw: bool,
     pub repeat_info: Option<(i32, i32)>, // (rate, delay)
     pub repeating_key: Option<RepeatingKey>,
     pub keybindings: std::collections::HashMap<forge_core::bindings::KeyStroke, forge_core::bindings::Action>,
@@ -115,6 +116,7 @@ pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
         frame_ready: true,
         frame_callback_pending: false,
         needs_flush: false,
+        force_redraw: false,
         repeat_info: None,
         repeating_key: None,
         keybindings: std::collections::HashMap::new(),

@@ -195,6 +195,32 @@ impl Default for ThemeConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrailleStyle {
+    Solid,
+    Dots,
+}
+
+impl Default for BrailleStyle {
+    fn default() -> Self {
+        BrailleStyle::Dots
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenderConfig {
+    pub braille_style: BrailleStyle,
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self {
+            braille_style: BrailleStyle::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForgeConfig {
     pub font: FontConfig,
@@ -204,6 +230,7 @@ pub struct ForgeConfig {
     pub shell: ShellConfig,
     pub theme: ThemeConfig,
     pub behavior: BehaviorConfig,
+    pub render: RenderConfig,
     pub keybindings: std::collections::HashMap<crate::bindings::KeyStroke, crate::bindings::Action>,
 }
 
@@ -232,6 +259,7 @@ impl Default for ForgeConfig {
             shell: ShellConfig::default(),
             theme: ThemeConfig::default(),
             behavior: BehaviorConfig::default(),
+            render: RenderConfig::default(),
             keybindings: default_keybindings,
         }
     }
