@@ -1,0 +1,14 @@
+/target/
+/Cargo.lock
+
+# Test and dev scripts
+/scratch/
+/test_scripts/
+/notes/
+
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

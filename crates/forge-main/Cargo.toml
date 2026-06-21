@@ -1,0 +1,29 @@
+[package]
+name = "forge-main"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+forge-renderer = { path = "../forge-renderer" }
+forge-pty = { path = "../forge-pty" }
+forge-config = { path = "../forge-config" }
+forge-plugins = { path = "../forge-plugins" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
+rustix = { workspace = true }
+calloop = { workspace = true }
+calloop-wayland-source = { workspace = true }
+xkbcommon = { workspace = true }
+memmap2 = { workspace = true }
+wayland-backend = { version = "0.3.15", features = ["client_system"] }
+libc = "0.2.186"
+dirs = { workspace = true }
+crossbeam-channel = { workspace = true }
+notify = { workspace = true }
+wayland-protocols-plasma = { version = "0.3.12", features = ["client", "wayland-client"] }
+

@@ -1,0 +1,13 @@
+[package]
+name = "forge-pty"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+nix = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+vte = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
