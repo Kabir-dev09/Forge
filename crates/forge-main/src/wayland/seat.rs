@@ -267,21 +267,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 
                 if state.cursor_hidden {
                     _pointer.set_cursor(serial, None, 0, 0);
-                } else {
-                    if let Some(shape_manager) = &state.globals.cursor_shape_manager {
-                        let device = shape_manager.get_pointer(_pointer, _qh, ());
-                        let shape = if state.is_alt_buffer {
-                            wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
-                        } else {
-                            wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Text
-                        };
-                        device.set_shape(serial, shape);
-                        device.destroy();
-                    }
                 }
                 
                 if let Some(tx) = &state.pointer_sender {
-                    let _ = tx.send(PointerEvent::Motion { x: surface_x, y: surface_y });
+                    let _ = tx.send(PointerEvent::Enter { x: surface_x, y: surface_y });
+                }
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.pointer = None;
+                if let Some(tx) = &state.pointer_sender {
+                    let _ = tx.send(PointerEvent::Leave);
                 }
             }
             wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
@@ -289,7 +284,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     state.cursor_hidden = false;
                     if let Some(shape_manager) = &state.globals.cursor_shape_manager {
                         let device = shape_manager.get_pointer(_pointer, _qh, ());
-                        let shape = if state.is_alt_buffer {
+                        let shape = if state.is_hovering_edge {
+                            wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
+                        } else if state.is_alt_buffer {
                             wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
                         } else {
                             wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Text

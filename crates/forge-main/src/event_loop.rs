@@ -453,22 +453,47 @@ pub fn run_event_loop(
 
             use crate::wayland::connection::PointerEvent;
             match evt {
-                PointerEvent::Motion { x, y } => {
+                PointerEvent::Enter { x, y } | PointerEvent::Motion { x, y } => {
                     let mut needs_redraw = false;
                     let now = std::time::Instant::now();
-                    if now.duration_since(app_data.last_mouse_activity).as_secs_f32() > 0.5 {
-                        app_data.mouse_started_moving = now;
-                        needs_redraw = true;
+                    
+                    if !use_alt {
+                        if now.duration_since(app_data.last_mouse_activity).as_secs_f32() > 0.5 {
+                            app_data.mouse_started_moving = now;
+                            needs_redraw = true;
+                        }
+                        app_data.last_mouse_activity = now;
                     }
-                    app_data.last_mouse_activity = now;
                     
                     let mut new_hovering = false;
                     if let Some(window) = app_data.wayland_state.window.as_ref() {
                         new_hovering = x > window.size.width as f64 - 24.0;
                     }
+                    
+                    if use_alt {
+                        new_hovering = false;
+                    }
+                    
                     if new_hovering != app_data.is_hovering_edge {
                         app_data.is_hovering_edge = new_hovering;
                         needs_redraw = true;
+
+                        if let Some(pointer) = &app_data.wayland_state.pointer {
+                            if let Some(shape_manager) = &app_data.wayland_state.globals.cursor_shape_manager {
+                                let device = shape_manager.get_pointer(pointer, &app_data.queue_handle, ());
+                                let shape = if new_hovering {
+                                    wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
+                                } else {
+                                    if use_alt {
+                                        wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
+                                    } else {
+                                        wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Text
+                                    }
+                                };
+                                device.set_shape(app_data.wayland_state.pointer_serial, shape);
+                                device.destroy();
+                            }
+                        }
                     }
                     
                     if !use_alt {
@@ -488,6 +513,7 @@ pub fn run_event_loop(
                     }
                     app_data.pointer_x = x;
                     app_data.pointer_y = y;
+                    
                     let col_1 = ((x - pad_x) / cell_w).max(0.0) as usize + 1;
                     let row_1 = ((y - pad_y) / cell_h).max(0.0) as usize + 1;
 
@@ -556,6 +582,16 @@ pub fn run_event_loop(
                                 }
                             }
                         }
+                    }
+                }
+                PointerEvent::Leave => {
+                    if !use_alt {
+                        app_data.is_hovering_edge = false;
+                        app_data.is_dragging_scrollbar = false;
+                        app_data.current_thumb_opacity = 0.0;
+                        app_data.current_track_opacity = 0.0;
+                        app_data.wayland_state.force_redraw = true;
+                        app_data.loop_signal.wakeup();
                     }
                 }
                 PointerEvent::Press { button } => {
@@ -903,8 +939,8 @@ pub fn compute_grid_metrics(
         // Center mode: center the grid in the remaining space
         let remaining_w = avail_w - (cols as f64 * native_cell_w);
         let remaining_h = avail_h - (rows as f64 * native_cell_h);
-        pad_x += remaining_w / 2.0;
-        pad_y += remaining_h / 2.0;
+        pad_x += (remaining_w / 2.0).floor();
+        pad_y += (remaining_h / 2.0).floor();
     }
     
     GridMetrics {

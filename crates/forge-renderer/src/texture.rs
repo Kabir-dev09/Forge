@@ -126,8 +126,8 @@ impl Texture {
 
         // 9. Create Sampler
         let sampler_info = vk::SamplerCreateInfo {
-            mag_filter: vk::Filter::LINEAR,
-            min_filter: vk::Filter::LINEAR,
+            mag_filter: vk::Filter::NEAREST,
+            min_filter: vk::Filter::NEAREST,
             address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
             address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
             address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
@@ -137,7 +137,7 @@ impl Texture {
             unnormalized_coordinates: vk::FALSE,
             compare_enable: vk::FALSE,
             compare_op: vk::CompareOp::ALWAYS,
-            mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+            mipmap_mode: vk::SamplerMipmapMode::NEAREST,
             mip_lod_bias: 0.0,
             min_lod: 0.0,
             max_lod: 0.0,

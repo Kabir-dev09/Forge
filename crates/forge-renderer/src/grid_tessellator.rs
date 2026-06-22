@@ -334,12 +334,12 @@ impl GridTessellator {
 
         if let Some((thumb_y, thumb_height, thumb_width, thumb_x, thumb_opacity, track_opacity)) = scrollbar {
             if track_opacity > 0.0 {
-                let track_x = vp_w - thumb_width;
-                let tl = ndc(track_x, 0.0);
-                let br = ndc(vp_w, vp_h);
+                let track_x = thumb_x;
+                let tl = ndc(track_x, 4.0);
+                let br = ndc(track_x + thumb_width, vp_h - 4.0);
                 let uv_tl = [-30.0, 0.0];
                 let uv_br = [-29.0, 1.0];
-                let bg = [0.5, 0.5, 0.5, track_opacity * 0.2];
+                let bg = [0.5, 0.5, 0.5, track_opacity];
                 push_quad(&mut self.vertices, tl, br, uv_tl, uv_br, bg, bg);
             }
 

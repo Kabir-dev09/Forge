@@ -86,7 +86,13 @@ impl<'a> Perform for TerminalPerformer<'a> {
             'T' => self.buffer.scroll_down_in_region(p0 as usize),
             'X' => self.buffer.erase_chars(p0 as usize),
             '@' => self.buffer.insert_chars(p0 as usize),
-            'm' => handle_sgr(params, self.buffer),
+            'm' => {
+                if intermediates.is_empty() {
+                    handle_sgr(params, self.buffer);
+                } else {
+                    tracing::trace!("Unhandled CSI private 'm' with intermediates: {:?}", intermediates);
+                }
+            }
             'r' => {
                 let top = (p0 - 1).max(0) as usize;
                 let bottom = (p1 - 1).max(0) as usize;

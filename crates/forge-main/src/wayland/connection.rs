@@ -18,6 +18,8 @@ pub struct WaylandGlobals {
 
 #[derive(Debug, Clone, Copy)]
 pub enum PointerEvent {
+    Enter { x: f64, y: f64 },
+    Leave,
     Motion { x: f64, y: f64 },
     Press { button: u32 },
     Release { button: u32 },
@@ -44,6 +46,7 @@ pub struct WaylandState {
     pub pointer: Option<wayland_client::protocol::wl_pointer::WlPointer>,
     pub pointer_serial: u32,
     pub cursor_hidden: bool,
+    pub is_hovering_edge: bool,
     pub hide_mouse_when_typing: bool,
     pub is_alt_buffer: bool,
     pub clipboard: Option<crate::wayland::clipboard::ClipboardManager>,
@@ -110,7 +113,8 @@ pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
         pointer: None,
         pointer_serial: 0,
         cursor_hidden: false,
-        hide_mouse_when_typing: false,
+        is_hovering_edge: false,
+        hide_mouse_when_typing: true,
         is_alt_buffer: false,
         clipboard: None,
         frame_ready: true,
