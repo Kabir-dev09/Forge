@@ -11,7 +11,7 @@ Forge is a fast, hardware-accelerated terminal emulator written in Rust. It util
 
 ## Installation
 To install the Forge terminal emulator, please use the `forge-installer` provided in the latest release tag. 
-You can find the latest release [here (v1.0.0)](https://github.com/kabir/forge/releases/tag/v1.0.0).
+You can find the latest release [here (v1.0.0)](https://github.com/Kabir-dev09/Forge/releases/tag/v1.0.0).
 
 ## Build Requirements
 Building Forge requires `cmake` and a C compiler for `mlua` (vendored `luajit`) and `shaderc`.
