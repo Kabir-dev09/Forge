@@ -243,24 +243,22 @@ pub fn extract_config(root: Table, config: &mut ForgeConfig) {
 
     // Keybindings
     if let Ok(Value::Table(bindings_t)) = root.get::<_, Value>("bindings") {
-        for pair in bindings_t.pairs::<String, String>() {
-            if let Ok((key_str, action_str)) = pair {
-                if let Some(keystroke) = forge_core::bindings::KeyStroke::parse(&key_str) {
-                    let action = match action_str.to_lowercase().as_str() {
-                        "copy" => Some(forge_core::bindings::Action::Copy),
-                        "paste" => Some(forge_core::bindings::Action::Paste),
-                        "toggle_fullscreen" | "togglefullscreen" => Some(forge_core::bindings::Action::ToggleFullscreen),
-                        _ => {
-                            tracing::warn!("Unknown action '{}' for keybind '{}'", action_str, key_str);
-                            None
-                        }
-                    };
-                    if let Some(a) = action {
-                        config.keybindings.insert(keystroke, a);
+        for (key_str, action_str) in bindings_t.pairs::<String, String>().flatten() {
+            if let Some(keystroke) = forge_core::bindings::KeyStroke::parse(&key_str) {
+                let action = match action_str.to_lowercase().as_str() {
+                    "copy" => Some(forge_core::bindings::Action::Copy),
+                    "paste" => Some(forge_core::bindings::Action::Paste),
+                    "toggle_fullscreen" | "togglefullscreen" => Some(forge_core::bindings::Action::ToggleFullscreen),
+                    _ => {
+                        tracing::warn!("Unknown action '{}' for keybind '{}'", action_str, key_str);
+                        None
                     }
-                } else {
-                    tracing::warn!("Failed to parse keybind '{}'", key_str);
+                };
+                if let Some(a) = action {
+                    config.keybindings.insert(keystroke, a);
                 }
+            } else {
+                tracing::warn!("Failed to parse keybind '{}'", key_str);
             }
         }
     }

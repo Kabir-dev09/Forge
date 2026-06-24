@@ -118,7 +118,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                         if logo_active { active_modifiers |= forge_core::bindings::modifiers::LOGO; }
                         
                         let mut normalized_keysym = keysym_u32;
-                        if normalized_keysym >= 0x0041 && normalized_keysym <= 0x005A {
+                        if (0x0041..=0x005A).contains(&normalized_keysym) {
                             // Convert uppercase ASCII keysyms to lowercase
                             normalized_keysym += 0x0020;
                         }
@@ -284,9 +284,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     state.cursor_hidden = false;
                     if let Some(shape_manager) = &state.globals.cursor_shape_manager {
                         let device = shape_manager.get_pointer(_pointer, _qh, ());
-                        let shape = if state.is_hovering_edge {
-                            wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
-                        } else if state.is_alt_buffer {
+                        let shape = if state.is_hovering_edge || state.is_alt_buffer {
                             wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
                         } else {
                             wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Text

@@ -1,0 +1,23 @@
+[package]
+name = "forge-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+ash = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+raw-window-handle = { workspace = true }
+bytemuck = { workspace = true }
+fontdue = { workspace = true }
+rustybuzz = "0.20.1"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[features]
+vulkan-test = []
+
+[build-dependencies]
+shaderc = "0.8"

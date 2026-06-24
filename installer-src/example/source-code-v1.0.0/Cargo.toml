@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/forge-main",
+    "crates/forge-core",
+    "crates/forge-renderer",
+    "crates/forge-pty",
+    "crates/forge-config",
+    "crates/forge-plugins", "scratch",
+]
+
+[workspace.dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+bytemuck = { version = "1.16", features = ["derive"] }
+smallvec = "1.11"
+ash = "0.38"
+raw-window-handle = "0.6"
+nix = { version = "0.28", features = ["process", "term", "signal", "fs"] }
+mlua = { version = "0.9", features = ["luajit", "vendored", "send"] }
+notify = "6.1"
+memmap2 = "0.9"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.31", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.2", features = ["client"] }
+rustix = { version = "0.38", features = ["mm", "fs"] }
+calloop = { version = "0.13", features = ["executor"] }
+calloop-wayland-source = "0.3"
+fontdue = { version = "0.8" }
+xkbcommon = { version = "0.7", features = ["wayland"] }
+unicode-segmentation = { version = "1.11" }
+unicode-width = { version = "0.1" }
+vte = { version = "0.13" }
+crossbeam-channel = { version = "0.5" }
+dirs = "5.0"

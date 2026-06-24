@@ -267,7 +267,7 @@ impl ScreenBuffer {
 
         // Shift existing characters to the right
         for c in (0..count).rev() {
-            self.grid[row].cells[col + shift + c] = self.grid[row].cells[col + c].clone();
+            self.grid[row].cells[col + shift + c] = self.grid[row].cells[col + c];
         }
 
         // Fill the new gap with default cells
@@ -289,7 +289,7 @@ impl ScreenBuffer {
 
         // Shift existing characters to the left
         for c in 0..count {
-            self.grid[row].cells[col + c] = self.grid[row].cells[col + shift + c].clone();
+            self.grid[row].cells[col + c] = self.grid[row].cells[col + shift + c];
         }
 
         // Fill the end with default cells
@@ -564,7 +564,7 @@ impl ScreenBuffer {
             let default_cell = self.default_cell();
             for r in &mut self.grid {
                 for c in &mut r.cells {
-                    *c = default_cell.clone();
+                    *c = default_cell;
                 }
             }
             self.cursor = CursorPos { row: 0, col: 0 };

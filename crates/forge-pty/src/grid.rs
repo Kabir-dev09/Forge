@@ -1,4 +1,4 @@
-use forge_core::cell::{Cell, CellWidth};
+use forge_core::cell::Cell;
 
 #[derive(Clone)]
 pub struct FlatGrid {
@@ -25,12 +25,12 @@ impl FlatGrid {
         let min_cols = self.cols.min(new_cols);
         let min_rows = self.rows.min(new_rows);
         
-        for r in 0..min_rows {
+        for (r, wrapped_item) in new_wrapped.iter_mut().enumerate().take(min_rows) {
             let src_start = r * self.cols;
             let dst_start = r * new_cols;
             new_cells[dst_start..dst_start + min_cols]
                 .copy_from_slice(&self.cells[src_start..src_start + min_cols]);
-            new_wrapped[r] = self.wrapped[r];
+            *wrapped_item = self.wrapped[r];
         }
         
         self.cells = new_cells;

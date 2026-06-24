@@ -25,16 +25,13 @@ impl Default for FontConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum PaddingBalance {
+    #[default]
     Center,
     Fill,
 }
 
-impl Default for PaddingBalance {
-    fn default() -> Self {
-        PaddingBalance::Center
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BehaviorConfig {
@@ -197,29 +194,20 @@ impl Default for ThemeConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum BrailleStyle {
     Solid,
+    #[default]
     Dots,
 }
 
-impl Default for BrailleStyle {
-    fn default() -> Self {
-        BrailleStyle::Dots
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct RenderConfig {
     pub braille_style: BrailleStyle,
 }
 
-impl Default for RenderConfig {
-    fn default() -> Self {
-        Self {
-            braille_style: BrailleStyle::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForgeConfig {

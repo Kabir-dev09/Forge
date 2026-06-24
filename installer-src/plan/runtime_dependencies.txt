@@ -1,0 +1,6 @@
+vulkan-icd-loader
+wayland-client
+xkbcommon
+libffi
+luajit
+wayland-compositor

@@ -6,7 +6,7 @@ members = [
     "crates/forge-renderer",
     "crates/forge-pty",
     "crates/forge-config",
-    "crates/forge-plugins", "scratch",
+    "crates/forge-plugins",
 ]
 
 [workspace.dependencies]

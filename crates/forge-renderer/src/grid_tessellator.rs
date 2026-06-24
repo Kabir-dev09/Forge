@@ -87,7 +87,7 @@ impl GridTessellator {
                 }
             }
         }
-        self.last_selection = selection.clone();
+        self.last_selection = selection;
 
         let ndc = |px_x: f32, px_y: f32| -> [f32; 2] {
             [(px_x / vp_w) * 2.0 - 1.0, (px_y / vp_h) * 2.0 - 1.0]
@@ -150,7 +150,7 @@ impl GridTessellator {
                     bg = selection_bg;
                 }
                 
-                let is_cursor = cursor_visible_phase && cursor.map_or(false, |c| col_idx == c.0 && row_idx == c.1);
+                let is_cursor = cursor_visible_phase && cursor.is_some_and(|c| col_idx == c.0 && row_idx == c.1);
                 let is_block_cursor = is_cursor && cursor_style == forge_core::config_registry::CursorStyle::Block;
                 if is_block_cursor {
                     fg = default_bg;
@@ -270,7 +270,7 @@ impl GridTessellator {
                                 let uv_tl = [proc_id, 0.0];
                                 let uv_br = [proc_id + 1.0, 1.0];
                                 push_quad(&mut row_tess.fg_vertices, g_tl, g_br, uv_tl, uv_br, fg, bg);
-                            } else if c >= '\u{2800}' && c <= '\u{28FF}' {
+                            } else if ('\u{2800}'..='\u{28FF}').contains(&c) {
                                 let pattern = c as u32 - 0x2800;
                                 let g_tl = ndc(px_x, px_y);
                                 let g_br = ndc(px_x + cell_w, px_y + cell_h);

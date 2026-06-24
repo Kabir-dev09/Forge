@@ -1,9 +1,8 @@
-use calloop::{EventLoop, Interest, Mode, PostAction};
+use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
 use wayland_client::EventQueue;
 use forge_core::{ForgeError, Result};
 use crate::wayland::connection::WaylandState;
-use calloop::generic::Generic;
 
 pub struct AppData {
     pub wayland_state: WaylandState,
@@ -155,7 +154,7 @@ pub fn run_event_loop(
             }
             let data = &read_buf[..n as usize];
             let mut sb = sb_clone.write().unwrap();
-            let responses = vte_processor.process(data, &mut *sb);
+            let responses = vte_processor.process(data, &mut sb);
             sb.view_scroll_to_bottom();
             drop(sb); // Release the lock before writing to PTY (avoid deadlocks)
             
@@ -203,7 +202,7 @@ pub fn run_event_loop(
             }
         }
 
-        println!("[PROFILER] Event loop wakeup!");
+
         event_loop.dispatch(timeout, &mut app_data).map_err(|e| ForgeError::Other(e.to_string()))?;
         if app_data.wayland_state.is_alt_buffer != app_data.screen_buffer.write().unwrap().use_alt_buffer {
             app_data.wayland_state.is_alt_buffer = app_data.screen_buffer.write().unwrap().use_alt_buffer;
@@ -823,7 +822,7 @@ pub fn run_event_loop(
                         if thumb_opacity > 0.01 || track_opacity > 0.01 {
                             scrollbar_state = Some((thumb_y as f32, thumb_height_pixels as f32, thumb_width, thumb_x, thumb_opacity, track_opacity));
                         }
-                        app_data.last_scrollbar_state = Some((thumb_y as f64, thumb_height_pixels as f64));
+                        app_data.last_scrollbar_state = Some((thumb_y, thumb_height_pixels));
                     }
                 }
 
@@ -837,7 +836,7 @@ pub fn run_event_loop(
                 );
                 let selection_bg_color = app_data.config.theme.selection_bg.to_srgb_linear();
                 let selection_bg_arr = [selection_bg_color.r, selection_bg_color.g, selection_bg_color.b, selection_bg_color.a];
-                let cursor_style = sb.cursor_style_override.clone().unwrap_or_else(|| app_data.config.cursor.style.clone());
+                let cursor_style = sb.cursor_style_override.unwrap_or(app_data.config.cursor.style);
                 let cursor_visible_phase = app_data.cursor_visible_phase;
                 
                 let needs_recreate = match renderer.render_grid(

@@ -196,6 +196,7 @@ impl Renderer {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render_grid(
         &mut self,
         grid: &[&[forge_core::cell::Cell]],

@@ -1,0 +1,10 @@
+[package]
+name = "forge-plugins"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+forge-config = { path = "../forge-config" }
+tracing = { workspace = true }
+anyhow = { workspace = true }

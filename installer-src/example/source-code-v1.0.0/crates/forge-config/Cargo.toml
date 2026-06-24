@@ -1,0 +1,13 @@
+[package]
+name = "forge-config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+mlua = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+notify = { workspace = true }
+crossbeam-channel = { workspace = true }

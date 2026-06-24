@@ -19,6 +19,12 @@ pub struct ShaperCache {
     cache: HashMap<TextRunKey, Vec<ShapedGlyph>>,
 }
 
+impl Default for ShaperCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShaperCache {
     pub fn new() -> Self {
         Self {
@@ -28,8 +34,8 @@ impl ShaperCache {
 
     pub fn shape_run(&mut self, key: &TextRunKey, rasterizer: &super::rasterizer::FontRasterizer, bold_rasterizer: Option<&super::rasterizer::FontRasterizer>, px_size: f32) -> &[ShapedGlyph] {
         if !self.cache.contains_key(key) {
-            let active_rasterizer = if key.is_bold && bold_rasterizer.is_some() {
-                bold_rasterizer.unwrap()
+            let active_rasterizer = if key.is_bold {
+                bold_rasterizer.unwrap_or(rasterizer)
             } else {
                 rasterizer
             };
