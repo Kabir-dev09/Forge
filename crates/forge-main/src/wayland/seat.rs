@@ -1,7 +1,7 @@
+use std::os::unix::io::AsRawFd;
 use wayland_client::protocol::{wl_keyboard, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use xkbcommon::xkb;
-use std::os::unix::io::AsRawFd;
 
 use super::connection::WaylandState;
 
@@ -52,10 +52,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                             .len(size as usize)
                             .map(fd.as_raw_fd())
                     };
-                    
+
                     if let Ok(mmap) = mmap {
                         let keymap_bytes = mmap.split(|&b| b == 0).next().unwrap_or(&mmap);
-                        
+
                         if let Ok(keymap_str) = std::str::from_utf8(keymap_bytes) {
                             let keymap = xkb::Keymap::new_from_string(
                                 &state.xkb_context,
@@ -63,7 +63,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                 xkb::KEYMAP_FORMAT_TEXT_V1,
                                 xkb::KEYMAP_COMPILE_NO_FLAGS,
                             );
-                            
+
                             if let Some(km) = keymap {
                                 state.xkb_state = Some(xkb::State::new(&km));
                                 tracing::info!("xkb keymap loaded successfully.");
@@ -78,45 +78,67 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                     }
                 }
             }
-            
+
             wl_keyboard::Event::RepeatInfo { rate, delay } => {
                 tracing::info!("Keyboard repeat info: rate={}, delay={}", rate, delay);
                 state.repeat_info = Some((rate, delay));
             }
-            
-            wl_keyboard::Event::Modifiers { mods_depressed, mods_latched, mods_locked, group, .. } => {
+
+            wl_keyboard::Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
                 if let Some(xkb_state) = &mut state.xkb_state {
                     xkb_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
                 }
             }
-            
-            wl_keyboard::Event::Key { key, state: key_state, .. } => {
+
+            wl_keyboard::Event::Key {
+                key,
+                state: key_state,
+                ..
+            } => {
                 let key_state = match key_state {
                     wayland_client::WEnum::Value(s) => s,
                     _ => return,
                 };
                 if key_state == wl_keyboard::KeyState::Pressed {
-                    let keycode = key + 8; 
-                    
+                    let keycode = key + 8;
+
                     if let Some(xkb_state) = &state.xkb_state {
                         let keysym = xkb_state.key_get_one_sym(keycode.into());
                         let utf8 = xkb_state.key_get_utf8(keycode.into());
-                        
+
                         tracing::info!("Key pressed: sym={:?}, char={:?}", keysym, utf8);
-                        
+
                         let mut bytes = Vec::new();
                         let keysym_u32: u32 = keysym.into();
-                        let ctrl_active = xkb_state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE);
-                        let shift_active = xkb_state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
-                        let alt_active = xkb_state.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE);
-                        let logo_active = xkb_state.mod_name_is_active(xkb::MOD_NAME_LOGO, xkb::STATE_MODS_EFFECTIVE);
-                        
+                        let ctrl_active = xkb_state
+                            .mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE);
+                        let shift_active = xkb_state
+                            .mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
+                        let alt_active = xkb_state
+                            .mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE);
+                        let logo_active = xkb_state
+                            .mod_name_is_active(xkb::MOD_NAME_LOGO, xkb::STATE_MODS_EFFECTIVE);
+
                         let mut active_modifiers = forge_core::bindings::modifiers::NONE;
-                        if ctrl_active { active_modifiers |= forge_core::bindings::modifiers::CTRL; }
-                        if shift_active { active_modifiers |= forge_core::bindings::modifiers::SHIFT; }
-                        if alt_active { active_modifiers |= forge_core::bindings::modifiers::ALT; }
-                        if logo_active { active_modifiers |= forge_core::bindings::modifiers::LOGO; }
-                        
+                        if ctrl_active {
+                            active_modifiers |= forge_core::bindings::modifiers::CTRL;
+                        }
+                        if shift_active {
+                            active_modifiers |= forge_core::bindings::modifiers::SHIFT;
+                        }
+                        if alt_active {
+                            active_modifiers |= forge_core::bindings::modifiers::ALT;
+                        }
+                        if logo_active {
+                            active_modifiers |= forge_core::bindings::modifiers::LOGO;
+                        }
+
                         let mut normalized_keysym = keysym_u32;
                         if (0x0041..=0x005A).contains(&normalized_keysym) {
                             // Convert uppercase ASCII keysyms to lowercase
@@ -127,14 +149,17 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                             modifiers: active_modifiers,
                             keysym: normalized_keysym,
                         };
-                        
+
                         if let Some(action) = state.keybindings.get(&keystroke) {
                             match action {
                                 forge_core::bindings::Action::Copy => {
                                     tracing::info!("Intercepted Copy via keybind");
                                 }
                                 forge_core::bindings::Action::Paste => {
-                                    tracing::info!("[PASTE TIMING] Intercepted Paste at {:?}", std::time::Instant::now());
+                                    tracing::info!(
+                                        "[PASTE TIMING] Intercepted Paste at {:?}",
+                                        std::time::Instant::now()
+                                    );
                                     if let Some(clip) = &state.clipboard {
                                         clip.request_paste();
                                         state.needs_flush = true;
@@ -156,25 +181,46 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                             }
                         } else {
                             match keysym_u32 {
-                                xkbcommon::xkb::keysyms::KEY_Return => bytes.extend_from_slice(b"\r"),
-                                xkbcommon::xkb::keysyms::KEY_BackSpace => bytes.extend_from_slice(b"\x7f"),
+                                xkbcommon::xkb::keysyms::KEY_Return => {
+                                    bytes.extend_from_slice(b"\r")
+                                }
+                                xkbcommon::xkb::keysyms::KEY_BackSpace => {
+                                    bytes.extend_from_slice(b"\x7f")
+                                }
                                 xkbcommon::xkb::keysyms::KEY_Tab => bytes.extend_from_slice(b"\t"),
-                                xkbcommon::xkb::keysyms::KEY_Escape => bytes.extend_from_slice(b"\x1b"),
-                                xkbcommon::xkb::keysyms::KEY_Up => bytes.extend_from_slice(b"\x1b[A"),
-                                xkbcommon::xkb::keysyms::KEY_Down => bytes.extend_from_slice(b"\x1b[B"),
-                                xkbcommon::xkb::keysyms::KEY_Right => bytes.extend_from_slice(b"\x1b[C"),
-                                xkbcommon::xkb::keysyms::KEY_Left => bytes.extend_from_slice(b"\x1b[D"),
-                                xkbcommon::xkb::keysyms::KEY_Delete => bytes.extend_from_slice(b"\x1b[3~"),
-                                xkbcommon::xkb::keysyms::KEY_Home => bytes.extend_from_slice(b"\x1b[H"),
-                                xkbcommon::xkb::keysyms::KEY_End => bytes.extend_from_slice(b"\x1b[F"),
+                                xkbcommon::xkb::keysyms::KEY_Escape => {
+                                    bytes.extend_from_slice(b"\x1b")
+                                }
+                                xkbcommon::xkb::keysyms::KEY_Up => {
+                                    bytes.extend_from_slice(b"\x1b[A")
+                                }
+                                xkbcommon::xkb::keysyms::KEY_Down => {
+                                    bytes.extend_from_slice(b"\x1b[B")
+                                }
+                                xkbcommon::xkb::keysyms::KEY_Right => {
+                                    bytes.extend_from_slice(b"\x1b[C")
+                                }
+                                xkbcommon::xkb::keysyms::KEY_Left => {
+                                    bytes.extend_from_slice(b"\x1b[D")
+                                }
+                                xkbcommon::xkb::keysyms::KEY_Delete => {
+                                    bytes.extend_from_slice(b"\x1b[3~")
+                                }
+                                xkbcommon::xkb::keysyms::KEY_Home => {
+                                    bytes.extend_from_slice(b"\x1b[H")
+                                }
+                                xkbcommon::xkb::keysyms::KEY_End => {
+                                    bytes.extend_from_slice(b"\x1b[F")
+                                }
                                 _ => {
                                     if ctrl_active && !utf8.is_empty() {
-                                        let c = utf8.chars().next().unwrap();
-                                        if c.is_ascii_alphabetic() {
-                                            let byte = c.to_ascii_lowercase() as u8 - b'a' + 1;
-                                            bytes.push(byte);
-                                        } else {
-                                            bytes.extend_from_slice(utf8.as_bytes());
+                                        if let Some(c) = utf8.chars().next() {
+                                            if c.is_ascii_alphabetic() {
+                                                let byte = c.to_ascii_lowercase() as u8 - b'a' + 1;
+                                                bytes.push(byte);
+                                            } else {
+                                                bytes.extend_from_slice(utf8.as_bytes());
+                                            }
                                         }
                                     } else if !utf8.is_empty() {
                                         bytes.extend_from_slice(utf8.as_bytes());
@@ -182,7 +228,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                 }
                             }
                         }
-                        
+
                         if !bytes.is_empty() {
                             if state.hide_mouse_when_typing && !state.cursor_hidden {
                                 if let Some(pointer) = &state.pointer {
@@ -190,19 +236,21 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                     pointer.set_cursor(state.pointer_serial, None, 0, 0);
                                 }
                             }
-                            
+
                             if let Some(tx) = &state.key_sender {
                                 let _ = tx.send(bytes.clone());
                             }
-                            
+
                             // Start auto-repeat if enabled
                             if let Some((rate, delay)) = state.repeat_info {
                                 if rate > 0 {
-                                    state.repeating_key = Some(crate::wayland::connection::RepeatingKey {
-                                        key,
-                                        bytes,
-                                        next_repeat_time: std::time::Instant::now() + std::time::Duration::from_millis(delay as u64),
-                                    });
+                                    state.repeating_key =
+                                        Some(crate::wayland::connection::RepeatingKey {
+                                            key,
+                                            bytes,
+                                            next_repeat_time: std::time::Instant::now()
+                                                + std::time::Duration::from_millis(delay as u64),
+                                        });
                                 }
                             }
                         }
@@ -215,7 +263,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                     }
                 }
             }
-            
+
             wl_keyboard::Event::Leave { .. } => {
                 state.repeating_key = None;
             }
@@ -248,8 +296,8 @@ mod tests {
     }
 }
 
-use wayland_client::protocol::wl_pointer;
 use crate::wayland::connection::PointerEvent;
+use wayland_client::protocol::wl_pointer;
 
 impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
     fn event(
@@ -261,16 +309,24 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
         _qh: &QueueHandle<Self>,
     ) {
         match event {
-            wl_pointer::Event::Enter { serial, surface: _, surface_x, surface_y } => {
+            wl_pointer::Event::Enter {
+                serial,
+                surface: _,
+                surface_x,
+                surface_y,
+            } => {
                 state.pointer = Some(_pointer.clone());
                 state.pointer_serial = serial;
-                
+
                 if state.cursor_hidden {
                     _pointer.set_cursor(serial, None, 0, 0);
                 }
-                
+
                 if let Some(tx) = &state.pointer_sender {
-                    let _ = tx.send(PointerEvent::Enter { x: surface_x, y: surface_y });
+                    let _ = tx.send(PointerEvent::Enter {
+                        x: surface_x,
+                        y: surface_y,
+                    });
                 }
             }
             wl_pointer::Event::Leave { .. } => {
@@ -279,7 +335,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     let _ = tx.send(PointerEvent::Leave);
                 }
             }
-            wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
                 if state.cursor_hidden {
                     state.cursor_hidden = false;
                     if let Some(shape_manager) = &state.globals.cursor_shape_manager {
@@ -293,22 +353,37 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         device.destroy();
                     }
                 }
-                
+
                 if let Some(tx) = &state.pointer_sender {
-                    let _ = tx.send(PointerEvent::Motion { x: surface_x, y: surface_y });
+                    let _ = tx.try_send(PointerEvent::Motion {
+                        x: surface_x,
+                        y: surface_y,
+                    });
                 }
             }
-            wl_pointer::Event::Button { button, state: btn_state, .. } => {
+            wl_pointer::Event::Button {
+                button,
+                state: btn_state,
+                ..
+            } => {
                 if let Some(tx) = &state.pointer_sender {
                     let evt = match btn_state {
-                        wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed) => PointerEvent::Press { button },
-                        wayland_client::WEnum::Value(wl_pointer::ButtonState::Released) => PointerEvent::Release { button },
+                        wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed) => {
+                            PointerEvent::Press { button }
+                        }
+                        wayland_client::WEnum::Value(wl_pointer::ButtonState::Released) => {
+                            PointerEvent::Release { button }
+                        }
                         _ => return,
                     };
                     let _ = tx.send(evt);
                 }
             }
-            wl_pointer::Event::Axis { axis: wayland_client::WEnum::Value(wl_pointer::Axis::VerticalScroll), value, .. } => {
+            wl_pointer::Event::Axis {
+                axis: wayland_client::WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } => {
                 if let Some(tx) = &state.pointer_sender {
                     let _ = tx.send(PointerEvent::Axis { amount: value });
                 }

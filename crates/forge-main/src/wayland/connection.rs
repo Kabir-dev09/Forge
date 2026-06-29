@@ -1,9 +1,11 @@
-use forge_core::{ForgeError, Result};
-use wayland_client::protocol::{wl_buffer, wl_compositor, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
-use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
-use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use crate::wayland::window::WaylandWindow;
+use forge_core::{ForgeError, Result};
+use wayland_client::globals::{registry_queue_init, GlobalListContents};
+use wayland_client::protocol::{
+    wl_buffer, wl_compositor, wl_region, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
+};
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
+use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use xkbcommon::xkb;
 
 pub struct WaylandGlobals {
@@ -14,6 +16,7 @@ pub struct WaylandGlobals {
     pub data_device_manager: Option<wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager>,
     pub zxdg_decoration_manager: Option<wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     pub cursor_shape_manager: Option<wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
+    pub kde_blur_manager: Option<wayland_protocols_plasma::blur::client::org_kde_kwin_blur_manager::OrgKdeKwinBlurManager>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,7 +59,8 @@ pub struct WaylandState {
     pub force_redraw: bool,
     pub repeat_info: Option<(i32, i32)>, // (rate, delay)
     pub repeating_key: Option<RepeatingKey>,
-    pub keybindings: std::collections::HashMap<forge_core::bindings::KeyStroke, forge_core::bindings::Action>,
+    pub keybindings:
+        std::collections::HashMap<forge_core::bindings::KeyStroke, forge_core::bindings::Action>,
 }
 
 pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
@@ -81,13 +85,39 @@ pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
         .map_err(|e| ForgeError::Wayland(format!("Failed to bind xdg_wm_base: {}", e)))?;
 
     let wl_seat: Option<wl_seat::WlSeat> = globals_list.bind(&qh, 7..=8, ()).ok();
-    
-    let data_device_manager: Option<wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager> = 
-        globals_list.bind(&qh, 1..=3, ()).ok();
+    if wl_seat.is_none() {
+        tracing::warn!(
+            "Wayland wl_seat global is unavailable; keyboard and pointer input will be disabled."
+        );
+    }
+
+    let data_device_manager: Option<
+        wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager,
+    > = globals_list.bind(&qh, 1..=3, ()).ok();
+    if data_device_manager.is_none() {
+        tracing::warn!("Wayland wl_data_device_manager global is unavailable; clipboard integration will be disabled.");
+    }
 
     let zxdg_decoration_manager = globals_list.bind(&qh, 1..=1, ()).ok();
+    if zxdg_decoration_manager.is_none() {
+        tracing::debug!(
+            "Wayland server-side decoration manager is unavailable; using client defaults."
+        );
+    }
 
     let cursor_shape_manager = globals_list.bind(&qh, 1..=1, ()).ok();
+    if cursor_shape_manager.is_none() {
+        tracing::debug!(
+            "Wayland cursor shape manager is unavailable; cursor shape updates will use defaults."
+        );
+    }
+
+    let kde_blur_manager = globals_list.bind(&qh, 1..=1, ()).ok();
+    if kde_blur_manager.is_none() {
+        tracing::debug!(
+            "KDE/KWin blur protocol is unavailable; blur will use compositor-rule fallback."
+        );
+    }
 
     let globals = WaylandGlobals {
         compositor,
@@ -97,6 +127,7 @@ pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
         data_device_manager,
         zxdg_decoration_manager,
         cursor_shape_manager,
+        kde_blur_manager,
     };
 
     let state = WaylandState {
@@ -186,8 +217,6 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for WaylandState {
     }
 }
 
-
-
 impl Dispatch<wl_surface::WlSurface, ()> for WaylandState {
     fn event(
         _state: &mut Self,
@@ -241,21 +270,25 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for WaylandState {
         _qhandle: &QueueHandle<Self>,
     ) {
         match event {
-            xdg_toplevel::Event::Configure { width, height, states } => {
+            xdg_toplevel::Event::Configure {
+                width,
+                height,
+                states,
+            } => {
                 let mut is_maximized = false;
                 let mut is_fullscreen = false;
                 let mut is_resizing = false;
                 let mut is_activated = false;
-                
+
                 // Parse states
                 for state_bytes in states.chunks_exact(4) {
                     if let Ok(state_val) = TryInto::<[u8; 4]>::try_into(state_bytes) {
                         let state = u32::from_ne_bytes(state_val);
                         match state {
-                            2 => is_maximized = true, // xdg_toplevel::State::Maximized
+                            2 => is_maximized = true,  // xdg_toplevel::State::Maximized
                             3 => is_fullscreen = true, // xdg_toplevel::State::Fullscreen
-                            4 => is_resizing = true, // xdg_toplevel::State::Resizing
-                            5 => is_activated = true, // xdg_toplevel::State::Activated
+                            4 => is_resizing = true,   // xdg_toplevel::State::Resizing
+                            5 => is_activated = true,  // xdg_toplevel::State::Activated
                             _ => {}
                         }
                     }
@@ -308,6 +341,18 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for WaylandState {
     }
 }
 
+impl Dispatch<wl_region::WlRegion, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_region::WlRegion,
+        _event: <wl_region::WlRegion as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 impl wayland_client::Dispatch<wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, ()> for WaylandState {
     fn event(
         _state: &mut Self,
@@ -317,6 +362,40 @@ impl wayland_client::Dispatch<wayland_protocols::xdg::decoration::zv1::client::z
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {}
+}
+
+impl
+    wayland_client::Dispatch<
+        wayland_protocols_plasma::blur::client::org_kde_kwin_blur_manager::OrgKdeKwinBlurManager,
+        (),
+    > for WaylandState
+{
+    fn event(
+        _state: &mut Self,
+        _proxy: &wayland_protocols_plasma::blur::client::org_kde_kwin_blur_manager::OrgKdeKwinBlurManager,
+        _event: <wayland_protocols_plasma::blur::client::org_kde_kwin_blur_manager::OrgKdeKwinBlurManager as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl
+    wayland_client::Dispatch<
+        wayland_protocols_plasma::blur::client::org_kde_kwin_blur::OrgKdeKwinBlur,
+        (),
+    > for WaylandState
+{
+    fn event(
+        _state: &mut Self,
+        _proxy: &wayland_protocols_plasma::blur::client::org_kde_kwin_blur::OrgKdeKwinBlur,
+        _event: <wayland_protocols_plasma::blur::client::org_kde_kwin_blur::OrgKdeKwinBlur as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 impl wayland_client::Dispatch<wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, ()> for WaylandState {

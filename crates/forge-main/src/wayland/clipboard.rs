@@ -1,11 +1,14 @@
-use wayland_client::{
-    protocol::{wl_data_device_manager::WlDataDeviceManager, wl_seat::WlSeat, wl_data_device::WlDataDevice, wl_data_source::WlDataSource, wl_data_offer::WlDataOffer},
-    QueueHandle, Connection, Dispatch,
-};
-use std::os::unix::io::{FromRawFd, IntoRawFd};
-use std::io::{Read};
 use crate::wayland::connection::WaylandState;
+use std::io::Read;
+use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex};
+use wayland_client::{
+    protocol::{
+        wl_data_device::WlDataDevice, wl_data_device_manager::WlDataDeviceManager,
+        wl_data_offer::WlDataOffer, wl_data_source::WlDataSource, wl_seat::WlSeat,
+    },
+    Connection, Dispatch, QueueHandle,
+};
 
 pub struct ClipboardManager {
     pub manager: WlDataDeviceManager,
@@ -18,10 +21,10 @@ pub struct ClipboardManager {
 
 impl ClipboardManager {
     pub fn new(manager: WlDataDeviceManager) -> Self {
-        Self { 
-            manager, 
-            device: None, 
-            current_offer: None, 
+        Self {
+            manager,
+            device: None,
+            current_offer: None,
             stored_text: Arc::new(Mutex::new(String::new())),
             paste_sender: None,
             loop_signal: None,
@@ -40,7 +43,7 @@ impl ClipboardManager {
         let source = self.manager.create_data_source(qh, ());
         source.offer("text/plain;charset=utf-8".to_string());
         source.offer("text/plain".to_string());
-        
+
         if let Some(device) = &self.device {
             device.set_selection(Some(&source), serial);
         }
@@ -51,8 +54,13 @@ impl ClipboardManager {
             let mut fds = [0_i32; 2];
             unsafe { libc::pipe(fds.as_mut_ptr()) };
 
-            tracing::info!("[PASTE TIMING] Sending offer.receive at {:?}", std::time::Instant::now());
-            offer.receive("text/plain;charset=utf-8".to_string(), unsafe { std::os::fd::BorrowedFd::borrow_raw(fds[1]) });
+            tracing::info!(
+                "[PASTE TIMING] Sending offer.receive at {:?}",
+                std::time::Instant::now()
+            );
+            offer.receive("text/plain;charset=utf-8".to_string(), unsafe {
+                std::os::fd::BorrowedFd::borrow_raw(fds[1])
+            });
             unsafe { libc::close(fds[1]) };
 
             let read_fd = fds[0];
@@ -61,13 +69,22 @@ impl ClipboardManager {
             std::thread::spawn(move || {
                 let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
                 let mut content = String::new();
-                tracing::info!("[PASTE TIMING] Background thread starting read_to_string at {:?}", std::time::Instant::now());
+                tracing::info!(
+                    "[PASTE TIMING] Background thread starting read_to_string at {:?}",
+                    std::time::Instant::now()
+                );
                 if file.read_to_string(&mut content).is_ok() {
-                    tracing::info!("[PASTE TIMING] Background thread finished read_to_string at {:?}", std::time::Instant::now());
+                    tracing::info!(
+                        "[PASTE TIMING] Background thread finished read_to_string at {:?}",
+                        std::time::Instant::now()
+                    );
                     let processed_content = content.replace("\r\n", "\r").replace('\n', "\r");
                     if let Some(tx) = paste_sender {
                         let _ = tx.send(processed_content.into_bytes());
-                        tracing::info!("[PASTE TIMING] Background thread sent to paste_sender at {:?}", std::time::Instant::now());
+                        tracing::info!(
+                            "[PASTE TIMING] Background thread sent to paste_sender at {:?}",
+                            std::time::Instant::now()
+                        );
                         if let Some(sig) = loop_signal {
                             sig.wakeup();
                         }
@@ -86,7 +103,8 @@ impl Dispatch<WlDataDeviceManager, ()> for WaylandState {
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-    ) {}
+    ) {
+    }
 }
 
 impl Dispatch<WlDataDevice, ()> for WaylandState {
@@ -127,7 +145,7 @@ impl Dispatch<WlDataOffer, ()> for WaylandState {
     ) {
         if let wayland_client::protocol::wl_data_offer::Event::Offer { mime_type } = event {
             if mime_type == "text/plain;charset=utf-8" || mime_type == "text/plain" {
-                // accept it? It's not strictly necessary for simple clipboard, 
+                // accept it? It's not strictly necessary for simple clipboard,
                 // but good practice. `offer.accept(...)` can be called here.
             }
         }

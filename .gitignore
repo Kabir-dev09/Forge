@@ -2,7 +2,9 @@
 /Cargo.lock
 
 # Test and dev scripts
-/etc/
+# /notes/
+/agy
+
 # OS/IDE
 .DS_Store
 .idea/

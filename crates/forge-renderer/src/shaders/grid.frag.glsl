@@ -108,7 +108,7 @@ void main() {
             return;
         } else if (proc_id == -30.0 || proc_id == -31.0) {
             // DA06m - Magically recover the exact physical pixel dimensions of this quad!
-            float w = 1.0 / fwidth(local.x); // This will be 8.0
+            float w = 1.0 / fwidth(local.x);
             float h = 1.0 / fwidth(local.y);
 
             float px_x = local.x * w;
@@ -234,7 +234,7 @@ void main() {
                 d = 1.0 - (local.x + local.y);
             }
             
-            float pixel_w = fwidth(v_tex_coord.x);
+            float pixel_w = 1.0 / pc.cell_size.x;
             float edge = pixel_w * 0.5;
             float alpha = smoothstep(edge, -edge, d);
             

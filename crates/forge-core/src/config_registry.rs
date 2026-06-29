@@ -24,14 +24,12 @@ impl Default for FontConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum PaddingBalance {
     #[default]
     Center,
     Fill,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BehaviorConfig {
@@ -91,6 +89,35 @@ impl Default for WindowConfig {
             opacity: 1.0,
             title: "Forge".to_string(),
             decorations: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlurMethod {
+    #[default]
+    Auto,
+    Kde,
+    External,
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlurConfig {
+    pub enabled: bool,
+    pub method: BlurMethod,
+    /// Advisory only. Wayland compositor blur protocols used by Forge do not
+    /// expose a portable client-controlled radius.
+    pub radius: u32,
+}
+
+impl Default for BlurConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            method: BlurMethod::Auto,
+            radius: 0,
         }
     }
 }
@@ -166,27 +193,127 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            background: Color { r: 26, g: 27, b: 38, a: 255 },
-            foreground: Color { r: 192, g: 202, b: 245, a: 255 },
-            cursor_color: Color { r: 192, g: 202, b: 245, a: 255 },
-            selection_bg: Color { r: 65, g: 72, b: 104, a: 200 },
+            background: Color {
+                r: 26,
+                g: 27,
+                b: 38,
+                a: 255,
+            },
+            foreground: Color {
+                r: 192,
+                g: 202,
+                b: 245,
+                a: 255,
+            },
+            cursor_color: Color {
+                r: 192,
+                g: 202,
+                b: 245,
+                a: 255,
+            },
+            selection_bg: Color {
+                r: 65,
+                g: 72,
+                b: 104,
+                a: 200,
+            },
             ansi_colors: [
-                Color { r: 65, g: 72, b: 104, a: 255 },   // 0: Black
-                Color { r: 247, g: 118, b: 142, a: 255 }, // 1: Red
-                Color { r: 158, g: 206, b: 106, a: 255 }, // 2: Green
-                Color { r: 224, g: 175, b: 104, a: 255 }, // 3: Yellow
-                Color { r: 122, g: 162, b: 247, a: 255 }, // 4: Blue
-                Color { r: 187, g: 154, b: 247, a: 255 }, // 5: Magenta
-                Color { r: 125, g: 207, b: 255, a: 255 }, // 6: Cyan
-                Color { r: 192, g: 202, b: 245, a: 255 }, // 7: White
-                Color { r: 65, g: 72, b: 104, a: 255 },   // 8: Bright Black
-                Color { r: 247, g: 118, b: 142, a: 255 }, // 9: Bright Red
-                Color { r: 158, g: 206, b: 106, a: 255 }, // 10: Bright Green
-                Color { r: 224, g: 175, b: 104, a: 255 }, // 11: Bright Yellow
-                Color { r: 122, g: 162, b: 247, a: 255 }, // 12: Bright Blue
-                Color { r: 187, g: 154, b: 247, a: 255 }, // 13: Bright Magenta
-                Color { r: 125, g: 207, b: 255, a: 255 }, // 14: Bright Cyan
-                Color { r: 192, g: 202, b: 245, a: 255 }, // 15: Bright White
+                Color {
+                    r: 65,
+                    g: 72,
+                    b: 104,
+                    a: 255,
+                }, // 0: Black
+                Color {
+                    r: 247,
+                    g: 118,
+                    b: 142,
+                    a: 255,
+                }, // 1: Red
+                Color {
+                    r: 158,
+                    g: 206,
+                    b: 106,
+                    a: 255,
+                }, // 2: Green
+                Color {
+                    r: 224,
+                    g: 175,
+                    b: 104,
+                    a: 255,
+                }, // 3: Yellow
+                Color {
+                    r: 122,
+                    g: 162,
+                    b: 247,
+                    a: 255,
+                }, // 4: Blue
+                Color {
+                    r: 187,
+                    g: 154,
+                    b: 247,
+                    a: 255,
+                }, // 5: Magenta
+                Color {
+                    r: 125,
+                    g: 207,
+                    b: 255,
+                    a: 255,
+                }, // 6: Cyan
+                Color {
+                    r: 192,
+                    g: 202,
+                    b: 245,
+                    a: 255,
+                }, // 7: White
+                Color {
+                    r: 65,
+                    g: 72,
+                    b: 104,
+                    a: 255,
+                }, // 8: Bright Black
+                Color {
+                    r: 247,
+                    g: 118,
+                    b: 142,
+                    a: 255,
+                }, // 9: Bright Red
+                Color {
+                    r: 158,
+                    g: 206,
+                    b: 106,
+                    a: 255,
+                }, // 10: Bright Green
+                Color {
+                    r: 224,
+                    g: 175,
+                    b: 104,
+                    a: 255,
+                }, // 11: Bright Yellow
+                Color {
+                    r: 122,
+                    g: 162,
+                    b: 247,
+                    a: 255,
+                }, // 12: Bright Blue
+                Color {
+                    r: 187,
+                    g: 154,
+                    b: 247,
+                    a: 255,
+                }, // 13: Bright Magenta
+                Color {
+                    r: 125,
+                    g: 207,
+                    b: 255,
+                    a: 255,
+                }, // 14: Bright Cyan
+                Color {
+                    r: 192,
+                    g: 202,
+                    b: 245,
+                    a: 255,
+                }, // 15: Bright White
             ],
         }
     }
@@ -201,18 +328,16 @@ pub enum BrailleStyle {
     Dots,
 }
 
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RenderConfig {
     pub braille_style: BrailleStyle,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForgeConfig {
     pub font: FontConfig,
     pub window: WindowConfig,
+    pub blur: BlurConfig,
     pub cursor: CursorConfig,
     pub scrollback: ScrollbackConfig,
     pub shell: ShellConfig,
@@ -242,6 +367,7 @@ impl Default for ForgeConfig {
         Self {
             font: FontConfig::default(),
             window: WindowConfig::default(),
+            blur: BlurConfig::default(),
             cursor: CursorConfig::default(),
             scrollback: ScrollbackConfig::default(),
             shell: ShellConfig::default(),
@@ -266,6 +392,10 @@ impl ForgeConfig {
         self.window.padding.bottom = self.window.padding.bottom.clamp(0, 100);
         self.window.padding.left = self.window.padding.left.clamp(0, 100);
         self.window.padding.right = self.window.padding.right.clamp(0, 100);
+        self.blur.radius = self.blur.radius.min(250);
+        if self.blur.method == BlurMethod::Off {
+            self.blur.enabled = false;
+        }
     }
 }
 
@@ -279,9 +409,14 @@ mod tests {
         config.font.size = 999.0;
         config.window.opacity = 5.0;
         config.window.width = 1;
+        config.blur.radius = 999;
+        config.blur.enabled = true;
+        config.blur.method = BlurMethod::Off;
         config.validate();
         assert_eq!(config.font.size, 72.0);
         assert_eq!(config.window.opacity, 1.0);
         assert_eq!(config.window.width, 200);
+        assert_eq!(config.blur.radius, 250);
+        assert!(!config.blur.enabled);
     }
 }

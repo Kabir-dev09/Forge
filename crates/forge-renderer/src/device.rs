@@ -1,14 +1,12 @@
-use ash::{vk, Instance, Device};
-use forge_core::{Result, ForgeError};
+use ash::{vk, Device, Instance};
+use forge_core::{ForgeError, Result};
 
 /// Required device extensions.
-pub const REQUIRED_DEVICE_EXTENSIONS: &[&std::ffi::CStr] = &[
-    ash::khr::swapchain::NAME,
-];
+pub const REQUIRED_DEVICE_EXTENSIONS: &[&std::ffi::CStr] = &[ash::khr::swapchain::NAME];
 
 pub struct QueueFamilyIndices {
     pub graphics: u32,
-    pub present: u32,  // May be same as graphics
+    pub present: u32, // May be same as graphics
 }
 
 /// Selects the best available physical device.
@@ -23,10 +21,14 @@ pub fn select_physical_device(
         .map_err(|e| ForgeError::Vulkan(format!("Failed to enumerate devices: {}", e)))?;
 
     if devices.is_empty() {
-        return Err(ForgeError::Vulkan("No Vulkan-capable devices found".to_string()));
+        return Err(ForgeError::Vulkan(
+            "No Vulkan-capable devices found".to_string(),
+        ));
     }
 
     let mut best: Option<(vk::PhysicalDevice, QueueFamilyIndices, u32)> = None;
+    let mut rejected_missing_extensions = 0;
+    let mut rejected_missing_queues = 0;
 
     for &device in &devices {
         let props = unsafe { instance.get_physical_device_properties(device) };
@@ -35,27 +37,33 @@ pub fn select_physical_device(
 
         // Check required extensions
         if !check_device_extensions(instance, device) {
+            rejected_missing_extensions += 1;
             tracing::debug!("  → Skipping: missing required extensions");
             continue;
         }
 
         // Find queue families
-        let queue_families = unsafe {
-            instance.get_physical_device_queue_family_properties(device)
-        };
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(device) };
 
-        let graphics_family = queue_families.iter().enumerate().find(|(_, qf)| {
-            qf.queue_flags.contains(vk::QueueFlags::GRAPHICS)
-        }).map(|(i, _)| i as u32);
+        let graphics_family = queue_families
+            .iter()
+            .enumerate()
+            .find(|(_, qf)| qf.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|(i, _)| i as u32);
 
-        let present_family = queue_families.iter().enumerate().find(|(i, _)| {
-            unsafe {
-                surface_loader.get_physical_device_surface_support(device, *i as u32, surface)
+        let present_family = queue_families
+            .iter()
+            .enumerate()
+            .find(|(i, _)| unsafe {
+                surface_loader
+                    .get_physical_device_surface_support(device, *i as u32, surface)
                     .unwrap_or(false)
-            }
-        }).map(|(i, _)| i as u32);
+            })
+            .map(|(i, _)| i as u32);
 
         let (Some(gfx), Some(present)) = (graphics_family, present_family) else {
+            rejected_missing_queues += 1;
             tracing::debug!("  → Skipping: no suitable queue families");
             continue;
         };
@@ -69,18 +77,30 @@ pub fn select_physical_device(
         tracing::debug!("  → Score: {}", score);
 
         if best.as_ref().is_none_or(|b| score > b.2) {
-            best = Some((device, QueueFamilyIndices { graphics: gfx, present }, score));
+            best = Some((
+                device,
+                QueueFamilyIndices {
+                    graphics: gfx,
+                    present,
+                },
+                score,
+            ));
         }
     }
 
     best.map(|(d, q, _)| (d, q))
-        .ok_or_else(|| ForgeError::Vulkan("No suitable Vulkan device found".to_string()))
+        .ok_or_else(|| {
+            ForgeError::Vulkan(format!(
+                "No suitable Vulkan device found ({} devices checked, {} missing required extensions, {} missing graphics/present queue support)",
+                devices.len(),
+                rejected_missing_extensions,
+                rejected_missing_queues
+            ))
+        })
 }
 
 fn check_device_extensions(instance: &Instance, device: vk::PhysicalDevice) -> bool {
-    let available = match unsafe {
-        instance.enumerate_device_extension_properties(device)
-    } {
+    let available = match unsafe { instance.enumerate_device_extension_properties(device) } {
         Ok(e) => e,
         Err(_) => return false,
     };
@@ -103,16 +123,19 @@ pub fn create_logical_device(
 
     // Deduplicate queue families (graphics and present may be the same)
     let unique_queues: std::collections::HashSet<u32> = [indices.graphics, indices.present]
-        .iter().cloned().collect();
+        .iter()
+        .cloned()
+        .collect();
 
-    let queue_infos: Vec<vk::DeviceQueueCreateInfo> = unique_queues.iter().map(|&qf| {
-        vk::DeviceQueueCreateInfo {
+    let queue_infos: Vec<vk::DeviceQueueCreateInfo> = unique_queues
+        .iter()
+        .map(|&qf| vk::DeviceQueueCreateInfo {
             queue_family_index: qf,
             queue_count: 1,
             p_queue_priorities: &queue_priority,
             ..Default::default()
-        }
-    }).collect();
+        })
+        .collect();
 
     // Enable required features
     let features = vk::PhysicalDeviceFeatures {
@@ -135,7 +158,8 @@ pub fn create_logical_device(
     };
 
     let device = unsafe {
-        instance.create_device(physical_device, &device_info, None)
+        instance
+            .create_device(physical_device, &device_info, None)
             .map_err(|e| ForgeError::Vulkan(format!("Failed to create logical device: {}", e)))?
     };
 
@@ -147,17 +171,15 @@ pub fn create_logical_device(
 
 /// Creates a command pool for the graphics queue family.
 /// Commands allocated from this pool can be re-recorded each frame.
-pub fn create_command_pool(
-    device: &Device,
-    graphics_family: u32,
-) -> Result<vk::CommandPool> {
+pub fn create_command_pool(device: &Device, graphics_family: u32) -> Result<vk::CommandPool> {
     let pool_info = vk::CommandPoolCreateInfo {
         flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
         queue_family_index: graphics_family,
         ..Default::default()
     };
     unsafe {
-        device.create_command_pool(&pool_info, None)
+        device
+            .create_command_pool(&pool_info, None)
             .map_err(|e| ForgeError::Vulkan(format!("Failed to create command pool: {}", e)))
     }
 }
@@ -175,7 +197,8 @@ pub fn allocate_command_buffers(
         ..Default::default()
     };
     unsafe {
-        device.allocate_command_buffers(&alloc_info)
+        device
+            .allocate_command_buffers(&alloc_info)
             .map_err(|e| ForgeError::Vulkan(format!("Failed to allocate command buffers: {}", e)))
     }
 }
@@ -194,5 +217,7 @@ pub fn find_memory_type(
             return Ok(i);
         }
     }
-    Err(ForgeError::Vulkan("Failed to find suitable memory type".into()))
+    Err(ForgeError::Vulkan(format!(
+        "Failed to find suitable memory type for filter=0x{type_filter:08x} with required properties={properties:?}"
+    )))
 }

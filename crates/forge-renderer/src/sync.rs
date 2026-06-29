@@ -1,5 +1,5 @@
 use ash::{vk, Device};
-use forge_core::{Result, ForgeError};
+use forge_core::{ForgeError, Result};
 
 /// Maximum number of frames that can be in-flight simultaneously.
 /// 2 is the standard choice for double-buffered rendering.
@@ -30,28 +30,41 @@ impl SyncPrimitives {
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             unsafe {
                 image_available_semaphores.push(
-                    device.create_semaphore(&semaphore_info, None)
-                        .map_err(|e| ForgeError::Vulkan(e.to_string()))?
+                    device
+                        .create_semaphore(&semaphore_info, None)
+                        .map_err(|e| ForgeError::Vulkan(e.to_string()))?,
                 );
                 render_finished_semaphores.push(
-                    device.create_semaphore(&semaphore_info, None)
-                        .map_err(|e| ForgeError::Vulkan(e.to_string()))?
+                    device
+                        .create_semaphore(&semaphore_info, None)
+                        .map_err(|e| ForgeError::Vulkan(e.to_string()))?,
                 );
                 in_flight_fences.push(
-                    device.create_fence(&fence_info, None)
-                        .map_err(|e| ForgeError::Vulkan(e.to_string()))?
+                    device
+                        .create_fence(&fence_info, None)
+                        .map_err(|e| ForgeError::Vulkan(e.to_string()))?,
                 );
             }
         }
 
-        Ok(Self { image_available_semaphores, render_finished_semaphores, in_flight_fences })
+        Ok(Self {
+            image_available_semaphores,
+            render_finished_semaphores,
+            in_flight_fences,
+        })
     }
 
     pub fn destroy(&self, device: &Device) {
         unsafe {
-            for &s in &self.image_available_semaphores { device.destroy_semaphore(s, None); }
-            for &s in &self.render_finished_semaphores { device.destroy_semaphore(s, None); }
-            for &f in &self.in_flight_fences { device.destroy_fence(f, None); }
+            for &s in &self.image_available_semaphores {
+                device.destroy_semaphore(s, None);
+            }
+            for &s in &self.render_finished_semaphores {
+                device.destroy_semaphore(s, None);
+            }
+            for &f in &self.in_flight_fences {
+                device.destroy_fence(f, None);
+            }
         }
     }
 }

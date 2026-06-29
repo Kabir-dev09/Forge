@@ -1,0 +1,11 @@
+# Build Dependencies for Forge Terminal
+To compile Forge from source, you will need the following generic packages installed on your system:
+
+- Rust Toolchain (cargo, rustc)
+- pkg-config
+- cmake
+- libwayland-dev (or wayland-devel)
+- libvulkan-dev (or vulkan-headers / vulkan-devel)
+- libxkbcommon-dev (or libxkbcommon-devel)
+- libfontconfig1-dev (or fontconfig-devel)
+- libfreetype6-dev (or freetype-devel)

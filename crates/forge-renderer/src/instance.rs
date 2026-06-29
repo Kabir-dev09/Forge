@@ -1,5 +1,5 @@
 use ash::{vk, Entry, Instance};
-use forge_core::{Result, ForgeError};
+use forge_core::{ForgeError, Result};
 use std::ffi::{CStr, CString};
 
 /// Required instance extensions for Wayland rendering.
@@ -41,12 +41,13 @@ pub fn create_instance(entry: &Entry) -> Result<Instance> {
     // In debug builds, add validation layers if available:
     #[cfg(debug_assertions)]
     let layer_names = {
-        let available_layers = unsafe { entry.enumerate_instance_layer_properties() }.unwrap_or_default();
+        let available_layers =
+            unsafe { entry.enumerate_instance_layer_properties() }.unwrap_or_default();
         let has_validation = available_layers.iter().any(|layer| {
             let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
             name == c"VK_LAYER_KHRONOS_validation"
         });
-        
+
         if has_validation {
             // unwrap() is safe because the literal contains no null bytes
             vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()]
@@ -55,7 +56,7 @@ pub fn create_instance(entry: &Entry) -> Result<Instance> {
             vec![]
         }
     };
-    
+
     #[cfg(not(debug_assertions))]
     let layer_names: Vec<CString> = vec![];
 
@@ -71,7 +72,8 @@ pub fn create_instance(entry: &Entry) -> Result<Instance> {
     };
 
     unsafe {
-        entry.create_instance(&create_info, None)
+        entry
+            .create_instance(&create_info, None)
             .map_err(|e| ForgeError::Vulkan(format!("Failed to create Vulkan instance: {}", e)))
     }
 }

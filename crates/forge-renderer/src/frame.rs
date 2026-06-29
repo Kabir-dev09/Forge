@@ -1,7 +1,7 @@
-use ash::{vk, Device};
-use forge_core::{Result, ForgeError};
-use super::sync::{SyncPrimitives, MAX_FRAMES_IN_FLIGHT};
 use super::swapchain::Swapchain;
+use super::sync::{SyncPrimitives, MAX_FRAMES_IN_FLIGHT};
+use ash::{vk, Device};
+use forge_core::{ForgeError, Result};
 
 /// Acquires the next swapchain image, records a clear-color command buffer,
 /// submits it to the graphics queue, and presents the result.
@@ -21,16 +21,24 @@ pub fn render_frame(
     current_frame: &mut usize,
     clear_color: [f32; 4],
 ) -> Result<bool> {
-    debug_assert!(clear_color.iter().all(|&c| c.is_finite()), "NaN or Inf in clear_color");
+    let _span = tracing::trace_span!(
+        "renderer.render_frame_clear",
+        width = swapchain.extent.width,
+        height = swapchain.extent.height,
+        current_frame = *current_frame
+    )
+    .entered();
+    debug_assert!(
+        clear_color.iter().all(|&c| c.is_finite()),
+        "NaN or Inf in clear_color"
+    );
     let frame = *current_frame;
 
     // 1. Wait for this frame's fence (ensures we don't re-use in-flight resources).
     unsafe {
-        device.wait_for_fences(
-            &[sync.in_flight_fences[frame]],
-            true,
-            u64::MAX,
-        ).map_err(|e| ForgeError::Vulkan(e.to_string()))?;
+        device
+            .wait_for_fences(&[sync.in_flight_fences[frame]], true, u64::MAX)
+            .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
     }
 
     // 2. Acquire next image from swapchain.
@@ -46,25 +54,44 @@ pub fn render_frame(
         ) {
             Ok(result) => result,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(true), // Needs recreate
-            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => return Err(ForgeError::Vulkan("Surface lost".to_string())),
-            Err(e) => return Err(ForgeError::Vulkan(format!("acquire_next_image failed: {}", e))),
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
+                return Err(ForgeError::Vulkan("Surface lost".to_string()))
+            }
+            Err(e) => {
+                return Err(ForgeError::Vulkan(format!(
+                    "acquire_next_image failed: {}",
+                    e
+                )))
+            }
         }
     };
 
     if image_index as usize >= framebuffers.len() {
-        tracing::error!("Acquired image index {} exceeds framebuffers len {}", image_index, framebuffers.len());
+        tracing::error!(
+            "Acquired image index {} exceeds framebuffers len {}",
+            image_index,
+            framebuffers.len()
+        );
         return Err(ForgeError::Vulkan("Image index out of bounds".to_string()));
     }
 
     // 3. Reset fence now that we know we're going to submit work.
     unsafe {
-        device.reset_fences(&[sync.in_flight_fences[frame]])
+        device
+            .reset_fences(&[sync.in_flight_fences[frame]])
             .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
     }
 
     // 4. Record command buffer: begin → begin render pass → clear → end render pass → end.
     let cmd = command_buffers[frame];
-    record_clear_command(device, cmd, render_pass, framebuffers[image_index as usize], swapchain.extent, clear_color)?;
+    record_clear_command(
+        device,
+        cmd,
+        render_pass,
+        framebuffers[image_index as usize],
+        swapchain.extent,
+        clear_color,
+    )?;
 
     // 5. Submit to graphics queue.
     let wait_semaphores = [sync.image_available_semaphores[frame]];
@@ -81,7 +108,8 @@ pub fn render_frame(
         ..Default::default()
     };
     unsafe {
-        device.queue_submit(graphics_queue, &[submit_info], sync.in_flight_fences[frame])
+        device
+            .queue_submit(graphics_queue, &[submit_info], sync.in_flight_fences[frame])
             .map_err(|e| ForgeError::Vulkan(format!("queue_submit failed: {}", e)))?;
     }
 
@@ -100,7 +128,9 @@ pub fn render_frame(
         match swapchain.loader.queue_present(present_queue, &present_info) {
             Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => true,
             Ok(false) => suboptimal,
-            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => return Err(ForgeError::Vulkan("Surface lost".to_string())),
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
+                return Err(ForgeError::Vulkan("Surface lost".to_string()))
+            }
             Err(e) => return Err(ForgeError::Vulkan(format!("queue_present failed: {}", e))),
         }
     };
@@ -121,19 +151,23 @@ fn record_clear_command(
 ) -> Result<()> {
     unsafe {
         // Reset and begin the command buffer.
-        device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+        device
+            .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
             .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
 
         let begin_info = vk::CommandBufferBeginInfo {
             flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
             ..Default::default()
         };
-        device.begin_command_buffer(cmd, &begin_info)
+        device
+            .begin_command_buffer(cmd, &begin_info)
             .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
 
         // Begin render pass with clear color.
         let clear_value = vk::ClearValue {
-            color: vk::ClearColorValue { float32: clear_color },
+            color: vk::ClearColorValue {
+                float32: clear_color,
+            },
         };
         let render_pass_begin = vk::RenderPassBeginInfo {
             render_pass,
@@ -149,7 +183,8 @@ fn record_clear_command(
         device.cmd_begin_render_pass(cmd, &render_pass_begin, vk::SubpassContents::INLINE);
         // (Draw calls will go here in future steps)
         device.cmd_end_render_pass(cmd);
-        device.end_command_buffer(cmd)
+        device
+            .end_command_buffer(cmd)
             .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
     }
     Ok(())

@@ -1,17 +1,17 @@
 //! Forge Vulkan Rendering Backend
-pub mod instance;
 pub mod device;
+pub mod font;
+pub mod frame;
+pub mod framebuffer;
+pub mod grid_tessellator;
+pub mod instance;
+pub mod pipeline;
+pub mod render_pass;
+pub mod renderer;
 pub mod surface;
 pub mod swapchain;
-pub mod render_pass;
-pub mod framebuffer;
 pub mod sync;
-pub mod frame;
-pub mod pipeline;
-pub mod font;
 pub mod texture;
-pub mod renderer;
-pub mod grid_tessellator;
 
 pub use renderer::Renderer;
 
@@ -31,8 +31,12 @@ mod tests {
         let instance = instance::create_instance(&entry).expect("Failed to create Vulkan Instance");
 
         // Enumerate physical devices
-        let devices = unsafe { instance.enumerate_physical_devices() }.expect("Failed to enumerate devices");
-        assert!(!devices.is_empty(), "No Vulkan devices found on this system.");
+        let devices =
+            unsafe { instance.enumerate_physical_devices() }.expect("Failed to enumerate devices");
+        assert!(
+            !devices.is_empty(),
+            "No Vulkan devices found on this system."
+        );
 
         tracing::info!("Found {} Vulkan devices.", devices.len());
         for &device in &devices {

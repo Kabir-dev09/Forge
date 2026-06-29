@@ -1,14 +1,14 @@
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
-use forge_core::{Result, ForgeError};
+use forge_core::{ForgeError, Result};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
 pub struct GlyphVertex {
-    pub position:  [f32; 2],   // NDC
-    pub tex_coord: [f32; 2],   // UV into atlas ([-1.0, 0.0] for background-only)
-    pub fg_color:  [f32; 4],   // RGBA
-    pub bg_color:  [f32; 4],   // RGBA
+    pub position: [f32; 2],  // NDC
+    pub tex_coord: [f32; 2], // UV into atlas ([-1.0, 0.0] for background-only)
+    pub fg_color: [f32; 4],  // RGBA
+    pub bg_color: [f32; 4],  // RGBA
 }
 
 #[repr(C)]
@@ -67,17 +67,15 @@ pub struct Pipeline {
 impl Pipeline {
     pub fn new(device: &Device, render_pass: vk::RenderPass) -> Result<Self> {
         // Descriptor Set Layout for the Glyph Atlas
-        let bindings = [
-            vk::DescriptorSetLayoutBinding {
-                binding: 0,
-                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                p_immutable_samplers: std::ptr::null(),
-                _marker: std::marker::PhantomData,
-            }
-        ];
-        
+        let bindings = [vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            p_immutable_samplers: std::ptr::null(),
+            _marker: std::marker::PhantomData,
+        }];
+
         let layout_info = vk::DescriptorSetLayoutCreateInfo {
             binding_count: bindings.len() as u32,
             p_bindings: bindings.as_ptr(),
@@ -85,8 +83,11 @@ impl Pipeline {
         };
 
         let descriptor_set_layout = unsafe {
-            device.create_descriptor_set_layout(&layout_info, None)
-                .map_err(|e| ForgeError::Vulkan(format!("Failed to create descriptor set layout: {}", e)))?
+            device
+                .create_descriptor_set_layout(&layout_info, None)
+                .map_err(|e| {
+                    ForgeError::Vulkan(format!("Failed to create descriptor set layout: {}", e))
+                })?
         };
 
         let set_layouts = [descriptor_set_layout];
@@ -105,7 +106,8 @@ impl Pipeline {
         };
 
         let pipeline_layout = unsafe {
-            device.create_pipeline_layout(&pipeline_layout_info, None)
+            device
+                .create_pipeline_layout(&pipeline_layout_info, None)
                 .map_err(|e| ForgeError::Vulkan(e.to_string()))?
         };
 
@@ -215,8 +217,11 @@ impl Pipeline {
         };
 
         let graphics_pipeline = unsafe {
-            device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-                .map_err(|e| ForgeError::Vulkan(format!("Failed to create graphics pipeline: {:?}", e.1)))?[0]
+            device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|e| {
+                    ForgeError::Vulkan(format!("Failed to create graphics pipeline: {:?}", e.1))
+                })?[0]
         };
 
         unsafe {
@@ -244,7 +249,7 @@ fn create_shader_module(device: &Device, code: &[u8]) -> Result<vk::ShaderModule
     let mut spv_words = Vec::new();
     let mut i = 0;
     while i < code.len() {
-        let word = u32::from_le_bytes([code[i], code[i+1], code[i+2], code[i+3]]);
+        let word = u32::from_le_bytes([code[i], code[i + 1], code[i + 2], code[i + 3]]);
         spv_words.push(word);
         i += 4;
     }
@@ -254,7 +259,8 @@ fn create_shader_module(device: &Device, code: &[u8]) -> Result<vk::ShaderModule
         ..Default::default()
     };
     unsafe {
-        device.create_shader_module(&create_info, None)
+        device
+            .create_shader_module(&create_info, None)
             .map_err(|e| ForgeError::Vulkan(format!("Failed to create shader module: {}", e)))
     }
 }
