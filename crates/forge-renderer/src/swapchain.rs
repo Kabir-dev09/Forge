@@ -1,7 +1,7 @@
-use ash::{vk, Device, Instance};
-use forge_core::{Result, ForgeError};
-use super::surface::SurfaceDetails;
 use super::device::QueueFamilyIndices;
+use super::surface::SurfaceDetails;
+use ash::{vk, Device, Instance};
+use forge_core::{ForgeError, Result};
 
 pub struct Swapchain {
     pub loader: ash::khr::swapchain::Device,
@@ -13,7 +13,10 @@ pub struct Swapchain {
 }
 
 fn choose_composite_alpha(caps: &vk::SurfaceCapabilitiesKHR) -> vk::CompositeAlphaFlagsKHR {
-    if caps.supported_composite_alpha.contains(vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED) {
+    if caps
+        .supported_composite_alpha
+        .contains(vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED)
+    {
         vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED
     } else {
         vk::CompositeAlphaFlagsKHR::OPAQUE
@@ -36,15 +39,21 @@ impl Swapchain {
 
         // Use one more image than the minimum for triple-buffering when possible.
         let mut image_count = surface_details.capabilities.min_image_count + 1;
-        if surface_details.capabilities.max_image_count > 0 && image_count > surface_details.capabilities.max_image_count {
+        if surface_details.capabilities.max_image_count > 0
+            && image_count > surface_details.capabilities.max_image_count
+        {
             image_count = surface_details.capabilities.max_image_count;
         }
 
-        let (sharing_mode, queue_family_indices) = if queue_indices.graphics != queue_indices.present {
-            (vk::SharingMode::CONCURRENT, vec![queue_indices.graphics, queue_indices.present])
-        } else {
-            (vk::SharingMode::EXCLUSIVE, vec![])
-        };
+        let (sharing_mode, queue_family_indices) =
+            if queue_indices.graphics != queue_indices.present {
+                (
+                    vk::SharingMode::CONCURRENT,
+                    vec![queue_indices.graphics, queue_indices.present],
+                )
+            } else {
+                (vk::SharingMode::EXCLUSIVE, vec![])
+            };
 
         let composite_alpha = choose_composite_alpha(&surface_details.capabilities);
 
@@ -69,20 +78,47 @@ impl Swapchain {
         let loader = ash::khr::swapchain::Device::new(instance, device);
         let handle = unsafe {
             loader.create_swapchain(&create_info, None)
-                .map_err(|e| ForgeError::Vulkan(format!("Failed to create swapchain: {}", e)))?
+                .map_err(|e| {
+                    ForgeError::Vulkan(format!(
+                        "Failed to create swapchain (extent={}x{}, image_count={}, format={:?}, present_mode={:?}): {}",
+                        extent.width,
+                        extent.height,
+                        image_count,
+                        format.format,
+                        present_mode,
+                        e
+                    ))
+                })?
         };
 
         let images = unsafe {
-            loader.get_swapchain_images(handle)
-                .map_err(|e| ForgeError::Vulkan(format!("Failed to get swapchain images: {}", e)))?
+            loader.get_swapchain_images(handle).map_err(|e| {
+                ForgeError::Vulkan(format!(
+                    "Failed to get swapchain images after creation: {}",
+                    e
+                ))
+            })?
         };
 
         let image_views = Self::create_image_views(device, &images, format.format)?;
 
-        tracing::info!("Swapchain created: {}x{}, {} images, format={:?}, present={:?}",
-            extent.width, extent.height, images.len(), format.format, present_mode);
+        tracing::info!(
+            "Swapchain created: {}x{}, {} images, format={:?}, present={:?}",
+            extent.width,
+            extent.height,
+            images.len(),
+            format.format,
+            present_mode
+        );
 
-        Ok(Self { loader, handle, images, image_views, format: format.format, extent })
+        Ok(Self {
+            loader,
+            handle,
+            images,
+            image_views,
+            format: format.format,
+            extent,
+        })
     }
 
     fn create_image_views(
@@ -90,31 +126,38 @@ impl Swapchain {
         images: &[vk::Image],
         format: vk::Format,
     ) -> Result<Vec<vk::ImageView>> {
-        images.iter().map(|&image| {
-            let create_info = vk::ImageViewCreateInfo {
-                image,
-                view_type: vk::ImageViewType::TYPE_2D,
-                format,
-                components: vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::IDENTITY,
-                    g: vk::ComponentSwizzle::IDENTITY,
-                    b: vk::ComponentSwizzle::IDENTITY,
-                    a: vk::ComponentSwizzle::IDENTITY,
-                },
-                subresource_range: vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                ..Default::default()
-            };
-            unsafe {
-                device.create_image_view(&create_info, None)
-                    .map_err(|e| ForgeError::Vulkan(format!("Failed to create image view: {}", e)))
-            }
-        }).collect()
+        images
+            .iter()
+            .map(|&image| {
+                let create_info = vk::ImageViewCreateInfo {
+                    image,
+                    view_type: vk::ImageViewType::TYPE_2D,
+                    format,
+                    components: vk::ComponentMapping {
+                        r: vk::ComponentSwizzle::IDENTITY,
+                        g: vk::ComponentSwizzle::IDENTITY,
+                        b: vk::ComponentSwizzle::IDENTITY,
+                        a: vk::ComponentSwizzle::IDENTITY,
+                    },
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    ..Default::default()
+                };
+                unsafe {
+                    device.create_image_view(&create_info, None).map_err(|e| {
+                        ForgeError::Vulkan(format!(
+                            "Failed to create swapchain image view for format {:?}: {}",
+                            format, e
+                        ))
+                    })
+                }
+            })
+            .collect()
     }
 
     /// Destroys all swapchain resources. Call before dropping or recreating.

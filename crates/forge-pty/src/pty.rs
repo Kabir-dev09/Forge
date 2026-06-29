@@ -1,12 +1,12 @@
-use nix::pty::{openpty, Winsize};
-use nix::unistd::{fork, ForkResult, execvpe, setsid, dup2, close};
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use std::os::unix::io::{OwnedFd, AsRawFd};
-use std::ffi::CString;
 use forge_core::config_registry::ShellConfig;
 use forge_core::geometry::Size;
-use forge_core::{Result, ForgeError};
-use nix::sys::wait::{waitpid, WaitStatus, WaitPidFlag};
+use forge_core::{ForgeError, Result};
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::pty::{openpty, Winsize};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::{close, dup2, execvpe, fork, setsid, ForkResult};
+use std::ffi::CString;
+use std::os::unix::io::{AsRawFd, OwnedFd};
 
 pub fn size_to_winsize(size: Size, cell_w: u16, cell_h: u16) -> Winsize {
     Winsize {
@@ -23,21 +23,22 @@ pub struct Pty {
     pub size: Winsize,
 }
 
-
-
 impl Pty {
     pub fn spawn(shell: &ShellConfig, winsize: Winsize) -> Result<Self> {
         let program_cstr = CString::new(shell.program.clone())
             .map_err(|e| ForgeError::Pty(format!("Invalid program string: {}", e)))?;
-            
+
         let mut args = Vec::new();
-        
+
         args.push(program_cstr.clone());
-        
+
         for arg in &shell.args {
-            args.push(CString::new(arg.clone()).map_err(|e| ForgeError::Pty(format!("Invalid arg: {}", e)))?);
+            args.push(
+                CString::new(arg.clone())
+                    .map_err(|e| ForgeError::Pty(format!("Invalid arg: {}", e)))?,
+            );
         }
-        
+
         let mut env_map = std::collections::HashMap::new();
         for (k, v) in std::env::vars() {
             env_map.insert(k, v);
@@ -52,20 +53,26 @@ impl Pty {
         let mut envs = Vec::new();
         for (k, v) in env_map {
             let entry = format!("{}={}", k, v);
-            envs.push(CString::new(entry).map_err(|e| ForgeError::Pty(format!("Invalid env: {}", e)))?);
+            envs.push(
+                CString::new(entry).map_err(|e| ForgeError::Pty(format!("Invalid env: {}", e)))?,
+            );
         }
 
-        let pty_res = openpty(None, None)
-            .map_err(|e| ForgeError::Pty(format!("openpty failed: {}", e)))?;
-        
+        let pty_res =
+            openpty(None, None).map_err(|e| ForgeError::Pty(format!("openpty failed: {}", e)))?;
+
         unsafe {
-            nix::libc::ioctl(pty_res.master.as_raw_fd(), nix::libc::TIOCSWINSZ, &winsize as *const _);
+            nix::libc::ioctl(
+                pty_res.master.as_raw_fd(),
+                nix::libc::TIOCSWINSZ,
+                &winsize as *const _,
+            );
         }
 
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child, .. }) => {
                 drop(pty_res.slave);
-                
+
                 let flags = fcntl(pty_res.master.as_raw_fd(), FcntlArg::F_GETFL)
                     .map_err(|e| ForgeError::Pty(format!("fcntl GETFL failed: {}", e)))?;
                 let mut oflags = OFlag::from_bits_truncate(flags);
@@ -81,27 +88,45 @@ impl Pty {
             }
             Ok(ForkResult::Child) => {
                 drop(pty_res.master);
-                
+
                 let slave_fd = pty_res.slave.as_raw_fd();
-                
+
                 if setsid().is_err() {
-                    unsafe { nix::libc::_exit(1); }
+                    unsafe {
+                        nix::libc::_exit(1);
+                    }
                 }
-                
+
                 // Acquire the controlling terminal. Without this, job control fails.
                 // bash is resilient to this, but zsh and fish will immediately crash or exit.
-                unsafe { nix::libc::ioctl(slave_fd, nix::libc::TIOCSCTTY, 0); }
-                
-                if dup2(slave_fd, 0).is_err() { unsafe { nix::libc::_exit(1); } }
-                if dup2(slave_fd, 1).is_err() { unsafe { nix::libc::_exit(1); } }
-                if dup2(slave_fd, 2).is_err() { unsafe { nix::libc::_exit(1); } }
-                
+                unsafe {
+                    nix::libc::ioctl(slave_fd, nix::libc::TIOCSCTTY, 0);
+                }
+
+                if dup2(slave_fd, 0).is_err() {
+                    unsafe {
+                        nix::libc::_exit(1);
+                    }
+                }
+                if dup2(slave_fd, 1).is_err() {
+                    unsafe {
+                        nix::libc::_exit(1);
+                    }
+                }
+                if dup2(slave_fd, 2).is_err() {
+                    unsafe {
+                        nix::libc::_exit(1);
+                    }
+                }
+
                 if slave_fd > 2 {
                     let _ = close(slave_fd);
                 }
-                
+
                 let _ = execvpe(&program_cstr, &args, &envs);
-                unsafe { nix::libc::_exit(1); }
+                unsafe {
+                    nix::libc::_exit(1);
+                }
             }
             Err(e) => Err(ForgeError::Pty(format!("fork failed: {}", e))),
         }
@@ -125,7 +150,9 @@ impl Pty {
                 Err(nix::errno::Errno::EAGAIN) => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                Err(nix::errno::Errno::EIO) => return Err(ForgeError::Pty("Shell exited".to_string())),
+                Err(nix::errno::Errno::EIO) => {
+                    return Err(ForgeError::Pty("Shell exited".to_string()))
+                }
                 Err(e) => return Err(ForgeError::Pty(e.to_string())),
             }
         }
@@ -140,11 +167,15 @@ impl Pty {
             ws_ypixel: ypixel,
         };
         unsafe {
-            nix::libc::ioctl(self.master_fd.as_raw_fd(), nix::libc::TIOCSWINSZ, &new_size as *const Winsize);
+            nix::libc::ioctl(
+                self.master_fd.as_raw_fd(),
+                nix::libc::TIOCSWINSZ,
+                &new_size as *const Winsize,
+            );
         }
-            
+
         let _ = nix::sys::signal::kill(self.child_pid, nix::sys::signal::Signal::SIGWINCH);
-        
+
         self.size = new_size;
         Ok(())
     }
@@ -168,18 +199,31 @@ mod tests {
         let mut shell = ShellConfig::default();
         shell.program = "/bin/sh".to_string();
         shell.args = vec!["-c".to_string(), "echo hello; exit 0".to_string()];
-        let winsize = Winsize { ws_col: 80, ws_row: 24, ws_xpixel: 800, ws_ypixel: 480 };
+        let winsize = Winsize {
+            ws_col: 80,
+            ws_row: 24,
+            ws_xpixel: 800,
+            ws_ypixel: 480,
+        };
         let pty = Pty::spawn(&shell, winsize).expect("PTY spawn failed");
-        
+
         let mut buf = vec![0u8; 1024];
         let mut total = String::new();
         for _ in 0..100 {
             match pty.read(&mut buf) {
-                Ok(0) => { std::thread::sleep(std::time::Duration::from_millis(10)); }
-                Ok(n) => { total.push_str(&String::from_utf8_lossy(&buf[..n])); }
+                Ok(0) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(n) => {
+                    total.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
                 Err(_) => break,
             }
         }
-        assert!(total.contains("hello"), "Expected 'hello' in output, got: {:?}", total);
+        assert!(
+            total.contains("hello"),
+            "Expected 'hello' in output, got: {:?}",
+            total
+        );
     }
 }

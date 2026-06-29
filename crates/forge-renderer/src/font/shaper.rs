@@ -1,4 +1,4 @@
-use rustybuzz::{Face, UnicodeBuffer, shape};
+use rustybuzz::{shape, Face, UnicodeBuffer};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -32,7 +32,13 @@ impl ShaperCache {
         }
     }
 
-    pub fn shape_run(&mut self, key: &TextRunKey, rasterizer: &super::rasterizer::FontRasterizer, bold_rasterizer: Option<&super::rasterizer::FontRasterizer>, px_size: f32) -> &[ShapedGlyph] {
+    pub fn shape_run(
+        &mut self,
+        key: &TextRunKey,
+        rasterizer: &super::rasterizer::FontRasterizer,
+        bold_rasterizer: Option<&super::rasterizer::FontRasterizer>,
+        px_size: f32,
+    ) -> &[ShapedGlyph] {
         if !self.cache.contains_key(key) {
             let active_rasterizer = if key.is_bold {
                 bold_rasterizer.unwrap_or(rasterizer)
@@ -43,17 +49,17 @@ impl ShaperCache {
             let face = Face::from_slice(&active_rasterizer.bytes, 0).expect("Invalid font bytes");
             let mut buffer = UnicodeBuffer::new();
             buffer.push_str(&key.text);
-            
+
             let glyph_buffer = shape(&face, &[], buffer);
             let infos = glyph_buffer.glyph_infos();
             let positions = glyph_buffer.glyph_positions();
-            
+
             let mut shaped_glyphs = Vec::with_capacity(infos.len());
-            
+
             // rustybuzz uses font units, we need to scale to pixels
             let units_per_em = face.units_per_em() as f32;
             let scale = px_size / units_per_em;
-            
+
             for (info, pos) in infos.iter().zip(positions.iter()) {
                 shaped_glyphs.push(ShapedGlyph {
                     glyph_id: info.glyph_id as u16,
@@ -62,7 +68,7 @@ impl ShaperCache {
                     y_offset: pos.y_offset as f32 * scale,
                 });
             }
-            
+
             self.cache.insert(key.clone(), shaped_glyphs);
         }
         self.cache.get(key).unwrap()

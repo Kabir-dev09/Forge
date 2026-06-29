@@ -1,7 +1,7 @@
-use ash::{vk, Instance, Device};
-use forge_core::{Result, ForgeError};
-use std::ptr;
 use super::device::find_memory_type;
+use ash::{vk, Device, Instance};
+use forge_core::{ForgeError, Result};
+use std::ptr;
 
 pub struct Texture {
     pub image: vk::Image,
@@ -26,7 +26,9 @@ impl Texture {
 
         // 1. Create staging buffer
         let (staging_buffer, staging_memory) = create_buffer(
-            instance, physical_device, device,
+            instance,
+            physical_device,
+            device,
             image_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -34,7 +36,8 @@ impl Texture {
 
         // 2. Copy pixels to staging buffer
         unsafe {
-            let data_ptr = device.map_memory(staging_memory, 0, image_size, vk::MemoryMapFlags::empty())
+            let data_ptr = device
+                .map_memory(staging_memory, 0, image_size, vk::MemoryMapFlags::empty())
                 .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
             ptr::copy_nonoverlapping(pixels.as_ptr(), data_ptr as *mut u8, pixels.len());
             device.unmap_memory(staging_memory);
@@ -43,7 +46,11 @@ impl Texture {
         // 3. Create image
         let image_info = vk::ImageCreateInfo {
             image_type: vk::ImageType::TYPE_2D,
-            extent: vk::Extent3D { width, height, depth: 1 },
+            extent: vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            },
             mip_levels: 1,
             array_layers: 1,
             format: vk::Format::R8G8B8A8_UNORM,
@@ -56,12 +63,15 @@ impl Texture {
         };
 
         let image = unsafe {
-            device.create_image(&image_info, None).map_err(|e| ForgeError::Vulkan(e.to_string()))?
+            device
+                .create_image(&image_info, None)
+                .map_err(|e| ForgeError::Vulkan(e.to_string()))?
         };
 
         let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
         let memory_type = find_memory_type(
-            instance, physical_device,
+            instance,
+            physical_device,
             mem_requirements.memory_type_bits,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
@@ -73,31 +83,48 @@ impl Texture {
         };
 
         let memory = unsafe {
-            device.allocate_memory(&alloc_info, None).map_err(|e| ForgeError::Vulkan(e.to_string()))?
+            device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| ForgeError::Vulkan(e.to_string()))?
         };
 
         unsafe {
-            device.bind_image_memory(image, memory, 0).map_err(|e| ForgeError::Vulkan(e.to_string()))?;
+            device
+                .bind_image_memory(image, memory, 0)
+                .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
         }
 
         // 4. Transition image layout to TRANSFER_DST_OPTIMAL
         transition_image_layout(
-            device, command_pool, graphics_queue,
-            image, vk::Format::R8G8B8A8_UNORM,
-            vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            device,
+            command_pool,
+            graphics_queue,
+            image,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         )?;
 
         // 5. Copy buffer to image
         copy_buffer_to_image(
-            device, command_pool, graphics_queue,
-            staging_buffer, image, width, height,
+            device,
+            command_pool,
+            graphics_queue,
+            staging_buffer,
+            image,
+            width,
+            height,
         )?;
 
         // 6. Transition image layout to SHADER_READ_ONLY_OPTIMAL
         transition_image_layout(
-            device, command_pool, graphics_queue,
-            image, vk::Format::R8G8B8A8_UNORM,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            device,
+            command_pool,
+            graphics_queue,
+            image,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         )?;
 
         // 7. Cleanup staging buffer
@@ -121,11 +148,16 @@ impl Texture {
             ..Default::default()
         };
         let view = unsafe {
-            device.create_image_view(&view_info, None).map_err(|e| ForgeError::Vulkan(e.to_string()))?
+            device
+                .create_image_view(&view_info, None)
+                .map_err(|e| ForgeError::Vulkan(e.to_string()))?
         };
 
         // 9. Create Sampler
         let sampler_info = vk::SamplerCreateInfo {
+            // Terminal glyphs are rasterized at the target pixel size and laid
+            // out on pixel-aligned quads. Nearest sampling preserves sharp
+            // coverage masks instead of softening every glyph edge.
             mag_filter: vk::Filter::NEAREST,
             min_filter: vk::Filter::NEAREST,
             address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
@@ -144,10 +176,17 @@ impl Texture {
             ..Default::default()
         };
         let sampler = unsafe {
-            device.create_sampler(&sampler_info, None).map_err(|e| ForgeError::Vulkan(e.to_string()))?
+            device
+                .create_sampler(&sampler_info, None)
+                .map_err(|e| ForgeError::Vulkan(e.to_string()))?
         };
 
-        Ok(Self { image, memory, view, sampler })
+        Ok(Self {
+            image,
+            memory,
+            view,
+            sampler,
+        })
     }
 
     pub fn destroy(&self, device: &Device) {
@@ -157,6 +196,204 @@ impl Texture {
             device.destroy_image(self.image, None);
             device.free_memory(self.memory, None);
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_region(
+        &self,
+        instance: &Instance,
+        physical_device: vk::PhysicalDevice,
+        device: &Device,
+        command_pool: vk::CommandPool,
+        graphics_queue: vk::Queue,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let image_size = (width * height * 4) as vk::DeviceSize;
+        let (staging_buffer, staging_memory) = create_buffer(
+            instance,
+            physical_device,
+            device,
+            image_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+
+        unsafe {
+            let data_ptr = device
+                .map_memory(staging_memory, 0, image_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
+            ptr::copy_nonoverlapping(pixels.as_ptr(), data_ptr as *mut u8, pixels.len());
+            device.unmap_memory(staging_memory);
+        }
+
+        transition_image_layout(
+            device,
+            command_pool,
+            graphics_queue,
+            self.image,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        )?;
+        copy_buffer_to_image_region(
+            device,
+            command_pool,
+            graphics_queue,
+            staging_buffer,
+            self.image,
+            x,
+            y,
+            width,
+            height,
+        )?;
+        transition_image_layout(
+            device,
+            command_pool,
+            graphics_queue,
+            self.image,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        )?;
+
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_memory, None);
+        }
+
+        Ok(())
+    }
+}
+
+pub struct TextureRegion<'a> {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: &'a [u8],
+}
+
+impl Texture {
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_regions(
+        &self,
+        instance: &Instance,
+        physical_device: vk::PhysicalDevice,
+        device: &Device,
+        command_pool: vk::CommandPool,
+        graphics_queue: vk::Queue,
+        regions: &[TextureRegion],
+    ) -> Result<()> {
+        if regions.is_empty() {
+            return Ok(());
+        }
+
+        let mut total_size: vk::DeviceSize = 0;
+        let mut offsets = Vec::with_capacity(regions.len());
+        for r in regions {
+            offsets.push(total_size);
+            total_size += (r.width * r.height * 4) as vk::DeviceSize;
+        }
+
+        if total_size == 0 {
+            return Ok(());
+        }
+
+        let (staging_buffer, staging_memory) = create_buffer(
+            instance,
+            physical_device,
+            device,
+            total_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+
+        unsafe {
+            let data_ptr = device
+                .map_memory(staging_memory, 0, total_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
+            for (i, r) in regions.iter().enumerate() {
+                if !r.pixels.is_empty() {
+                    std::ptr::copy_nonoverlapping(
+                        r.pixels.as_ptr(),
+                        (data_ptr as *mut u8).add(offsets[i] as usize),
+                        r.pixels.len(),
+                    );
+                }
+            }
+            device.unmap_memory(staging_memory);
+        }
+
+        let command_buffer = begin_single_time_commands(device, command_pool)?;
+
+        cmd_transition_image_layout(
+            device,
+            command_buffer,
+            self.image,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        )?;
+
+        let vk_regions: Vec<vk::BufferImageCopy> = regions
+            .iter()
+            .enumerate()
+            .map(|(i, r)| vk::BufferImageCopy {
+                buffer_offset: offsets[i],
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D {
+                    x: r.x as i32,
+                    y: r.y as i32,
+                    z: 0,
+                },
+                image_extent: vk::Extent3D {
+                    width: r.width,
+                    height: r.height,
+                    depth: 1,
+                },
+            })
+            .collect();
+
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                command_buffer,
+                staging_buffer,
+                self.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &vk_regions,
+            );
+        }
+
+        cmd_transition_image_layout(
+            device,
+            command_buffer,
+            self.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        )?;
+
+        end_single_time_commands(device, command_pool, graphics_queue, command_buffer)?;
+
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_memory, None);
+        }
+
+        Ok(())
     }
 }
 
@@ -176,11 +413,18 @@ pub fn create_buffer(
     };
 
     let buffer = unsafe {
-        device.create_buffer(&buffer_info, None).map_err(|e| ForgeError::Vulkan(e.to_string()))?
+        device
+            .create_buffer(&buffer_info, None)
+            .map_err(|e| ForgeError::Vulkan(e.to_string()))?
     };
 
     let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-    let memory_type = find_memory_type(instance, physical_device, mem_requirements.memory_type_bits, properties)?;
+    let memory_type = find_memory_type(
+        instance,
+        physical_device,
+        mem_requirements.memory_type_bits,
+        properties,
+    )?;
 
     let alloc_info = vk::MemoryAllocateInfo {
         allocation_size: mem_requirements.size,
@@ -189,17 +433,24 @@ pub fn create_buffer(
     };
 
     let memory = unsafe {
-        device.allocate_memory(&alloc_info, None).map_err(|e| ForgeError::Vulkan(e.to_string()))?
+        device
+            .allocate_memory(&alloc_info, None)
+            .map_err(|e| ForgeError::Vulkan(e.to_string()))?
     };
 
     unsafe {
-        device.bind_buffer_memory(buffer, memory, 0).map_err(|e| ForgeError::Vulkan(e.to_string()))?;
+        device
+            .bind_buffer_memory(buffer, memory, 0)
+            .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
     }
 
     Ok((buffer, memory))
 }
 
-fn begin_single_time_commands(device: &Device, command_pool: vk::CommandPool) -> Result<vk::CommandBuffer> {
+fn begin_single_time_commands(
+    device: &Device,
+    command_pool: vk::CommandPool,
+) -> Result<vk::CommandBuffer> {
     let alloc_info = vk::CommandBufferAllocateInfo {
         level: vk::CommandBufferLevel::PRIMARY,
         command_pool,
@@ -208,7 +459,9 @@ fn begin_single_time_commands(device: &Device, command_pool: vk::CommandPool) ->
     };
 
     let command_buffer = unsafe {
-        device.allocate_command_buffers(&alloc_info).map_err(|e| ForgeError::Vulkan(e.to_string()))?[0]
+        device
+            .allocate_command_buffers(&alloc_info)
+            .map_err(|e| ForgeError::Vulkan(e.to_string()))?[0]
     };
 
     let begin_info = vk::CommandBufferBeginInfo {
@@ -217,7 +470,9 @@ fn begin_single_time_commands(device: &Device, command_pool: vk::CommandPool) ->
     };
 
     unsafe {
-        device.begin_command_buffer(command_buffer, &begin_info).map_err(|e| ForgeError::Vulkan(e.to_string()))?;
+        device
+            .begin_command_buffer(command_buffer, &begin_info)
+            .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
     }
 
     Ok(command_buffer)
@@ -230,7 +485,9 @@ fn end_single_time_commands(
     command_buffer: vk::CommandBuffer,
 ) -> Result<()> {
     unsafe {
-        device.end_command_buffer(command_buffer).map_err(|e| ForgeError::Vulkan(e.to_string()))?;
+        device
+            .end_command_buffer(command_buffer)
+            .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
     }
 
     let command_buffers = [command_buffer];
@@ -241,9 +498,11 @@ fn end_single_time_commands(
     };
 
     unsafe {
-        device.queue_submit(graphics_queue, &[submit_info], vk::Fence::null())
+        device
+            .queue_submit(graphics_queue, &[submit_info], vk::Fence::null())
             .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
-        device.queue_wait_idle(graphics_queue)
+        device
+            .queue_wait_idle(graphics_queue)
             .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
         device.free_command_buffers(command_pool, &command_buffers);
     }
@@ -251,32 +510,35 @@ fn end_single_time_commands(
     Ok(())
 }
 
-fn transition_image_layout(
+fn cmd_transition_image_layout(
     device: &Device,
-    command_pool: vk::CommandPool,
-    graphics_queue: vk::Queue,
+    command_buffer: vk::CommandBuffer,
     image: vk::Image,
-    _format: vk::Format,
     old_layout: vk::ImageLayout,
     new_layout: vk::ImageLayout,
 ) -> Result<()> {
-    let command_buffer = begin_single_time_commands(device, command_pool)?;
-
-    let (src_access_mask, dst_access_mask, source_stage, destination_stage) = match (old_layout, new_layout) {
-        (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
-            vk::AccessFlags::empty(),
-            vk::AccessFlags::TRANSFER_WRITE,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-        ),
-        (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
-            vk::AccessFlags::TRANSFER_WRITE,
-            vk::AccessFlags::SHADER_READ,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-        ),
-        _ => return Err(ForgeError::Vulkan("Unsupported layout transition".into())),
-    };
+    let (src_access_mask, dst_access_mask, source_stage, destination_stage) =
+        match (old_layout, new_layout) {
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+            ),
+            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
+                vk::AccessFlags::SHADER_READ,
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            _ => return Err(ForgeError::Vulkan("Unsupported layout transition".into())),
+        };
 
     let barrier = vk::ImageMemoryBarrier {
         old_layout,
@@ -307,6 +569,69 @@ fn transition_image_layout(
             &[barrier],
         );
     }
+    Ok(())
+}
+
+fn transition_image_layout(
+    device: &Device,
+    command_pool: vk::CommandPool,
+    graphics_queue: vk::Queue,
+    image: vk::Image,
+    _format: vk::Format,
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> Result<()> {
+    let command_buffer = begin_single_time_commands(device, command_pool)?;
+    cmd_transition_image_layout(device, command_buffer, image, old_layout, new_layout)?;
+
+    end_single_time_commands(device, command_pool, graphics_queue, command_buffer)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_buffer_to_image_region(
+    device: &Device,
+    command_pool: vk::CommandPool,
+    graphics_queue: vk::Queue,
+    buffer: vk::Buffer,
+    image: vk::Image,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let command_buffer = begin_single_time_commands(device, command_pool)?;
+
+    let region = vk::BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image_subresource: vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: vk::Offset3D {
+            x: x as i32,
+            y: y as i32,
+            z: 0,
+        },
+        image_extent: vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        },
+    };
+
+    unsafe {
+        device.cmd_copy_buffer_to_image(
+            command_buffer,
+            buffer,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[region],
+        );
+    }
 
     end_single_time_commands(device, command_pool, graphics_queue, command_buffer)
 }
@@ -333,7 +658,11 @@ fn copy_buffer_to_image(
             layer_count: 1,
         },
         image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
-        image_extent: vk::Extent3D { width, height, depth: 1 },
+        image_extent: vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        },
     };
 
     unsafe {

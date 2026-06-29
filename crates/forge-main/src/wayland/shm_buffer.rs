@@ -1,3 +1,7 @@
+use super::connection::WaylandState;
+use forge_core::geometry::Size;
+use forge_core::{ForgeError, Result};
+use std::os::fd::AsFd;
 use wayland_client::{
     protocol::{
         wl_buffer::WlBuffer,
@@ -7,10 +11,6 @@ use wayland_client::{
     },
     QueueHandle,
 };
-use forge_core::geometry::Size;
-use forge_core::{ForgeError, Result};
-use super::connection::WaylandState;
-use std::os::fd::AsFd;
 
 pub struct ShmBuffer {
     pub pool: WlShmPool,
@@ -27,13 +27,11 @@ pub struct ShmBuffer {
 unsafe impl Send for ShmBuffer {}
 
 impl ShmBuffer {
-    pub fn new(
-        shm: &WlShm,
-        qh: &QueueHandle<WaylandState>,
-        size: Size,
-    ) -> Result<Self> {
+    pub fn new(shm: &WlShm, qh: &QueueHandle<WaylandState>, size: Size) -> Result<Self> {
         if size.width == 0 || size.height == 0 {
-            return Err(ForgeError::Wayland("Cannot create SHM buffer with zero dimensions".to_string()));
+            return Err(ForgeError::Wayland(
+                "Cannot create SHM buffer with zero dimensions".to_string(),
+            ));
         }
 
         let stride = (size.width as i32) * 4; // 4 bytes per pixel
@@ -42,7 +40,8 @@ impl ShmBuffer {
         let memfd = rustix::fs::memfd_create(
             "forge-shm",
             rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
-        ).map_err(|e| ForgeError::Wayland(format!("memfd_create failed: {}", e)))?;
+        )
+        .map_err(|e| ForgeError::Wayland(format!("memfd_create failed: {}", e)))?;
 
         rustix::fs::ftruncate(&memfd, pool_size as u64)
             .map_err(|e| ForgeError::Wayland(format!("ftruncate failed: {}", e)))?;
@@ -56,7 +55,8 @@ impl ShmBuffer {
                 &memfd,
                 0,
             )
-        }.map_err(|e| ForgeError::Wayland(format!("mmap failed: {}", e)))?;
+        }
+        .map_err(|e| ForgeError::Wayland(format!("mmap failed: {}", e)))?;
 
         let pool = shm.create_pool(memfd.as_fd(), pool_size as i32, qh, ());
         let buffer = pool.create_buffer(

@@ -1,5 +1,5 @@
 use ash::{vk, Instance};
-use forge_core::{Result, ForgeError};
+use forge_core::{ForgeError, Result};
 
 /// Creates a Vulkan surface from a Wayland wl_display and wl_surface pointer.
 /// These pointers come from the wayland-client objects.
@@ -9,6 +9,12 @@ pub fn create_wayland_surface(
     wl_display: *mut std::ffi::c_void,
     wl_surface: *mut std::ffi::c_void,
 ) -> Result<vk::SurfaceKHR> {
+    if wl_display.is_null() || wl_surface.is_null() {
+        return Err(ForgeError::Vulkan(
+            "Cannot create Vulkan Wayland surface from null wl_display or wl_surface".to_string(),
+        ));
+    }
+
     let wayland_surface_loader = ash::khr::wayland_surface::Instance::new(entry, instance);
 
     let create_info = vk::WaylandSurfaceCreateInfoKHR {
@@ -18,7 +24,8 @@ pub fn create_wayland_surface(
     };
 
     unsafe {
-        wayland_surface_loader.create_wayland_surface(&create_info, None)
+        wayland_surface_loader
+            .create_wayland_surface(&create_info, None)
             .map_err(|e| ForgeError::Vulkan(format!("Failed to create Wayland surface: {}", e)))
     }
 }
@@ -39,14 +46,30 @@ impl SurfaceDetails {
         unsafe {
             let capabilities = surface_loader
                 .get_physical_device_surface_capabilities(physical_device, surface)
-                .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
+                .map_err(|e| {
+                    ForgeError::Vulkan(format!(
+                        "Failed to query Vulkan surface capabilities: {}",
+                        e
+                    ))
+                })?;
             let formats = surface_loader
                 .get_physical_device_surface_formats(physical_device, surface)
-                .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
+                .map_err(|e| {
+                    ForgeError::Vulkan(format!("Failed to query Vulkan surface formats: {}", e))
+                })?;
             let present_modes = surface_loader
                 .get_physical_device_surface_present_modes(physical_device, surface)
-                .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
-            Ok(SurfaceDetails { capabilities, formats, present_modes })
+                .map_err(|e| {
+                    ForgeError::Vulkan(format!(
+                        "Failed to query Vulkan surface present modes: {}",
+                        e
+                    ))
+                })?;
+            Ok(SurfaceDetails {
+                capabilities,
+                formats,
+                present_modes,
+            })
         }
     }
 
@@ -55,13 +78,23 @@ impl SurfaceDetails {
     /// Falls back to the first available format.
     pub fn choose_format(&self) -> Result<vk::SurfaceFormatKHR> {
         if self.formats.is_empty() {
-            return Err(ForgeError::Vulkan("No surface formats available".to_string()));
+            return Err(ForgeError::Vulkan(
+                "No surface formats available".to_string(),
+            ));
         }
 
-        Ok(self.formats.iter().find(|f| {
-            f.format == vk::Format::B8G8R8A8_SRGB
-                && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-        }).copied().unwrap_or(self.formats[0]))
+        Ok(self
+            .formats
+            .iter()
+            .find(|f| {
+                f.format == vk::Format::B8G8R8A8_SRGB
+                    && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            })
+            .copied()
+            .unwrap_or_else(|| {
+                println!("FALLING BACK TO {:?}", self.formats[0]);
+                self.formats[0]
+            }))
     }
 
     /// Selects the best present mode.

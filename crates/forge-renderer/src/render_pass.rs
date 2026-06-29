@@ -1,5 +1,5 @@
 use ash::{vk, Device};
-use forge_core::{Result, ForgeError};
+use forge_core::{ForgeError, Result};
 
 /// Creates the main render pass with a single color attachment.
 /// The attachment uses the swapchain's image format.
@@ -49,7 +49,8 @@ pub fn create_render_pass(device: &Device, format: vk::Format) -> Result<vk::Ren
     };
 
     unsafe {
-        device.create_render_pass(&render_pass_info, None)
+        device
+            .create_render_pass(&render_pass_info, None)
             .map_err(|e| ForgeError::Vulkan(format!("Failed to create render pass: {}", e)))
     }
 }

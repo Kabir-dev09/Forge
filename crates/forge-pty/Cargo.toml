@@ -11,3 +11,7 @@ unicode-width = { workspace = true }
 vte = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+
+[[bench]]
+name = "pty_baseline"
+harness = false

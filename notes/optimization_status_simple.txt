@@ -1,0 +1,112 @@
+Forge optimization status - simple list
+
+This list only tracks optimization work.
+It does not list every bug fix.
+
+Optimizations already made
+
+1. Dirty-frame guardrails and measurement
+   - The app avoids drawing when nothing visual changed.
+   - Renderer stats/counters exist for dirty rows, vertices, and uploaded bytes.
+   - A baseline checklist was saved in notes/rendering_baseline_checklist.md.
+
+2. Persistent mapped vertex buffer
+   - Vulkan vertex memory is mapped once and reused.
+   - Per-frame map/unmap work was removed.
+   - A ring-style per-frame vertex region is used.
+
+3. Row vertex range tracking
+   - The tessellator tracks vertex ranges per row.
+   - Dirty rows can rebuild only their cached row data.
+   - This is a foundation for future partial upload/redraw work.
+
+4. Cell grid diffing
+   - Writing the same cell again no longer dirties the row unnecessarily.
+   - Repeated identical text output causes less redraw work.
+   - Wide-cell handling was included.
+
+5. Cursor blink minimal dirtying
+   - Cursor blink dirties only the affected cursor row.
+   - Old and new cursor rows are tracked.
+   - Idle redraw behavior is cheaper than before.
+
+6. Scroll tessellation reuse
+   - Full-screen scrolls can reuse translated cached row vertices.
+   - Only newly exposed rows need rebuilding when safe.
+   - Conservative fallbacks remain for unsafe cases.
+
+7. Mouse-motion redraw filtering
+   - Passive mouse movement does not trigger redraw work when nothing visual changes.
+   - Scrollbar, selection, dragging, and mouse reporting still keep the needed behavior.
+
+8. Dynamic glyph cache, phase 1
+   - Missing glyphs can be detected.
+   - New glyphs can be inserted into the atlas dynamically.
+   - Rendering can retry after inserting newly needed glyphs.
+
+9. Pre-rasterized atlas narrowing
+   - The startup/static atlas was reduced.
+   - Rare glyphs are handled dynamically instead of all being preloaded.
+   - This reduces startup/background font work and atlas upload size.
+
+10. Run-based background merging
+   - Adjacent cells with the same background are merged into fewer background quads.
+   - This reduces vertex count for common rows.
+
+11. Wayland damage tracking design
+   - A design note was written in notes/wayland_damage_tracking_design.md.
+   - Partial Wayland damage was intentionally not enabled yet because the current Vulkan path still clears/redraws the full swapchain image.
+
+12. True partial vertex upload
+   - Each in-flight vertex-buffer region now tracks the row generations and vertex ranges it contains.
+   - If the vertex layout is unchanged, only changed row ranges and the scrollbar overlay are copied into Vulkan memory.
+   - If ranges, counts, scrollbar topology, or vertex count change, the renderer safely falls back to a full vertex upload.
+
+13. Dynamic atlas pressure instrumentation
+   - Dynamic glyph insertion now reports whether a glyph was inserted, already present, or blocked because the atlas is full.
+   - Render stats can count dynamic glyph attempts, insertions, already-present hits, and capacity failures.
+   - This provides evidence for whether multi-atlas support is actually needed.
+
+14. Instanced rendering evaluation
+   - A detailed evaluation was saved in notes/instanced_rendering_evaluation.md.
+   - Instancing was not implemented because the current evidence does not justify the shader, pipeline, row-range, and upload-path risk.
+   - It should only be reconsidered if render stats prove vertex bandwidth is still a bottleneck.
+
+Optimizations still left to do
+
+1. True partial redraw / preserved rendering model
+   - Needed before partial Wayland damage is safe.
+   - Options include preserved swapchain contents or an offscreen terminal surface cache.
+
+2. Partial Wayland damage
+   - Not safe yet.
+   - Should only be implemented after unchanged pixels are preserved correctly.
+
+3. Multi-atlas / atlas eviction strategy
+   - A plan exists in notes/multi_atlas_eviction_implementation_plan.md.
+   - Not implemented yet.
+   - Needed only if the dynamic glyph cache reports atlas capacity failures in real use.
+
+4. Shaping cache integration
+   - Not implemented as a full production path.
+   - Useful for ligatures and complex text, but high risk for a terminal renderer.
+
+5. Emoji rendering path
+   - Not implemented as a proper color emoji path.
+   - Needs careful Unicode, fallback font, and atlas design work.
+
+6. Row texture cache or full terminal surface cache
+   - Not implemented.
+   - Could help partial redraw later, but adds memory and complexity.
+
+7. Advanced font techniques
+   - SDF/MSDF fonts, GPU path rendering, and compute shader glyph rasterization are not planned now.
+   - They are complex and not the best fit for crisp terminal text at fixed sizes.
+
+Recommended next practical work
+
+1. Design a safe preserved rendering model.
+2. Only then implement partial Wayland damage.
+3. Delay multi-atlas eviction until real atlas pressure is observed.
+4. Delay shaping, emoji, and surface caches until the core renderer is stable.
+5. Reconsider instancing only if render stats prove vertex bandwidth is still a bottleneck.

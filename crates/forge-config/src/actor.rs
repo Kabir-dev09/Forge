@@ -1,9 +1,9 @@
-use std::thread;
-use std::path::PathBuf;
-use mlua::{Lua, Table};
-use crossbeam_channel::{Sender, Receiver, bounded};
+use crate::types::{ConfigChangeSet, ConfigUpdate};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use forge_core::config_registry::ForgeConfig;
-use crate::types::ConfigUpdate;
+use mlua::{Lua, Table};
+use std::path::PathBuf;
+use std::thread;
 
 /// Messages sent from the Main Thread to the Config Actor.
 pub enum ActorMessage {
@@ -40,22 +40,46 @@ pub fn spawn_config_actor(config_path: PathBuf) -> ConfigActorHandle {
 fn actor_loop(config_path: PathBuf, rx: Receiver<ActorMessage>, tx: Sender<ConfigUpdate>) {
     tracing::debug!("Config Actor thread started.");
 
+    // Auto-create default config if missing (off the main thread to prevent blocking)
+    if !config_path.exists() {
+        if let Some(parent) = config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let default_config = include_str!("../../../forge_config_example.lua");
+        if let Err(e) = std::fs::write(&config_path, default_config) {
+            tracing::warn!("Failed to write default config to {:?}: {}", config_path, e);
+        } else {
+            tracing::info!("Created default config file at {:?}", config_path);
+        }
+    }
+
     // Initialize Lua VM
     let lua = Lua::new();
 
     // Load initial config
-    let initial_update = load_and_eval(&lua, &config_path).unwrap_or_else(|| ConfigUpdate {
-        config: forge_core::config_registry::ForgeConfig::default(),
+    let initial_config = load_and_eval(&lua, &config_path).unwrap_or_else(|| {
+        tracing::warn!("Initial config load failed. Falling back to defaults.");
+        forge_core::config_registry::ForgeConfig::default()
     });
-    let _ = tx.send(initial_update);
+    let _ = tx.send(ConfigUpdate {
+        config: initial_config.clone(),
+        changes: ConfigChangeSet::all(),
+    });
+    let mut current_config = initial_config;
 
     // Event loop
     while let Ok(msg) = rx.recv() {
         match msg {
             ActorMessage::Shutdown => break,
             ActorMessage::Reload => {
-                if let Some(update) = load_and_eval(&lua, &config_path) {
-                    let _ = tx.send(update);
+                if let Some(config) = load_and_eval(&lua, &config_path) {
+                    let changes = ConfigChangeSet::between(&current_config, &config);
+                    if changes.any() {
+                        current_config = config.clone();
+                        let _ = tx.send(ConfigUpdate { config, changes });
+                    } else {
+                        tracing::debug!("Config reload produced no changes.");
+                    }
                 }
             }
         }
@@ -64,12 +88,28 @@ fn actor_loop(config_path: PathBuf, rx: Receiver<ActorMessage>, tx: Sender<Confi
     tracing::debug!("Config Actor thread shutting down.");
 }
 
-fn load_and_eval(lua: &Lua, config_path: &PathBuf) -> Option<ConfigUpdate> {
-    // 1. Read file contents. If missing, use a default string:
-    //    `return { font = { size = 14.0 }, window = { opacity = 0.9 } }`
-    let source = std::fs::read_to_string(config_path).unwrap_or_else(|_| {
-        tracing::info!("No config found at {:?}, using default.", config_path);
-        "return {}".to_string()
+const DEFAULT_CONFIG: &str = include_str!("default_config.lua");
+
+fn load_and_eval(lua: &Lua, config_path: &PathBuf) -> Option<ForgeConfig> {
+    // 1. Read file contents. If missing, write the default config and use it.
+    let source = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            tracing::info!(
+                "No config found at {:?}, generating default config.",
+                config_path
+            );
+            if let Some(parent) = config_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(config_path, DEFAULT_CONFIG);
+        } else {
+            tracing::info!(
+                "Failed to read config at {:?}: {}, using default.",
+                config_path,
+                e
+            );
+        }
+        DEFAULT_CONFIG.to_string()
     });
 
     // 2. Evaluate Lua code.
@@ -77,7 +117,7 @@ fn load_and_eval(lua: &Lua, config_path: &PathBuf) -> Option<ConfigUpdate> {
     let table = match result {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!("Lua config error: {}", e);
+            tracing::warn!("Lua config parse/eval error in {:?}: {}", config_path, e);
             return None; // Keep previous state on error
         }
     };
@@ -89,5 +129,5 @@ fn load_and_eval(lua: &Lua, config_path: &PathBuf) -> Option<ConfigUpdate> {
     // 4. Validate limits.
     config.validate();
 
-    Some(ConfigUpdate { config })
+    Some(config)
 }

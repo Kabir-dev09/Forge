@@ -1,0 +1,10 @@
+# Runtime Dependencies for Forge Terminal
+To run Forge, the following runtime libraries must be present on your system (they are typically pre-installed on most modern Linux desktop distributions):
+
+- A Wayland Compositor (Mutter, KWin, Sway, Hyprland, etc.)
+- Vulkan Drivers (mesa-vulkan-drivers, vulkan-intel, vulkan-radeon, nvidia-driver, etc.)
+- libvulkan1 (or vulkan-loader)
+- libwayland-client0 (or wayland-client)
+- libxkbcommon0 (or libxkbcommon)
+- libfontconfig1 (or fontconfig)
+- libfreetype6 (or freetype)

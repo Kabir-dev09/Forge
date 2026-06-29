@@ -1,8 +1,11 @@
+use crate::wayland::connection::WaylandState;
 use wayland_client::{
-    protocol::{wl_callback::{self, WlCallback}, wl_surface::WlSurface},
+    protocol::{
+        wl_callback::{self, WlCallback},
+        wl_surface::WlSurface,
+    },
     Dispatch, QueueHandle,
 };
-use crate::wayland::connection::WaylandState;
 
 /// Requests a frame callback from the compositor.
 /// Call this after every frame commit.

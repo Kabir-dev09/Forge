@@ -1,8 +1,8 @@
+use crate::wayland::connection::WaylandState;
 use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
-use wayland_client::EventQueue;
 use forge_core::{ForgeError, Result};
-use crate::wayland::connection::WaylandState;
+use wayland_client::EventQueue;
 
 pub struct AppData {
     pub wayland_state: WaylandState,
@@ -23,7 +23,15 @@ pub struct AppData {
     pub pointer_y: f64,
     pub scroll_accum: f64,
     pub last_window_size: forge_core::geometry::Size,
-    pub font_atlas_receiver: Option<std::sync::mpsc::Receiver<(forge_renderer::font::rasterizer::FontRasterizer, forge_renderer::font::atlas::GlyphAtlas)>>,
+    pub font_atlas_receiver: Option<
+        std::sync::mpsc::Receiver<(
+            forge_renderer::font::rasterizer::FontRasterizer,
+            Option<forge_renderer::font::rasterizer::FontRasterizer>,
+            Vec<forge_renderer::font::rasterizer::FontRasterizer>,
+            f32,
+            forge_renderer::font::atlas::GlyphAtlas,
+        )>,
+    >,
     pub cursor_visible_phase: bool,
     pub last_cursor_blink: std::time::Instant,
     pub config_rx: Option<crossbeam_channel::Receiver<forge_config::ConfigUpdate>>,
@@ -37,12 +45,194 @@ pub struct AppData {
     pub current_thumb_opacity: f32,
     pub is_dragging_scrollbar: bool,
     pub scrollbar_drag_offset_y: f64,
+    pub startup_start: std::time::Instant,
+    pub first_vulkan_text_frame_logged: bool,
+    pub cached_bg_color: forge_core::color::ColorF32,
+    pub cached_cursor_color: forge_core::color::ColorF32,
+    pub cached_selection_bg_color: forge_core::color::ColorF32,
+    pub cached_grid_metrics: Option<GridMetrics>,
 }
 
 impl AsMut<WaylandState> for AppData {
     fn as_mut(&mut self) -> &mut WaylandState {
         &mut self.wayland_state
     }
+}
+
+fn mark_cursor_row_dirty(
+    screen_buffer: &std::sync::Arc<std::sync::RwLock<forge_pty::ScreenBuffer>>,
+) {
+    let mut sb = screen_buffer.write().unwrap();
+    sb.mark_cursor_viewport_row_dirty();
+}
+
+fn clear_selection_and_mark_dirty(
+    screen_buffer: &std::sync::Arc<std::sync::RwLock<forge_pty::ScreenBuffer>>,
+) {
+    let mut sb = screen_buffer.write().unwrap();
+    sb.clear_selection();
+}
+
+fn debug_screen_artifacts(rows: &[&[forge_core::cell::Cell]]) {
+    static LOGGED_FRAMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    if std::env::var_os("FORGE_DEBUG_SCREEN_ARTIFACTS").is_none() {
+        return;
+    }
+
+    let frame_index = LOGGED_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if frame_index >= 40 {
+        return;
+    }
+
+    for (row_idx, row) in rows.iter().enumerate() {
+        for (col_idx, cell) in row.iter().enumerate() {
+            if cell.c != ';' {
+                continue;
+            }
+
+            let start = col_idx.saturating_sub(12);
+            let end = (col_idx + 13).min(row.len());
+            let context: String = row[start..end]
+                .iter()
+                .map(|cell| match cell.c {
+                    '\0' => '·',
+                    c if c.is_control() => '�',
+                    c => c,
+                })
+                .collect();
+            let codes: Vec<String> = row[start..end]
+                .iter()
+                .map(|cell| format!("U+{:04X}", cell.c as u32))
+                .collect();
+
+            tracing::warn!(
+                frame = frame_index,
+                row = row_idx,
+                col = col_idx,
+                context_start = start,
+                context = %context,
+                codes = ?codes,
+                fg = ?cell.fg,
+                bg = ?cell.bg,
+                flags = cell.flags,
+                "Screen buffer contains literal semicolon cell"
+            );
+        }
+    }
+}
+
+fn scrollbar_overlay_wants_redraw(
+    use_alt_buffer: bool,
+    scrollback_lines: usize,
+    current_thumb_opacity: f32,
+    current_track_opacity: f32,
+    is_hovering_edge: bool,
+    is_dragging_scrollbar: bool,
+    last_mouse_activity: std::time::Instant,
+    mouse_started_moving: std::time::Instant,
+    now: std::time::Instant,
+) -> bool {
+    if use_alt_buffer || scrollback_lines == 0 {
+        return false;
+    }
+
+    if is_hovering_edge || is_dragging_scrollbar {
+        return true;
+    }
+
+    let idle_secs = now.duration_since(last_mouse_activity).as_secs_f32();
+    let active_secs = now.duration_since(mouse_started_moving).as_secs_f32();
+    let pointer_reveal_active = idle_secs < 0.5;
+    let pointer_reveal_pending = pointer_reveal_active && active_secs < 0.25;
+    let pointer_reveal_visible = pointer_reveal_active && active_secs >= 0.25;
+
+    pointer_reveal_pending
+        || pointer_reveal_visible
+        || current_thumb_opacity > 0.01
+        || current_track_opacity > 0.01
+}
+
+fn reveal_scrollbar_from_scroll(app_data: &mut AppData, now: std::time::Instant) {
+    app_data.last_mouse_activity = now;
+    app_data.mouse_started_moving = now
+        .checked_sub(std::time::Duration::from_millis(250))
+        .unwrap_or(now);
+    app_data.wayland_state.force_redraw = true;
+    app_data.loop_signal.wakeup();
+}
+
+fn pointer_motion_has_effect(
+    use_alt_buffer: bool,
+    scrollback_lines: usize,
+    mouse_tracking_enabled: bool,
+    active_mouse_button: Option<u32>,
+    drag_start: Option<(usize, usize)>,
+    is_dragging_scrollbar: bool,
+) -> bool {
+    if drag_start.is_some() || is_dragging_scrollbar {
+        return true;
+    }
+
+    if mouse_tracking_enabled && active_mouse_button.is_some() {
+        return true;
+    }
+
+    !use_alt_buffer && scrollback_lines > 0
+}
+
+fn frame_wants_redraw(
+    has_dirty_rows: bool,
+    force_redraw: bool,
+    scrollbar_wants_redraw: bool,
+) -> bool {
+    has_dirty_rows || force_redraw || scrollbar_wants_redraw
+}
+
+fn frame_should_mark_clean(needs_recreate: bool) -> bool {
+    !needs_recreate
+}
+
+fn renderer_scroll_event(
+    event: forge_pty::ScrollEvent,
+) -> forge_renderer::grid_tessellator::ScrollEvent {
+    let direction = match event.direction {
+        forge_pty::ScrollDirection::Up => forge_renderer::grid_tessellator::ScrollDirection::Up,
+        forge_pty::ScrollDirection::Down => forge_renderer::grid_tessellator::ScrollDirection::Down,
+    };
+
+    forge_renderer::grid_tessellator::ScrollEvent {
+        direction,
+        top: event.top,
+        bottom: event.bottom,
+        lines: event.lines,
+        full_viewport: event.full_viewport,
+    }
+}
+
+fn pointer_layout_metrics(app_data: &AppData) -> (f64, f64, f64, f64) {
+    let metrics = if let Some(m) = app_data.cached_grid_metrics {
+        m
+    } else {
+        let cell_w = app_data.renderer.as_ref().map(|r| r.cell_width as f64).unwrap_or(10.0);
+        let cell_h = app_data.renderer.as_ref().map(|r| r.cell_height as f64).unwrap_or(20.0);
+        let win_w = app_data.wayland_state.window.as_ref().map(|w| w.size.width as f64).unwrap_or(800.0);
+        let win_h = app_data.wayland_state.window.as_ref().map(|w| w.size.height as f64).unwrap_or(600.0);
+        compute_grid_metrics(
+            win_w,
+            win_h,
+            &app_data.config.window.padding,
+            app_data.config.window.padding_balance,
+            cell_w,
+            cell_h,
+        )
+    };
+    (
+        metrics.effective_cell_w,
+        metrics.effective_cell_h,
+        metrics.pad_x,
+        metrics.pad_y,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -58,18 +248,34 @@ pub fn run_event_loop(
     paste_receiver: std::sync::mpsc::Receiver<Vec<u8>>,
     config: forge_core::config_registry::ForgeConfig,
     renderer: Option<forge_renderer::Renderer>,
-    font_atlas_receiver: Option<std::sync::mpsc::Receiver<(forge_renderer::font::rasterizer::FontRasterizer, forge_renderer::font::atlas::GlyphAtlas)>>,
+    font_atlas_receiver: Option<
+        std::sync::mpsc::Receiver<(
+            forge_renderer::font::rasterizer::FontRasterizer,
+            Option<forge_renderer::font::rasterizer::FontRasterizer>,
+            Vec<forge_renderer::font::rasterizer::FontRasterizer>,
+            f32,
+            forge_renderer::font::atlas::GlyphAtlas,
+        )>,
+    >,
     config_rx: Option<crossbeam_channel::Receiver<forge_config::ConfigUpdate>>,
     watcher: Option<notify::RecommendedWatcher>,
+    startup_start: std::time::Instant,
 ) -> Result<()> {
-
     let loop_handle = event_loop.handle();
     let loop_signal = event_loop.get_signal();
 
     let queue_handle = event_queue.handle();
 
     // We can't flush yet, but `wayland_state` is updated. We'll set needs_flush below.
-    let initial_window_size = wayland_state.window.as_ref().map(|w| w.size).unwrap_or(forge_core::geometry::Size { width: 0, height: 0 });
+    let initial_window_size =
+        wayland_state
+            .window
+            .as_ref()
+            .map(|w| w.size)
+            .unwrap_or(forge_core::geometry::Size {
+                width: 0,
+                height: 0,
+            });
     let mut wayland_state = wayland_state;
     wayland_state.keybindings = config.keybindings.clone();
     wayland_state.hide_mouse_when_typing = config.behavior.hide_mouse_when_typing;
@@ -83,9 +289,11 @@ pub fn run_event_loop(
     }
 
     let source = WaylandSource::new(wayland_state.conn.clone(), event_queue);
-    loop_handle.insert_source(source, |(), queue, app_data| {
-        queue.dispatch_pending(&mut app_data.wayland_state)
-    }).map_err(|e| ForgeError::Wayland(e.to_string()))?;
+    loop_handle
+        .insert_source(source, |(), queue, app_data| {
+            queue.dispatch_pending(&mut app_data.wayland_state)
+        })
+        .map_err(|e| ForgeError::Wayland(e.to_string()))?;
 
     let loop_signal_clone = loop_signal.clone();
     let mut app_data = AppData {
@@ -96,7 +304,7 @@ pub fn run_event_loop(
         key_receiver,
         pointer_receiver,
         paste_receiver,
-        config,
+        config: config.clone(),
         renderer,
         queue_handle,
         drag_start: None,
@@ -121,14 +329,27 @@ pub fn run_event_loop(
         current_thumb_opacity: 0.0,
         is_dragging_scrollbar: false,
         scrollbar_drag_offset_y: 0.0,
+        startup_start,
+        first_vulkan_text_frame_logged: false,
+        cached_bg_color: config.theme.background.to_srgb_linear(),
+        cached_cursor_color: config.theme.cursor_color.to_srgb_linear(),
+        cached_selection_bg_color: config.theme.selection_bg.to_srgb_linear(),
+        cached_grid_metrics: None,
     };
 
-    let pty_fd = app_data.pty.as_ref().unwrap().master_fd.try_clone()
+    let pty_fd = app_data
+        .pty
+        .as_ref()
+        .ok_or_else(|| {
+            ForgeError::Other("PTY was not initialized before entering event loop".to_string())
+        })?
+        .master_fd
+        .try_clone()
         .map_err(|e| ForgeError::Other(format!("Failed to clone PTY fd: {}", e)))?;
     let sb_clone = app_data.screen_buffer.clone();
     let shell_exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let shell_exited_clone = shell_exited.clone();
-    
+
     // Spawn the high-priority background thread for parsing PTY output
     std::thread::spawn(move || {
         use std::os::unix::io::AsRawFd;
@@ -139,9 +360,15 @@ pub fn run_event_loop(
         let mut flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
         flags &= !libc::O_NONBLOCK;
         unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags) };
-        
+
         loop {
-            let n = unsafe { libc::read(raw_fd, read_buf.as_mut_ptr() as *mut libc::c_void, read_buf.len()) };
+            let n = unsafe {
+                libc::read(
+                    raw_fd,
+                    read_buf.as_mut_ptr() as *mut libc::c_void,
+                    read_buf.len(),
+                )
+            };
             if n <= 0 {
                 // If it's EAGAIN/EWOULDBLOCK, we should poll or sleep, but since we remove O_NONBLOCK, it should just block.
                 // If it really returns 0, the shell exited.
@@ -157,9 +384,15 @@ pub fn run_event_loop(
             let responses = vte_processor.process(data, &mut sb);
             sb.view_scroll_to_bottom();
             drop(sb); // Release the lock before writing to PTY (avoid deadlocks)
-            
+
             if !responses.is_empty() {
-                unsafe { libc::write(raw_fd, responses.as_ptr() as *const libc::c_void, responses.len()) };
+                unsafe {
+                    libc::write(
+                        raw_fd,
+                        responses.as_ptr() as *const libc::c_void,
+                        responses.len(),
+                    )
+                };
             }
             // Signal the Wayland loop that new frames are ready
             loop_signal_clone.wakeup();
@@ -175,7 +408,7 @@ pub fn run_event_loop(
             break;
         }
         // tracing::trace!("Event loop top");
-        
+
         let mut timeout = None;
         if let Some(repeating) = &app_data.wayland_state.repeating_key {
             let now = std::time::Instant::now();
@@ -186,7 +419,12 @@ pub fn run_event_loop(
             }
         }
 
-        let cursor_blink = app_data.screen_buffer.write().unwrap().cursor_blink_override.unwrap_or(app_data.config.cursor.blink);
+        let cursor_blink = app_data
+            .screen_buffer
+            .read()
+            .unwrap()
+            .cursor_blink_override
+            .unwrap_or(app_data.config.cursor.blink);
         if cursor_blink {
             let blink_rate = app_data.config.cursor.blink_rate_ms as u128;
             let elapsed = app_data.last_cursor_blink.elapsed().as_millis();
@@ -202,10 +440,25 @@ pub fn run_event_loop(
             }
         }
 
-
-        event_loop.dispatch(timeout, &mut app_data).map_err(|e| ForgeError::Other(e.to_string()))?;
-        if app_data.wayland_state.is_alt_buffer != app_data.screen_buffer.write().unwrap().use_alt_buffer {
-            app_data.wayland_state.is_alt_buffer = app_data.screen_buffer.write().unwrap().use_alt_buffer;
+        event_loop
+            .dispatch(timeout, &mut app_data)
+            .map_err(|e| ForgeError::Other(e.to_string()))?;
+        let use_alt_buffer = app_data.screen_buffer.read().unwrap().use_alt_buffer;
+        if app_data.wayland_state.is_alt_buffer != use_alt_buffer {
+            app_data.wayland_state.is_alt_buffer = use_alt_buffer;
+            if use_alt_buffer {
+                let had_scrollbar_state = app_data.is_hovering_edge
+                    || app_data.is_dragging_scrollbar
+                    || app_data.current_thumb_opacity > 0.01
+                    || app_data.current_track_opacity > 0.01;
+                app_data.is_hovering_edge = false;
+                app_data.is_dragging_scrollbar = false;
+                app_data.current_thumb_opacity = 0.0;
+                app_data.current_track_opacity = 0.0;
+                if had_scrollbar_state {
+                    app_data.wayland_state.force_redraw = true;
+                }
+            }
             // The cursor shape will naturally update on the next pointer motion or enter event.
         }
         if cursor_blink {
@@ -213,18 +466,12 @@ pub fn run_event_loop(
             if app_data.last_cursor_blink.elapsed().as_millis() >= blink_rate {
                 app_data.cursor_visible_phase = !app_data.cursor_visible_phase;
                 app_data.last_cursor_blink = std::time::Instant::now();
-                let r = app_data.screen_buffer.write().unwrap().cursor.row;
-                if r < app_data.screen_buffer.read().unwrap().dirty_rows.len() {
-                    app_data.screen_buffer.write().unwrap().dirty_rows[r] = true;
-                }
+                mark_cursor_row_dirty(&app_data.screen_buffer);
             }
         } else {
             if !app_data.cursor_visible_phase {
                 app_data.cursor_visible_phase = true;
-                let r = app_data.screen_buffer.write().unwrap().cursor.row;
-                if r < app_data.screen_buffer.read().unwrap().dirty_rows.len() {
-                    app_data.screen_buffer.write().unwrap().dirty_rows[r] = true;
-                }
+                mark_cursor_row_dirty(&app_data.screen_buffer);
             }
         }
 
@@ -242,44 +489,39 @@ pub fn run_event_loop(
                 }
                 if let Some((rate, _)) = app_data.wayland_state.repeat_info {
                     if rate > 0 {
-                        repeating.next_repeat_time = now + std::time::Duration::from_millis(1000 / rate as u64);
+                        repeating.next_repeat_time =
+                            now + std::time::Duration::from_millis(1000 / rate as u64);
                     }
                 }
-                
+
                 // Typing trap
                 app_data.cursor_visible_phase = true;
                 app_data.last_cursor_blink = std::time::Instant::now();
-                let r = app_data.screen_buffer.write().unwrap().cursor.row;
-                if r < app_data.screen_buffer.read().unwrap().dirty_rows.len() {
-                    app_data.screen_buffer.write().unwrap().dirty_rows[r] = true;
-                }
+                mark_cursor_row_dirty(&app_data.screen_buffer);
             }
         }
 
         while let Ok(input) = app_data.key_receiver.try_recv() {
-            if app_data.screen_buffer.write().unwrap().selection.take().is_some() {
-                app_data.screen_buffer.write().unwrap().mark_all_dirty();
-            }
+            clear_selection_and_mark_dirty(&app_data.screen_buffer);
             if let Some(pty) = app_data.pty.as_mut() {
                 let _ = pty.write_all(&input);
             }
-            
+
             // Typing trap
             app_data.cursor_visible_phase = true;
             app_data.last_cursor_blink = std::time::Instant::now();
-            let r = app_data.screen_buffer.write().unwrap().cursor.row;
-            if r < app_data.screen_buffer.read().unwrap().dirty_rows.len() {
-                app_data.screen_buffer.write().unwrap().dirty_rows[r] = true;
-            }
+            mark_cursor_row_dirty(&app_data.screen_buffer);
         }
 
         while let Ok(bytes) = app_data.paste_receiver.try_recv() {
-            if app_data.screen_buffer.write().unwrap().selection.take().is_some() {
-                app_data.screen_buffer.write().unwrap().mark_all_dirty();
-            }
-            tracing::info!("[PASTE TIMING] Event loop received from paste_receiver at {:?}", std::time::Instant::now());
+            clear_selection_and_mark_dirty(&app_data.screen_buffer);
+            tracing::info!(
+                "[PASTE TIMING] Event loop received from paste_receiver at {:?}",
+                std::time::Instant::now()
+            );
             if let Some(pty) = app_data.pty.as_mut() {
-                if app_data.screen_buffer.read().unwrap().bracketed_paste {
+                let bracketed_paste = app_data.screen_buffer.read().unwrap().bracketed_paste;
+                if bracketed_paste {
                     let mut wrapped = Vec::with_capacity(bytes.len() + 12);
                     wrapped.extend_from_slice(b"\x1b[200~");
                     wrapped.extend_from_slice(&bytes);
@@ -288,30 +530,38 @@ pub fn run_event_loop(
                 } else {
                     let _ = pty.write_all(&bytes);
                 }
-                tracing::info!("[PASTE TIMING] Event loop wrote to PTY at {:?}", std::time::Instant::now());
+                tracing::info!(
+                    "[PASTE TIMING] Event loop wrote to PTY at {:?}",
+                    std::time::Instant::now()
+                );
             }
 
             // Typing trap
             app_data.cursor_visible_phase = true;
             app_data.last_cursor_blink = std::time::Instant::now();
-            let r = app_data.screen_buffer.write().unwrap().cursor.row;
-            if r < app_data.screen_buffer.read().unwrap().dirty_rows.len() {
-                app_data.screen_buffer.write().unwrap().dirty_rows[r] = true;
-            }
+            mark_cursor_row_dirty(&app_data.screen_buffer);
         }
 
         if let Some(rx) = app_data.font_atlas_receiver.as_ref() {
-            if let Ok((rasterizer, atlas)) = rx.try_recv() {
+            if let Ok((rasterizer, bold_rasterizer, fallback_rasterizers, px_size, atlas)) =
+                rx.try_recv()
+            {
                 tracing::info!("Received full FontData from background thread!");
                 if let Some(renderer) = app_data.renderer.as_mut() {
                     let old_cell_w = renderer.cell_width;
                     let old_cell_h = renderer.cell_height;
-                    
-                    if let Err(e) = renderer.update_font_data(rasterizer, atlas) {
+
+                    if let Err(e) = renderer.update_font_data(
+                        rasterizer,
+                        bold_rasterizer,
+                        fallback_rasterizers,
+                        px_size,
+                        atlas,
+                    ) {
                         tracing::error!("Failed to update font atlas: {}", e);
                     } else {
                         app_data.screen_buffer.write().unwrap().mark_all_dirty();
-                        
+
                         let cache = forge_core::cache::StartupCache::new_cache(
                             &app_data.config,
                             renderer.cell_width,
@@ -334,13 +584,25 @@ pub fn run_event_loop(
                                         cell_w,
                                         cell_h,
                                     );
+                                    app_data.cached_grid_metrics = Some(metrics);
                                     let new_cols = metrics.cols;
                                     let new_rows = metrics.rows;
-                                    app_data.screen_buffer.write().unwrap().resize_reflow(new_cols, new_rows);
+                                    app_data
+                                        .screen_buffer
+                                        .write()
+                                        .unwrap()
+                                        .resize_reflow(new_cols, new_rows);
                                     if let Some(pty) = app_data.pty.as_mut() {
-                                        let px_w = (new_cols as f64 * metrics.effective_cell_w) as u16;
-                                        let px_h = (new_rows as f64 * metrics.effective_cell_h) as u16;
-                                        let _ = pty.resize(new_cols as u16, new_rows as u16, px_w, px_h);
+                                        let px_w =
+                                            (new_cols as f64 * metrics.effective_cell_w) as u16;
+                                        let px_h =
+                                            (new_rows as f64 * metrics.effective_cell_h) as u16;
+                                        let _ = pty.resize(
+                                            new_cols as u16,
+                                            new_rows as u16,
+                                            px_w,
+                                            px_h,
+                                        );
                                     }
                                 }
                             }
@@ -359,21 +621,51 @@ pub fn run_event_loop(
             }
 
             if let Some(update) = latest_update {
-                tracing::info!("Applying live config update.");
-
-                // 1. Check what changed.
-                let old_theme = app_data.config.theme.clone();
+                tracing::info!(changes = ?update.changes, "Applying live config update.");
+                let changes = update.changes;
                 let new_theme = update.config.theme.clone();
 
                 // 2. Update the config in AppData.
                 app_data.config = update.config;
-                app_data.wayland_state.keybindings = app_data.config.keybindings.clone();
-                app_data.wayland_state.hide_mouse_when_typing = app_data.config.behavior.hide_mouse_when_typing;
+                app_data.cached_bg_color = app_data.config.theme.background.to_srgb_linear();
+                app_data.cached_cursor_color = app_data.config.theme.cursor_color.to_srgb_linear();
+                app_data.cached_selection_bg_color = app_data.config.theme.selection_bg.to_srgb_linear();
+                if changes.keybindings {
+                    app_data.wayland_state.keybindings = app_data.config.keybindings.clone();
+                }
+                if changes.behavior {
+                    app_data.wayland_state.hide_mouse_when_typing =
+                        app_data.config.behavior.hide_mouse_when_typing;
+                }
+                if changes.window {
+                    app_data.screen_buffer.write().unwrap().mark_all_dirty();
+                    app_data.wayland_state.force_redraw = true;
+                }
+                if changes.blur {
+                    let compositor = app_data.wayland_state.globals.compositor.clone();
+                    let kde_blur_manager = app_data.wayland_state.globals.kde_blur_manager.clone();
+                    if let Some(window) = app_data.wayland_state.window.as_mut() {
+                        let blur_status = window.blur.apply(
+                            &window.surface,
+                            &compositor,
+                            kde_blur_manager.as_ref(),
+                            &app_data.queue_handle,
+                            window.size,
+                            &app_data.config.blur,
+                        );
+                        tracing::debug!(?blur_status, "Wayland blur config update applied");
+                        app_data.wayland_state.needs_flush = true;
+                    }
+                }
 
                 // 3. Apply changes.
                 // Trigger theme update if any colors changed
-                if old_theme != new_theme {
-                    app_data.screen_buffer.write().unwrap().update_theme(new_theme.foreground, new_theme.background, new_theme.ansi_colors);
+                if changes.theme {
+                    app_data.screen_buffer.write().unwrap().update_theme(
+                        new_theme.foreground,
+                        new_theme.background,
+                        new_theme.ansi_colors,
+                    );
 
                     if let Some(renderer) = app_data.renderer.as_ref() {
                         let cache = forge_core::cache::StartupCache::new_cache(
@@ -391,13 +683,12 @@ pub fn run_event_loop(
             }
         }
 
-        if let Some(window) = app_data.wayland_state.window.as_ref() {
-            let win_size = window.size;
+        if let Some(win_size) = app_data.wayland_state.window.as_ref().map(|window| window.size) {
             if win_size != app_data.last_window_size {
                 if let Some(renderer) = app_data.renderer.as_mut() {
                     let _ = renderer.recreate_swapchain(win_size.width, win_size.height);
                     app_data.screen_buffer.write().unwrap().mark_all_dirty(); // Force re-render on new swapchain images
-                    
+
                     let cell_w = renderer.cell_width as f64;
                     let cell_h = renderer.cell_height as f64;
                     if cell_w > 0.0 && cell_h > 0.0 {
@@ -409,6 +700,7 @@ pub fn run_event_loop(
                             cell_w,
                             cell_h,
                         );
+                        app_data.cached_grid_metrics = Some(metrics);
                         let new_cols = metrics.cols;
                         let new_rows = metrics.rows;
                         let (cur_cols, cur_rows) = {
@@ -416,7 +708,11 @@ pub fn run_event_loop(
                             (sb.cols(), sb.rows())
                         };
                         if new_cols != cur_cols || new_rows != cur_rows {
-                            app_data.screen_buffer.write().unwrap().resize_reflow(new_cols, new_rows);
+                            app_data
+                                .screen_buffer
+                                .write()
+                                .unwrap()
+                                .resize_reflow(new_cols, new_rows);
                             if let Some(pty) = app_data.pty.as_mut() {
                                 let px_w = (new_cols as f64 * metrics.effective_cell_w) as u16;
                                 let px_h = (new_rows as f64 * metrics.effective_cell_h) as u16;
@@ -425,61 +721,106 @@ pub fn run_event_loop(
                         }
                     }
                 }
+                let compositor = app_data.wayland_state.globals.compositor.clone();
+                let kde_blur_manager = app_data.wayland_state.globals.kde_blur_manager.clone();
+                if let Some(window) = app_data.wayland_state.window.as_mut() {
+                    let blur_status = window.blur.apply(
+                        &window.surface,
+                        &compositor,
+                        kde_blur_manager.as_ref(),
+                        &app_data.queue_handle,
+                        window.size,
+                        &app_data.config.blur,
+                    );
+                    tracing::trace!(?blur_status, "Wayland blur resize state checked");
+                    app_data.wayland_state.needs_flush = true;
+                }
                 app_data.last_window_size = win_size;
             }
         }
 
-        let (cell_w, cell_h, pad_x, pad_y) = if let (Some(renderer), Some(window)) = (app_data.renderer.as_ref(), app_data.wayland_state.window.as_ref()) {
-            let metrics = compute_grid_metrics(
-                window.size.width as f64,
-                window.size.height as f64,
-                &app_data.config.window.padding,
-                app_data.config.window.padding_balance,
-                renderer.cell_width as f64,
-                renderer.cell_height as f64,
-            );
-            (metrics.effective_cell_w, metrics.effective_cell_h, metrics.pad_x, metrics.pad_y)
-        } else {
-            (10.0, 20.0, 0.0, 0.0) // fallback
-        };
-        
-        let (mouse_tracking_enabled, mouse_sgr_mode, use_alt) = {
+        let (mouse_tracking_enabled, mouse_sgr_mode, use_alt, scrollback_lines) = {
             let sb = app_data.screen_buffer.read().unwrap();
-            (sb.mouse_tracking_enabled, sb.mouse_sgr_mode, sb.use_alt_buffer)
+            (
+                sb.mouse_tracking_enabled,
+                sb.mouse_sgr_mode,
+                sb.use_alt_buffer,
+                sb.scrollback_len(),
+            )
         };
 
-        while let Ok(evt) = app_data.pointer_receiver.try_recv() {
+        use crate::wayland::connection::PointerEvent;
+        let mut pending_pointer_event = app_data.pointer_receiver.try_recv().ok();
+        while let Some(evt) = pending_pointer_event.take() {
+            let evt = match evt {
+                PointerEvent::Motion { mut x, mut y }
+                    if !pointer_motion_has_effect(
+                        use_alt,
+                        scrollback_lines,
+                        mouse_tracking_enabled,
+                        app_data.active_mouse_button,
+                        app_data.drag_start,
+                        app_data.is_dragging_scrollbar,
+                    ) =>
+                {
+                    loop {
+                        match app_data.pointer_receiver.try_recv() {
+                            Ok(PointerEvent::Motion {
+                                x: next_x,
+                                y: next_y,
+                            }) => {
+                                x = next_x;
+                                y = next_y;
+                            }
+                            Ok(next_evt) => {
+                                pending_pointer_event = Some(next_evt);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    app_data.pointer_x = x;
+                    app_data.pointer_y = y;
+                    continue;
+                }
+                evt => evt,
+            };
 
-            use crate::wayland::connection::PointerEvent;
             match evt {
                 PointerEvent::Enter { x, y } | PointerEvent::Motion { x, y } => {
                     let mut needs_redraw = false;
                     let now = std::time::Instant::now();
-                    
-                    if !use_alt {
-                        if now.duration_since(app_data.last_mouse_activity).as_secs_f32() > 0.5 {
+                    let scrollbar_available = !use_alt && scrollback_lines > 0;
+
+                    if scrollbar_available {
+                        if now
+                            .duration_since(app_data.last_mouse_activity)
+                            .as_secs_f32()
+                            > 0.5
+                        {
                             app_data.mouse_started_moving = now;
                             needs_redraw = true;
                         }
                         app_data.last_mouse_activity = now;
                     }
-                    
+
                     let mut new_hovering = false;
-                    if let Some(window) = app_data.wayland_state.window.as_ref() {
-                        new_hovering = x > window.size.width as f64 - 24.0;
+                    if scrollbar_available {
+                        if let Some(window) = app_data.wayland_state.window.as_ref() {
+                            new_hovering = x > window.size.width as f64 - 24.0;
+                        }
                     }
-                    
-                    if use_alt {
-                        new_hovering = false;
-                    }
-                    
+
                     if new_hovering != app_data.is_hovering_edge {
                         app_data.is_hovering_edge = new_hovering;
                         needs_redraw = true;
 
                         if let Some(pointer) = &app_data.wayland_state.pointer {
-                            if let Some(shape_manager) = &app_data.wayland_state.globals.cursor_shape_manager {
-                                let device = shape_manager.get_pointer(pointer, &app_data.queue_handle, ());
+                            if let Some(shape_manager) =
+                                &app_data.wayland_state.globals.cursor_shape_manager
+                            {
+                                let device =
+                                    shape_manager.get_pointer(pointer, &app_data.queue_handle, ());
                                 let shape = if new_hovering {
                                     wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
                                 } else {
@@ -494,14 +835,16 @@ pub fn run_event_loop(
                             }
                         }
                     }
-                    
-                    if !use_alt {
-                        let active_secs = now.duration_since(app_data.mouse_started_moving).as_secs_f32();
+
+                    if scrollbar_available {
+                        let active_secs = now
+                            .duration_since(app_data.mouse_started_moving)
+                            .as_secs_f32();
                         if active_secs >= 0.25 && app_data.current_thumb_opacity < 0.99 {
                             needs_redraw = true;
                         }
                     }
-                    
+
                     if app_data.is_dragging_scrollbar {
                         needs_redraw = true;
                     }
@@ -512,13 +855,29 @@ pub fn run_event_loop(
                     }
                     app_data.pointer_x = x;
                     app_data.pointer_y = y;
-                    
+
+                    let needs_terminal_drag =
+                        mouse_tracking_enabled && app_data.active_mouse_button.is_some();
+                    let needs_selection_drag =
+                        !mouse_tracking_enabled && app_data.drag_start.is_some();
+                    let needs_scrollbar_drag =
+                        !mouse_tracking_enabled && app_data.is_dragging_scrollbar;
+
+                    if !needs_terminal_drag && !needs_selection_drag && !needs_scrollbar_drag {
+                        if pending_pointer_event.is_none() {
+                            pending_pointer_event = app_data.pointer_receiver.try_recv().ok();
+                        }
+                        continue;
+                    }
+
+                    let (cell_w, cell_h, pad_x, pad_y) = pointer_layout_metrics(&app_data);
                     let col_1 = ((x - pad_x) / cell_w).max(0.0) as usize + 1;
                     let row_1 = ((y - pad_y) / cell_h).max(0.0) as usize + 1;
 
                     if mouse_tracking_enabled {
                         if let Some(btn) = app_data.active_mouse_button {
-                            if col_1 != app_data.last_mouse_col || row_1 != app_data.last_mouse_row {
+                            if col_1 != app_data.last_mouse_col || row_1 != app_data.last_mouse_row
+                            {
                                 let btn_code = match btn {
                                     272 => 0,
                                     274 => 1,
@@ -542,18 +901,20 @@ pub fn run_event_loop(
                             let mut sb = app_data.screen_buffer.write().unwrap();
                             if col != start_col || row != start_row || sb.selection.is_some() {
                                 if sb.selection.is_none() {
-                                    sb.selection = Some(forge_core::cell::SelectionRange {
+                                    sb.set_selection(Some(forge_core::cell::SelectionRange {
                                         start_col,
                                         start_row,
                                         end_col: col,
                                         end_row: row,
-                                    });
-                                    sb.dirty_rows.fill(true);
-                                } else if let Some(sel) = &mut sb.selection {
+                                    }));
+                                } else if let Some(sel) = sb.selection {
                                     if sel.end_row != row || sel.end_col != col {
-                                        sel.end_row = row;
-                                        sel.end_col = col;
-                                        sb.dirty_rows.fill(true);
+                                        sb.set_selection(Some(forge_core::cell::SelectionRange {
+                                            start_col: sel.start_col,
+                                            start_row: sel.start_row,
+                                            end_col: col,
+                                            end_row: row,
+                                        }));
                                     }
                                 }
                             }
@@ -563,19 +924,22 @@ pub fn run_event_loop(
                                 let track_top = 4.0;
                                 let track_bottom = win_h - 4.0;
                                 let usable_track_height = track_bottom - track_top;
-                                
+
                                 if let Some((_, thumb_height)) = app_data.last_scrollbar_state {
                                     let available_travel_space = usable_track_height - thumb_height;
                                     if available_travel_space > 0.0 {
                                         let new_thumb_y = y - app_data.scrollbar_drag_offset_y;
-                                        let mut scroll_ratio = 1.0 - (new_thumb_y - track_top) / available_travel_space;
+                                        let mut scroll_ratio = 1.0
+                                            - (new_thumb_y - track_top) / available_travel_space;
                                         scroll_ratio = scroll_ratio.clamp(0.0, 1.0);
-                                        
-                                        let history_lines = app_data.screen_buffer.write().unwrap().scrollback_len() as f64;
-                                        let new_offset = (scroll_ratio * history_lines).round() as usize;
-                                        
-                                        app_data.screen_buffer.write().unwrap().scroll_offset = new_offset;
-                                        app_data.screen_buffer.write().unwrap().dirty_rows.fill(true);
+
+                                        let mut sb = app_data.screen_buffer.write().unwrap();
+                                        let history_lines = sb.scrollback_len() as f64;
+                                        let new_offset =
+                                            (scroll_ratio * history_lines).round() as usize;
+
+                                        sb.scroll_offset = new_offset;
+                                        sb.dirty_rows.fill(true);
                                         app_data.loop_signal.wakeup();
                                     }
                                 }
@@ -584,7 +948,7 @@ pub fn run_event_loop(
                     }
                 }
                 PointerEvent::Leave => {
-                    if !use_alt {
+                    if !use_alt && scrollback_lines > 0 {
                         app_data.is_hovering_edge = false;
                         app_data.is_dragging_scrollbar = false;
                         app_data.current_thumb_opacity = 0.0;
@@ -594,6 +958,7 @@ pub fn run_event_loop(
                     }
                 }
                 PointerEvent::Press { button } => {
+                    let (cell_w, cell_h, pad_x, pad_y) = pointer_layout_metrics(&app_data);
                     let col_1 = ((app_data.pointer_x - pad_x) / cell_w).max(0.0) as usize + 1;
                     let row_1 = ((app_data.pointer_y - pad_y) / cell_h).max(0.0) as usize + 1;
                     app_data.active_mouse_button = Some(button);
@@ -614,12 +979,17 @@ pub fn run_event_loop(
                             }
                         }
                     } else {
-                        if button == 272 { // Left click
+                        if button == 272 {
+                            // Left click
                             if app_data.is_hovering_edge {
-                                if let Some((thumb_y, thumb_height)) = app_data.last_scrollbar_state {
-                                    if app_data.pointer_y >= thumb_y && app_data.pointer_y <= thumb_y + thumb_height {
+                                if let Some((thumb_y, thumb_height)) = app_data.last_scrollbar_state
+                                {
+                                    if app_data.pointer_y >= thumb_y
+                                        && app_data.pointer_y <= thumb_y + thumb_height
+                                    {
                                         app_data.is_dragging_scrollbar = true;
-                                        app_data.scrollbar_drag_offset_y = app_data.pointer_y - thumb_y;
+                                        app_data.scrollbar_drag_offset_y =
+                                            app_data.pointer_y - thumb_y;
                                         continue;
                                     }
                                 }
@@ -628,9 +998,10 @@ pub fn run_event_loop(
                             let col = ((app_data.pointer_x - pad_x) / cell_w).max(0.0) as usize;
                             let row = ((app_data.pointer_y - pad_y) / cell_h).max(0.0) as usize;
                             app_data.drag_start = Some((col, row));
-                            app_data.screen_buffer.write().unwrap().selection = None; // clear previous selection on click
-                            app_data.screen_buffer.write().unwrap().dirty_rows.fill(true);
-                        } else if button == 274 { // Middle click
+                            let mut sb = app_data.screen_buffer.write().unwrap();
+                            sb.clear_selection(); // clear previous selection on click
+                        } else if button == 274 {
+                            // Middle click
                             if let Some(clip) = &app_data.wayland_state.clipboard {
                                 clip.request_paste();
                             }
@@ -639,6 +1010,7 @@ pub fn run_event_loop(
                 }
                 PointerEvent::Release { button } => {
                     app_data.active_mouse_button = None;
+                    let (cell_w, cell_h, pad_x, pad_y) = pointer_layout_metrics(&app_data);
                     let col_1 = ((app_data.pointer_x - pad_x) / cell_w).max(0.0) as usize + 1;
                     let row_1 = ((app_data.pointer_y - pad_y) / cell_h).max(0.0) as usize + 1;
 
@@ -656,17 +1028,21 @@ pub fn run_event_loop(
                             }
                         }
                     } else {
-                        if button == 272 { // Left click
+                        if button == 272 {
+                            // Left click
                             app_data.drag_start = None;
                             app_data.is_dragging_scrollbar = false;
                             if app_data.config.behavior.copy_on_select {
-                                let selection_opt = app_data.screen_buffer.read().unwrap().selection;
-                                if let Some(sel) = selection_opt {
-                                    let text = app_data.screen_buffer.read().unwrap().get_text_in_range(sel);
-                                    if !text.is_empty() {
-                                        if let Some(clip) = &app_data.wayland_state.clipboard {
-                                            clip.set_clipboard(text, 0, &app_data.queue_handle); // Needs proper serial
-                                        }
+                                let text = {
+                                    let sb = app_data.screen_buffer.read().unwrap();
+                                    sb.selection
+                                        .map(|sel| sb.get_text_in_range(sel))
+                                        .unwrap_or_default()
+                                };
+                                if !text.is_empty() {
+                                    if let Some(clip) = &app_data.wayland_state.clipboard {
+                                        clip.set_clipboard(text, 0, &app_data.queue_handle);
+                                        // Needs proper serial
                                     }
                                 }
                             }
@@ -678,9 +1054,10 @@ pub fn run_event_loop(
                         amount *= 5.0;
                     }
                     if mouse_tracking_enabled {
+                        let (cell_w, cell_h, pad_x, pad_y) = pointer_layout_metrics(&app_data);
                         let col_1 = ((app_data.pointer_x - pad_x) / cell_w).max(0.0) as usize + 1;
                         let row_1 = ((app_data.pointer_y - pad_y) / cell_h).max(0.0) as usize + 1;
-                        
+
                         let btn_code = if amount > 0.0 { 65 } else { 64 };
                         if mouse_sgr_mode {
                             let seq = format!("\x1b[<{};{};{}M", btn_code, col_1, row_1);
@@ -694,47 +1071,106 @@ pub fn run_event_loop(
                         if app_data.scroll_accum >= threshold {
                             let lines = (app_data.scroll_accum / threshold) as usize;
                             app_data.scroll_accum -= lines as f64 * threshold;
-                            if app_data.screen_buffer.read().unwrap().use_alt_buffer {
+                            let use_alt_buffer =
+                                app_data.screen_buffer.read().unwrap().use_alt_buffer;
+                            if use_alt_buffer {
                                 if let Some(pty) = app_data.pty.as_mut() {
                                     for _ in 0..lines {
                                         let _ = pty.write_all(b"\x1b[B"); // Down arrow
                                     }
                                 }
                             } else {
-                                app_data.screen_buffer.write().unwrap().view_scroll_down(lines);
+                                let offset_changed = {
+                                    let mut sb = app_data.screen_buffer.write().unwrap();
+                                    let previous_offset = sb.scroll_offset;
+                                    sb.view_scroll_down(lines);
+                                    sb.scroll_offset != previous_offset
+                                };
+                                if offset_changed {
+                                    reveal_scrollbar_from_scroll(
+                                        &mut app_data,
+                                        std::time::Instant::now(),
+                                    );
+                                }
                             }
                         } else if app_data.scroll_accum <= -threshold {
                             let lines = (-app_data.scroll_accum / threshold) as usize;
                             app_data.scroll_accum += lines as f64 * threshold;
-                            if app_data.screen_buffer.read().unwrap().use_alt_buffer {
+                            let use_alt_buffer =
+                                app_data.screen_buffer.read().unwrap().use_alt_buffer;
+                            if use_alt_buffer {
                                 if let Some(pty) = app_data.pty.as_mut() {
                                     for _ in 0..lines {
                                         let _ = pty.write_all(b"\x1b[A"); // Up arrow
                                     }
                                 }
                             } else {
-                                app_data.screen_buffer.write().unwrap().view_scroll_up(lines);
+                                let offset_changed = {
+                                    let mut sb = app_data.screen_buffer.write().unwrap();
+                                    let previous_offset = sb.scroll_offset;
+                                    sb.view_scroll_up(lines);
+                                    sb.scroll_offset != previous_offset
+                                };
+                                if offset_changed {
+                                    reveal_scrollbar_from_scroll(
+                                        &mut app_data,
+                                        std::time::Instant::now(),
+                                    );
+                                }
                             }
                         }
                     }
                 }
             }
+
+            if pending_pointer_event.is_none() {
+                pending_pointer_event = app_data.pointer_receiver.try_recv().ok();
+            }
         }
 
-        let wants_redraw = app_data.screen_buffer.read().unwrap().has_dirty_rows() || app_data.wayland_state.force_redraw;
+        let (has_dirty_rows, use_alt_buffer, scrollback_lines) = {
+            let sb = app_data.screen_buffer.read().unwrap();
+            (sb.has_dirty_rows(), sb.use_alt_buffer, sb.scrollback_len())
+        };
+        let now = std::time::Instant::now();
+        let scrollbar_wants_redraw = scrollbar_overlay_wants_redraw(
+            use_alt_buffer,
+            scrollback_lines,
+            app_data.current_thumb_opacity,
+            app_data.current_track_opacity,
+            app_data.is_hovering_edge,
+            app_data.is_dragging_scrollbar,
+            app_data.last_mouse_activity,
+            app_data.mouse_started_moving,
+            now,
+        );
+        let wants_redraw = frame_wants_redraw(
+            has_dirty_rows,
+            app_data.wayland_state.force_redraw,
+            scrollbar_wants_redraw,
+        );
         if app_data.wayland_state.frame_ready && wants_redraw {
             app_data.wayland_state.frame_ready = false;
             app_data.wayland_state.frame_callback_pending = false;
 
             if let Some(window) = app_data.wayland_state.window.as_ref() {
                 if !app_data.wayland_state.frame_callback_pending {
-                    crate::wayland::frame_callback::request_frame_callback(&window.surface, &app_data.queue_handle);
+                    crate::wayland::frame_callback::request_frame_callback(
+                        &window.surface,
+                        &app_data.queue_handle,
+                    );
                     app_data.wayland_state.frame_callback_pending = true;
                     app_data.wayland_state.needs_flush = true;
                 }
             }
 
             if let Some(renderer) = app_data.renderer.as_mut() {
+                let scroll_event = app_data
+                    .screen_buffer
+                    .write()
+                    .unwrap()
+                    .take_pending_scroll()
+                    .map(renderer_scroll_event);
                 let sb = app_data.screen_buffer.read().unwrap();
                 let cursor_row_in_viewport = sb.cursor.row as isize + sb.scroll_offset as isize;
                 let cursor = if cursor_row_in_viewport < sb.rows() as isize {
@@ -742,19 +1178,28 @@ pub fn run_event_loop(
                 } else {
                     None
                 };
-                let bg_color = app_data.config.theme.background.to_srgb_linear();
+                let bg_color = app_data.cached_bg_color;
                 let final_alpha = bg_color.a * app_data.config.window.opacity;
                 let default_bg = [bg_color.r, bg_color.g, bg_color.b, bg_color.a];
-                let clear_color = [bg_color.r * final_alpha, bg_color.g * final_alpha, bg_color.b * final_alpha, final_alpha];
-                
-                let cursor_color = app_data.config.theme.cursor_color.to_srgb_linear();
-                let cursor_color_arr = [cursor_color.r, cursor_color.g, cursor_color.b, cursor_color.a];
-                
+                let clear_color = [
+                    bg_color.r * final_alpha,
+                    bg_color.g * final_alpha,
+                    bg_color.b * final_alpha,
+                    final_alpha,
+                ];
 
-                let grid_refs: Vec<&[forge_core::cell::Cell]> = (0..sb.rows())
-                    .map(|i| sb.visible_row(i))
-                    .collect();
-                
+                let cursor_color = app_data.cached_cursor_color;
+                let cursor_color_arr = [
+                    cursor_color.r,
+                    cursor_color.g,
+                    cursor_color.b,
+                    cursor_color.a,
+                ];
+
+                let grid_refs: Vec<&[forge_core::cell::Cell]> =
+                    (0..sb.rows()).map(|i| sb.visible_row(i)).collect();
+                debug_screen_artifacts(&grid_refs);
+
                 let (win_w, win_h) = if let Some(window) = app_data.wayland_state.window.as_ref() {
                     (window.size.width as f64, window.size.height as f64)
                 } else {
@@ -768,12 +1213,13 @@ pub fn run_event_loop(
                     let visible_screen_lines = sb.rows() as f64;
                     let history_lines = sb.scrollback_len() as f64;
                     let total_lines = visible_screen_lines + history_lines;
-                    
+
                     if total_lines > visible_screen_lines {
                         let thumb_height_percentage = visible_screen_lines / total_lines;
                         let minimum_thumb_height_px = 20.0_f64;
-                        let thumb_height_pixels = minimum_thumb_height_px.max(win_h * thumb_height_percentage);
-                        
+                        let thumb_height_pixels =
+                            minimum_thumb_height_px.max(win_h * thumb_height_percentage);
+
                         let viewport_offset = sb.scroll_offset as f64;
                         let scroll_ratio = if history_lines > 0.0 {
                             viewport_offset / history_lines
@@ -783,31 +1229,43 @@ pub fn run_event_loop(
                         let track_top = 4.0;
                         let track_bottom = win_h - 4.0;
                         let usable_track_height = track_bottom - track_top;
-                        
+
                         let available_travel_space = usable_track_height - thumb_height_pixels;
-                        let thumb_y = track_top + available_travel_space - (scroll_ratio * available_travel_space);
-                        
-                        let idle_secs = std::time::Instant::now().duration_since(app_data.last_mouse_activity).as_secs_f32();
-                        let active_secs = std::time::Instant::now().duration_since(app_data.mouse_started_moving).as_secs_f32();
-                        let mut target_thumb_opacity = if active_secs >= 0.25 && idle_secs < 0.5 { 1.0 } else { 0.0 };
+                        let thumb_y = track_top + available_travel_space
+                            - (scroll_ratio * available_travel_space);
+                        let idle_secs = now
+                            .duration_since(app_data.last_mouse_activity)
+                            .as_secs_f32();
+                        let active_secs = now
+                            .duration_since(app_data.mouse_started_moving)
+                            .as_secs_f32();
+                        let mut target_thumb_opacity = if active_secs >= 0.25 && idle_secs < 0.5 {
+                            1.0
+                        } else {
+                            0.0
+                        };
                         let mut target_track_opacity = 0.0;
                         let mut target_thumb_width = 5.0;
-                        
+
                         if app_data.is_hovering_edge || app_data.is_dragging_scrollbar {
                             target_track_opacity = 1.0;
                             target_thumb_width = 9.0;
                             target_thumb_opacity = 1.0;
                         }
-                        
-                        app_data.current_thumb_width += (target_thumb_width - app_data.current_thumb_width) * 0.2;
-                        app_data.current_track_opacity += (target_track_opacity - app_data.current_track_opacity) * 0.2;
-                        app_data.current_thumb_opacity += (target_thumb_opacity - app_data.current_thumb_opacity) * 0.2;
-                        
-                        let is_animating = 
-                            (target_thumb_width - app_data.current_thumb_width).abs() > 0.01 ||
-                            (target_track_opacity - app_data.current_track_opacity).abs() > 0.01 ||
-                            (target_thumb_opacity - app_data.current_thumb_opacity).abs() > 0.01 ||
-                            (idle_secs < 0.5 && app_data.current_thumb_opacity > 0.01);
+
+                        app_data.current_thumb_width +=
+                            (target_thumb_width - app_data.current_thumb_width) * 0.2;
+                        app_data.current_track_opacity +=
+                            (target_track_opacity - app_data.current_track_opacity) * 0.2;
+                        app_data.current_thumb_opacity +=
+                            (target_thumb_opacity - app_data.current_thumb_opacity) * 0.2;
+
+                        let is_animating = (target_thumb_width - app_data.current_thumb_width)
+                            .abs()
+                            > 0.01
+                            || (target_track_opacity - app_data.current_track_opacity).abs() > 0.01
+                            || (target_thumb_opacity - app_data.current_thumb_opacity).abs() > 0.01
+                            || (idle_secs < 0.5 && app_data.current_thumb_opacity > 0.01);
 
                         if is_animating {
                             needs_scrollbar_redraw = true;
@@ -817,35 +1275,54 @@ pub fn run_event_loop(
                         let thumb_opacity = app_data.current_thumb_opacity;
                         let track_opacity = app_data.current_track_opacity;
                         let thumb_width = app_data.current_thumb_width;
-                        
-                        
+
                         if thumb_opacity > 0.01 || track_opacity > 0.01 {
-                            scrollbar_state = Some((thumb_y as f32, thumb_height_pixels as f32, thumb_width, thumb_x, thumb_opacity, track_opacity));
+                            scrollbar_state = Some((
+                                thumb_y as f32,
+                                thumb_height_pixels as f32,
+                                thumb_width,
+                                thumb_x,
+                                thumb_opacity,
+                                track_opacity,
+                            ));
                         }
                         app_data.last_scrollbar_state = Some((thumb_y, thumb_height_pixels));
                     }
                 }
 
-                let metrics = compute_grid_metrics(
-                    win_w,
-                    win_h,
-                    &app_data.config.window.padding,
-                    app_data.config.window.padding_balance,
-                    renderer.cell_width as f64,
-                    renderer.cell_height as f64,
-                );
-                let selection_bg_color = app_data.config.theme.selection_bg.to_srgb_linear();
-                let selection_bg_arr = [selection_bg_color.r, selection_bg_color.g, selection_bg_color.b, selection_bg_color.a];
-                let cursor_style = sb.cursor_style_override.unwrap_or(app_data.config.cursor.style);
+                let metrics = if let Some(m) = app_data.cached_grid_metrics {
+                    m
+                } else {
+                    let m = compute_grid_metrics(
+                        win_w,
+                        win_h,
+                        &app_data.config.window.padding,
+                        app_data.config.window.padding_balance,
+                        renderer.cell_width as f64,
+                        renderer.cell_height as f64,
+                    );
+                    app_data.cached_grid_metrics = Some(m);
+                    m
+                };
+                let selection_bg_color = app_data.cached_selection_bg_color;
+                let selection_bg_arr = [
+                    selection_bg_color.r,
+                    selection_bg_color.g,
+                    selection_bg_color.b,
+                    selection_bg_color.a,
+                ];
+                let cursor_style = sb
+                    .cursor_style_override
+                    .unwrap_or(app_data.config.cursor.style);
                 let cursor_visible_phase = app_data.cursor_visible_phase;
-                
+
                 let needs_recreate = match renderer.render_grid(
-                    &grid_refs, 
-                    &sb.dirty_rows.clone(),
-                    cursor, 
+                    &grid_refs,
+                    &sb.dirty_rows,
+                    cursor,
                     cursor_style,
                     cursor_visible_phase,
-                    sb.selection, 
+                    sb.selection,
                     default_bg,
                     clear_color,
                     cursor_color_arr,
@@ -857,6 +1334,7 @@ pub fn run_event_loop(
                     metrics.scale_x as f32,
                     metrics.scale_y as f32,
                     scrollbar_state,
+                    scroll_event,
                     app_data.config.render.braille_style,
                 ) {
                     Ok(n) => n,
@@ -870,18 +1348,27 @@ pub fn run_event_loop(
                         false
                     }
                 };
+                if !app_data.first_vulkan_text_frame_logged {
+                    app_data.first_vulkan_text_frame_logged = true;
+                    tracing::info!(
+                        "[PROFILER] First Vulkan text frame took: {:?}",
+                        app_data.startup_start.elapsed()
+                    );
+                }
                 drop(grid_refs);
                 drop(sb);
-                
-                if needs_recreate {
+
+                if !frame_should_mark_clean(needs_recreate) {
                     if let Some(window) = app_data.wayland_state.window.as_ref() {
                         let _ = renderer.recreate_swapchain(window.size.width, window.size.height);
                     }
+                    app_data.screen_buffer.write().unwrap().mark_all_dirty();
+                } else {
+                    app_data.screen_buffer.write().unwrap().mark_all_clean();
                 }
-                
-                app_data.screen_buffer.write().unwrap().mark_all_clean();
-                app_data.wayland_state.force_redraw = needs_scrollbar_redraw;
-                if needs_scrollbar_redraw {
+
+                app_data.wayland_state.force_redraw = needs_scrollbar_redraw || needs_recreate;
+                if needs_scrollbar_redraw || needs_recreate {
                     app_data.loop_signal.clone().wakeup();
                 }
             }
@@ -897,6 +1384,7 @@ pub fn run_event_loop(
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq)]
 pub struct GridMetrics {
     pub cols: usize,
     pub rows: usize,
@@ -918,17 +1406,17 @@ pub fn compute_grid_metrics(
 ) -> GridMetrics {
     let avail_w = (win_w - pad_cfg.left as f64 - pad_cfg.right as f64).max(native_cell_w);
     let avail_h = (win_h - pad_cfg.top as f64 - pad_cfg.bottom as f64).max(native_cell_h);
-    
+
     let cols = (avail_w / native_cell_w).max(1.0) as usize;
     let rows = (avail_h / native_cell_h).max(1.0) as usize;
-    
+
     let mut effective_cell_w = native_cell_w;
     let mut effective_cell_h = native_cell_h;
     let mut scale_x = 1.0;
     let mut scale_y = 1.0;
     let mut pad_x = pad_cfg.left as f64;
     let mut pad_y = pad_cfg.top as f64;
-    
+
     if pad_balance == forge_core::config_registry::PaddingBalance::Fill {
         effective_cell_w = avail_w / cols as f64;
         effective_cell_h = avail_h / rows as f64;
@@ -941,7 +1429,7 @@ pub fn compute_grid_metrics(
         pad_x += (remaining_w / 2.0).floor();
         pad_y += (remaining_h / 2.0).floor();
     }
-    
+
     GridMetrics {
         cols,
         rows,
@@ -951,5 +1439,163 @@ pub fn compute_grid_metrics(
         effective_cell_h,
         scale_x,
         scale_y,
+    }
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::*;
+    use forge_core::config_registry::{PaddingBalance, PaddingConfig};
+    use std::time::{Duration, Instant};
+
+    fn padding() -> PaddingConfig {
+        PaddingConfig {
+            top: 4,
+            bottom: 4,
+            left: 4,
+            right: 4,
+        }
+    }
+
+    #[test]
+    fn center_keeps_native_cell_size_and_centers_leftover_pixels() {
+        let metrics =
+            compute_grid_metrics(101.0, 50.0, &padding(), PaddingBalance::Center, 10.0, 20.0);
+
+        assert_eq!(metrics.cols, 9);
+        assert_eq!(metrics.rows, 2);
+        assert_eq!(metrics.effective_cell_w, 10.0);
+        assert_eq!(metrics.effective_cell_h, 20.0);
+        assert_eq!(metrics.scale_x, 1.0);
+        assert_eq!(metrics.scale_y, 1.0);
+        assert_eq!(metrics.pad_x, 5.0);
+        assert_eq!(metrics.pad_y, 5.0);
+    }
+
+    #[test]
+    fn fill_expands_cell_geometry_and_anchors_to_configured_padding() {
+        let metrics =
+            compute_grid_metrics(101.0, 50.0, &padding(), PaddingBalance::Fill, 10.0, 20.0);
+
+        assert_eq!(metrics.cols, 9);
+        assert_eq!(metrics.rows, 2);
+        assert!((metrics.effective_cell_w - (93.0 / 9.0)).abs() < 0.000000000001);
+        assert_eq!(metrics.effective_cell_h, 21.0);
+        assert!((metrics.scale_x - (93.0 / 90.0)).abs() < 0.000000000001);
+        assert!((metrics.scale_y - 1.05).abs() < 0.000000000001);
+        assert_eq!(metrics.pad_x, 4.0);
+        assert_eq!(metrics.pad_y, 4.0);
+    }
+
+    #[test]
+    fn scrollbar_overlay_does_not_redraw_without_scrollback() {
+        let now = Instant::now();
+
+        assert!(!scrollbar_overlay_wants_redraw(
+            false, 0, 1.0, 1.0, true, false, now, now, now,
+        ));
+    }
+
+    #[test]
+    fn scrollbar_overlay_does_not_redraw_in_alt_buffer() {
+        let now = Instant::now();
+
+        assert!(!scrollbar_overlay_wants_redraw(
+            true, 100, 1.0, 1.0, true, false, now, now, now,
+        ));
+    }
+
+    #[test]
+    fn scrollbar_overlay_redraws_during_reveal_delay() {
+        let now = Instant::now();
+        let recent = now - Duration::from_millis(100);
+
+        assert!(scrollbar_overlay_wants_redraw(
+            false, 100, 0.0, 0.0, false, false, recent, recent, now,
+        ));
+    }
+
+    #[test]
+    fn scrollbar_overlay_redraws_while_visible_or_interactive() {
+        let now = Instant::now();
+        let old = now - Duration::from_secs(2);
+
+        assert!(scrollbar_overlay_wants_redraw(
+            false, 100, 0.25, 0.0, false, false, old, old, now,
+        ));
+        assert!(scrollbar_overlay_wants_redraw(
+            false, 100, 0.0, 0.0, true, false, old, old, now,
+        ));
+        assert!(scrollbar_overlay_wants_redraw(
+            false, 100, 0.0, 0.0, false, true, old, old, now,
+        ));
+    }
+
+    #[test]
+    fn scrollbar_overlay_stops_after_idle_fade_settles() {
+        let now = Instant::now();
+        let old = now - Duration::from_secs(2);
+
+        assert!(!scrollbar_overlay_wants_redraw(
+            false, 100, 0.0, 0.0, false, false, old, old, now,
+        ));
+    }
+
+    #[test]
+    fn passive_pointer_motion_has_no_effect_in_alt_buffer() {
+        assert!(!pointer_motion_has_effect(
+            true, 100, true, None, None, false,
+        ));
+    }
+
+    #[test]
+    fn passive_pointer_motion_has_no_effect_without_scrollback() {
+        assert!(!pointer_motion_has_effect(
+            false, 0, false, None, None, false,
+        ));
+    }
+
+    #[test]
+    fn pointer_motion_has_effect_for_scrollbar_selection_and_drag_reporting() {
+        assert!(pointer_motion_has_effect(
+            false, 100, false, None, None, false,
+        ));
+        assert!(pointer_motion_has_effect(
+            true,
+            0,
+            false,
+            None,
+            Some((2, 3)),
+            false,
+        ));
+        assert!(pointer_motion_has_effect(
+            true,
+            0,
+            true,
+            Some(272),
+            None,
+            false,
+        ));
+        assert!(pointer_motion_has_effect(
+            false, 100, false, None, None, true,
+        ));
+    }
+
+    #[test]
+    fn frame_redraw_predicate_skips_idle_frames() {
+        assert!(!frame_wants_redraw(false, false, false));
+    }
+
+    #[test]
+    fn frame_redraw_predicate_renders_for_each_dirty_source() {
+        assert!(frame_wants_redraw(true, false, false));
+        assert!(frame_wants_redraw(false, true, false));
+        assert!(frame_wants_redraw(false, false, true));
+    }
+
+    #[test]
+    fn recreated_swapchain_frame_keeps_rows_dirty_for_new_geometry() {
+        assert!(!frame_should_mark_clean(true));
+        assert!(frame_should_mark_clean(false));
     }
 }

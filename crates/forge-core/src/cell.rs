@@ -23,44 +23,76 @@ pub struct Cell {
 }
 
 impl Cell {
-    pub const FLAG_BOLD: u8          = 0b0000_0001;
-    pub const FLAG_ITALIC: u8        = 0b0000_0010;
-    pub const FLAG_UNDERLINE: u8     = 0b0000_0100;
+    pub const FLAG_BOLD: u8 = 0b0000_0001;
+    pub const FLAG_ITALIC: u8 = 0b0000_0010;
+    pub const FLAG_UNDERLINE: u8 = 0b0000_0100;
     pub const FLAG_STRIKETHROUGH: u8 = 0b0000_1000;
-    pub const FLAG_WIDE: u8          = 0b0001_0000;
+    pub const FLAG_WIDE: u8 = 0b0001_0000;
 
     #[inline(always)]
-    pub fn is_bold(&self) -> bool { self.flags & Self::FLAG_BOLD != 0 }
+    pub fn is_bold(&self) -> bool {
+        self.flags & Self::FLAG_BOLD != 0
+    }
     #[inline(always)]
-    pub fn is_italic(&self) -> bool { self.flags & Self::FLAG_ITALIC != 0 }
+    pub fn is_italic(&self) -> bool {
+        self.flags & Self::FLAG_ITALIC != 0
+    }
     #[inline(always)]
-    pub fn is_underline(&self) -> bool { self.flags & Self::FLAG_UNDERLINE != 0 }
+    pub fn is_underline(&self) -> bool {
+        self.flags & Self::FLAG_UNDERLINE != 0
+    }
     #[inline(always)]
-    pub fn is_strikethrough(&self) -> bool { self.flags & Self::FLAG_STRIKETHROUGH != 0 }
+    pub fn is_strikethrough(&self) -> bool {
+        self.flags & Self::FLAG_STRIKETHROUGH != 0
+    }
     #[inline(always)]
     pub fn width(&self) -> CellWidth {
-        if self.flags & Self::FLAG_WIDE != 0 { CellWidth::Wide } else { CellWidth::Narrow }
+        if self.flags & Self::FLAG_WIDE != 0 {
+            CellWidth::Wide
+        } else {
+            CellWidth::Narrow
+        }
     }
 
     #[inline(always)]
     pub fn set_bold(&mut self, val: bool) {
-        if val { self.flags |= Self::FLAG_BOLD; } else { self.flags &= !Self::FLAG_BOLD; }
+        if val {
+            self.flags |= Self::FLAG_BOLD;
+        } else {
+            self.flags &= !Self::FLAG_BOLD;
+        }
     }
     #[inline(always)]
     pub fn set_italic(&mut self, val: bool) {
-        if val { self.flags |= Self::FLAG_ITALIC; } else { self.flags &= !Self::FLAG_ITALIC; }
+        if val {
+            self.flags |= Self::FLAG_ITALIC;
+        } else {
+            self.flags &= !Self::FLAG_ITALIC;
+        }
     }
     #[inline(always)]
     pub fn set_underline(&mut self, val: bool) {
-        if val { self.flags |= Self::FLAG_UNDERLINE; } else { self.flags &= !Self::FLAG_UNDERLINE; }
+        if val {
+            self.flags |= Self::FLAG_UNDERLINE;
+        } else {
+            self.flags &= !Self::FLAG_UNDERLINE;
+        }
     }
     #[inline(always)]
     pub fn set_strikethrough(&mut self, val: bool) {
-        if val { self.flags |= Self::FLAG_STRIKETHROUGH; } else { self.flags &= !Self::FLAG_STRIKETHROUGH; }
+        if val {
+            self.flags |= Self::FLAG_STRIKETHROUGH;
+        } else {
+            self.flags &= !Self::FLAG_STRIKETHROUGH;
+        }
     }
     #[inline(always)]
     pub fn set_width(&mut self, val: CellWidth) {
-        if val == CellWidth::Wide { self.flags |= Self::FLAG_WIDE; } else { self.flags &= !Self::FLAG_WIDE; }
+        if val == CellWidth::Wide {
+            self.flags |= Self::FLAG_WIDE;
+        } else {
+            self.flags &= !Self::FLAG_WIDE;
+        }
     }
 }
 

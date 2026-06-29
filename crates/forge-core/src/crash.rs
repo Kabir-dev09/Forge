@@ -1,10 +1,10 @@
+use std::backtrace::Backtrace;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::panic;
 use std::path::PathBuf;
 use std::process::Command;
-use std::backtrace::Backtrace;
 
 /// Returns the path to the crash log file: ~/.cache/forge/crash.log
 pub fn crash_log_path() -> PathBuf {
@@ -16,7 +16,7 @@ pub fn crash_log_path() -> PathBuf {
             return path;
         }
     }
-    
+
     // Fallback to ~/.cache
     if let Ok(home) = env::var("HOME") {
         if !home.is_empty() {
@@ -38,17 +38,18 @@ pub fn crash_log_path() -> PathBuf {
 pub fn install_panic_handler() {
     panic::set_hook(Box::new(|panic_info| {
         let path = crash_log_path();
-        
+
         // 1. Ensure the parent directory of crash_log_path() exists.
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
 
         // 3a. Format the panic info (location, message).
-        let location = panic_info.location()
+        let location = panic_info
+            .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "unknown".to_string());
-        
+
         let payload = panic_info.payload();
         let message = if let Some(s) = payload.downcast_ref::<&str>() {
             s.to_string()
@@ -62,7 +63,7 @@ pub fn install_panic_handler() {
 
         // 3b. Capture RUST_BACKTRACE=1 output using std::backtrace::Backtrace::capture().
         let backtrace = Backtrace::force_capture();
-        
+
         // 3c. Write formatted output to the crash log file (open in append mode).
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
             let _ = writeln!(file, "{}\n{}", formatted_info, backtrace);

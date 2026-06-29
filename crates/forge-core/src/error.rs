@@ -26,12 +26,33 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        assert_eq!(ForgeError::Wayland("test".into()).to_string(), "Wayland error: test");
-        assert_eq!(ForgeError::Vulkan("test".into()).to_string(), "Vulkan error: test");
-        assert_eq!(ForgeError::Pty("test".into()).to_string(), "PTY error: test");
-        assert_eq!(ForgeError::Config("test".into()).to_string(), "Config error: test");
-        assert_eq!(ForgeError::Plugin("test".into()).to_string(), "Plugin error: test");
-        assert_eq!(ForgeError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "test")).to_string(), "IO error: test");
-        assert_eq!(ForgeError::Other("test".into()).to_string(), "Other error: test");
+        assert_eq!(
+            ForgeError::Wayland("test".into()).to_string(),
+            "Wayland error: test"
+        );
+        assert_eq!(
+            ForgeError::Vulkan("test".into()).to_string(),
+            "Vulkan error: test"
+        );
+        assert_eq!(
+            ForgeError::Pty("test".into()).to_string(),
+            "PTY error: test"
+        );
+        assert_eq!(
+            ForgeError::Config("test".into()).to_string(),
+            "Config error: test"
+        );
+        assert_eq!(
+            ForgeError::Plugin("test".into()).to_string(),
+            "Plugin error: test"
+        );
+        assert_eq!(
+            ForgeError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "test")).to_string(),
+            "IO error: test"
+        );
+        assert_eq!(
+            ForgeError::Other("test".into()).to_string(),
+            "Other error: test"
+        );
     }
 }
