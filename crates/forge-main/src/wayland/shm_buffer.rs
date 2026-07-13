@@ -22,9 +22,15 @@ pub struct ShmBuffer {
     pub pool_size: usize,
 }
 
-// SAFETY: The *mut u8 pointer is valid for the lifetime of ShmBuffer and
-// is only accessed from the main thread.
+// SAFETY: ShmBuffer holds a raw pointer (`data`) to memory mapped via `mmap`.
+// This memory is owned by the `ShmBuffer` and is globally valid for the process.
+// Access to this memory is strictly controlled through `&mut self` in `fill_color`,
+// which guarantees exclusive access. Since there is no interior mutability or thread-local
+// state, it is safe to transfer ownership across threads.
 unsafe impl Send for ShmBuffer {}
+// SAFETY: Concurrent read access to the mapped memory would be safe, but we don't expose any.
+// Mutation requires `&mut self`, meaning Rust's borrow checker enforces synchronization.
+unsafe impl Sync for ShmBuffer {}
 
 impl ShmBuffer {
     pub fn new(shm: &WlShm, qh: &QueueHandle<WaylandState>, size: Size) -> Result<Self> {

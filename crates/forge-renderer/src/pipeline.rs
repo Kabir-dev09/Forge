@@ -62,6 +62,7 @@ pub struct Pipeline {
     pub descriptor_set_layout: vk::DescriptorSetLayout,
     pub pipeline_layout: vk::PipelineLayout,
     pub graphics_pipeline: vk::Pipeline,
+    pub opaque_pipeline: vk::Pipeline,
 }
 
 impl Pipeline {
@@ -216,13 +217,49 @@ impl Pipeline {
             ..Default::default()
         };
 
-        let graphics_pipeline = unsafe {
-            device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-                .map_err(|e| {
-                    ForgeError::Vulkan(format!("Failed to create graphics pipeline: {:?}", e.1))
-                })?[0]
+        let opaque_color_blend_attachment = vk::PipelineColorBlendAttachmentState {
+            color_write_mask: vk::ColorComponentFlags::RGBA,
+            blend_enable: vk::FALSE,
+            src_color_blend_factor: vk::BlendFactor::ONE,
+            dst_color_blend_factor: vk::BlendFactor::ZERO,
+            color_blend_op: vk::BlendOp::ADD,
+            src_alpha_blend_factor: vk::BlendFactor::ONE,
+            dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+            alpha_blend_op: vk::BlendOp::ADD,
         };
+
+        let opaque_color_blending = vk::PipelineColorBlendStateCreateInfo {
+            logic_op_enable: vk::FALSE,
+            attachment_count: 1,
+            p_attachments: &opaque_color_blend_attachment,
+            ..Default::default()
+        };
+
+        let opaque_pipeline_info = vk::GraphicsPipelineCreateInfo {
+            stage_count: 2,
+            p_stages: shader_stages.as_ptr(),
+            p_vertex_input_state: &vertex_input_info,
+            p_input_assembly_state: &input_assembly,
+            p_viewport_state: &viewport_state,
+            p_rasterization_state: &rasterizer,
+            p_multisample_state: &multisampling,
+            p_color_blend_state: &opaque_color_blending,
+            p_dynamic_state: &dynamic_state_info,
+            layout: pipeline_layout,
+            render_pass,
+            subpass: 0,
+            ..Default::default()
+        };
+
+        let pipelines = unsafe {
+            device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info, opaque_pipeline_info], None)
+                .map_err(|e| {
+                    ForgeError::Vulkan(format!("Failed to create graphics pipelines: {:?}", e.1))
+                })?
+        };
+        let graphics_pipeline = pipelines[0];
+        let opaque_pipeline = pipelines[1];
 
         unsafe {
             device.destroy_shader_module(frag_module, None);
@@ -233,12 +270,14 @@ impl Pipeline {
             descriptor_set_layout,
             pipeline_layout,
             graphics_pipeline,
+            opaque_pipeline,
         })
     }
 
     pub fn destroy(&self, device: &Device) {
         unsafe {
             device.destroy_pipeline(self.graphics_pipeline, None);
+            device.destroy_pipeline(self.opaque_pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
         }

@@ -7,3 +7,4 @@ pub use pty::Pty;
 pub use screen_buffer::{ScreenBuffer, ScrollDirection, ScrollEvent};
 pub use vte_parser::VteProcessor;
 pub mod grid;
+pub mod snapshot;

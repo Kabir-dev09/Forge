@@ -30,33 +30,6 @@ where
     );
 }
 
-fn atlas() -> GlyphAtlas {
-    let mut glyphs = HashMap::new();
-    for c in 0x20_u8..=0x7e {
-        glyphs.insert(
-            c as char,
-            GlyphMetrics {
-                u0: 0.0,
-                v0: 0.0,
-                u1: 1.0,
-                v1: 1.0,
-                width: 8,
-                height: 16,
-                bearing_y: 14,
-                bearing_x: 0,
-            },
-        );
-    }
-
-    GlyphAtlas {
-        pixels: vec![255; 4],
-        atlas_width: 1,
-        atlas_height: 1,
-        glyphs,
-        glyphs_bold: HashMap::new(),
-        descriptor: GlyphAtlasDescriptor::dummy(),
-    }
-}
 
 fn grid(cols: usize, rows: usize) -> Vec<Vec<Cell>> {
     let fg = Color {
@@ -103,7 +76,7 @@ fn tessellate_once(
     tessellator: &mut GridTessellator,
     atlas: &GlyphAtlas,
     grid: &[Vec<Cell>],
-    dirty_rows: &[bool],
+    dirty_rows: &[u64],
     cursor_visible: bool,
 ) -> usize {
     let refs: Vec<&[Cell]> = grid.iter().map(Vec::as_slice).collect();
@@ -130,15 +103,19 @@ fn tessellate_once(
         4.0,
         None,
         None,
+        false,
+        None,
+        0,
+        None,
     );
 
     tessellator.vertices.len()
 }
 
 fn bench_full_grid() {
-    let atlas = atlas();
+    let atlas = GlyphAtlas::dummy_for_bench();
     let grid = grid(120, 40);
-    let dirty_rows = vec![true; 40];
+    let dirty_rows = vec![1; 40];
     let mut tessellator = GridTessellator::new(120 * 40);
 
     run_for_duration("tessellate_full_grid", || {
@@ -147,9 +124,9 @@ fn bench_full_grid() {
 }
 
 fn bench_cursor_blink_dirty_rows() {
-    let atlas = atlas();
+    let atlas = GlyphAtlas::dummy_for_bench();
     let grid = grid(120, 40);
-    let dirty_rows = vec![false; 40];
+    let dirty_rows = vec![0; 40];
     let mut tessellator = GridTessellator::new(120 * 40);
 
     let mut cursor_visible = true;

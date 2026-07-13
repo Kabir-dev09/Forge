@@ -32,14 +32,14 @@ std::vector<std::string> PackageManager::get_build_dependencies() {
     return {
         "rust", "c-compiler", "cmake", "pkg-config", "shaderc", 
         "vulkan-headers", "wayland-protocols", "wayland-client-dev", 
-        "xkbcommon-dev", "luajit-dev"
+        "xkbcommon-dev"
     };
 }
 
 std::vector<std::string> PackageManager::get_runtime_dependencies() {
     return {
         "vulkan-icd-loader", "wayland-client", "xkbcommon", 
-        "libffi", "luajit", "wayland-compositor"
+        "libffi", "wayland-compositor"
     };
 }
 
@@ -60,12 +60,10 @@ std::vector<std::string> PackageManager::map_dependencies(
             else if (dep == "wayland-protocols") mapped.push_back("wayland-protocols");
             else if (dep == "wayland-client-dev") mapped.push_back("libwayland-dev");
             else if (dep == "xkbcommon-dev") mapped.push_back("libxkbcommon-dev");
-            else if (dep == "luajit-dev") mapped.push_back("libluajit-5.1-dev");
             else if (dep == "vulkan-icd-loader") mapped.push_back("vulkan-tools");
             else if (dep == "wayland-client") mapped.push_back("libwayland-client0");
             else if (dep == "xkbcommon") mapped.push_back("libxkbcommon0");
             else if (dep == "libffi") mapped.push_back("libffi-dev");
-            else if (dep == "luajit") mapped.push_back("luajit");
         }
         else if (type == PackageManagerType::PACMAN) {
             if (dep == "rust") mapped.push_back("rust");
@@ -77,12 +75,10 @@ std::vector<std::string> PackageManager::map_dependencies(
             else if (dep == "wayland-protocols") mapped.push_back("wayland-protocols");
             else if (dep == "wayland-client-dev") mapped.push_back("wayland");
             else if (dep == "xkbcommon-dev") mapped.push_back("libxkbcommon");
-            else if (dep == "luajit-dev") mapped.push_back("luajit");
             else if (dep == "vulkan-icd-loader") mapped.push_back("vulkan-icd-loader");
             else if (dep == "wayland-client") mapped.push_back("wayland");
             else if (dep == "xkbcommon") mapped.push_back("libxkbcommon");
             else if (dep == "libffi") mapped.push_back("libffi");
-            else if (dep == "luajit") mapped.push_back("luajit");
         }
         else if (type == PackageManagerType::DNF) {
             if (dep == "rust") { mapped.push_back("rust"); mapped.push_back("cargo"); }
@@ -94,12 +90,10 @@ std::vector<std::string> PackageManager::map_dependencies(
             else if (dep == "wayland-protocols") mapped.push_back("wayland-protocols-devel");
             else if (dep == "wayland-client-dev") mapped.push_back("wayland-devel");
             else if (dep == "xkbcommon-dev") mapped.push_back("libxkbcommon-devel");
-            else if (dep == "luajit-dev") mapped.push_back("luajit-devel");
             else if (dep == "vulkan-icd-loader") mapped.push_back("vulkan-loader");
             else if (dep == "wayland-client") mapped.push_back("wayland");
             else if (dep == "xkbcommon") mapped.push_back("libxkbcommon");
             else if (dep == "libffi") mapped.push_back("libffi");
-            else if (dep == "luajit") mapped.push_back("luajit");
         }
     }
     

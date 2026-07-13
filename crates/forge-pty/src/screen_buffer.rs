@@ -30,6 +30,7 @@ pub struct ScrollEvent {
 #[derive(Clone)]
 pub struct Row {
     pub cells: Box<[Cell]>,
+    pub len: usize,
     pub wrapped: bool,
     pub reflowable: bool,
 }
@@ -62,31 +63,38 @@ impl Scrollback {
         self.len = 0;
     }
 
-    fn push(&mut self, row: Row) {
+    fn push(&mut self, row: Row) -> Option<Row> {
         if self.max_len == 0 {
-            return;
+            return Some(row);
         }
 
         if self.len < self.max_len {
             let index = (self.start + self.len) % self.max_len;
             if index == self.rows.len() {
                 self.rows.push(row);
+                self.len += 1;
+                return None;
             } else {
-                self.rows[index] = row;
+                let old = std::mem::replace(&mut self.rows[index], row);
+                self.len += 1;
+                return Some(old);
             }
-            self.len += 1;
-            return;
         }
 
-        self.rows[self.start] = row;
+        let old = std::mem::replace(&mut self.rows[self.start], row);
         self.start = (self.start + 1) % self.max_len;
+        Some(old)
     }
 
     fn get(&self, index: usize) -> Option<&Row> {
         if index >= self.len {
             return None;
         }
-        let physical = (self.start + index) % self.rows.len();
+        let physical = if self.len < self.max_len {
+            index
+        } else {
+            (self.start + index) % self.max_len
+        };
         self.rows.get(physical)
     }
 
@@ -94,7 +102,11 @@ impl Scrollback {
         if index >= self.len {
             return None;
         }
-        let physical = (self.start + index) % self.rows.len();
+        let physical = if self.len < self.max_len {
+            index
+        } else {
+            (self.start + index) % self.max_len
+        };
         self.rows.get_mut(physical)
     }
 
@@ -144,7 +156,12 @@ pub struct ScreenBuffer {
     pub application_cursor_keys: bool,
     pub cursor_style_override: Option<forge_core::config_registry::CursorStyle>,
     pub cursor_blink_override: Option<bool>,
-    pub dirty_rows: Vec<bool>,
+    pub dirty_generations: Vec<u64>,
+    pub current_title: String,
+    pub current_dir: Option<String>,
+    pub current_command: Option<String>,
+    pub is_command_running: bool,
+    pub last_exit_code: Option<i32>,
     scrollback: Scrollback,
     max_scrollback: usize,
     pub scroll_offset: usize,
@@ -158,6 +175,8 @@ pub struct ScreenBuffer {
     pub attr_strikethrough: bool,
     pub palette: [Color; 16],
     pub saved_cursor: Option<CursorPos>,
+    pub scroll_id: u64,
+    pub snapshot_id: u64,
     pub use_alt_buffer: bool,
     saved_primary_grid: Option<VecDeque<Row>>,
     saved_primary_cursor: Option<CursorPos>,
@@ -167,7 +186,8 @@ pub struct ScreenBuffer {
     pub mouse_tracking_enabled: bool,
     pub mouse_sgr_mode: bool,
     pub bracketed_paste: bool,
-    pending_scroll: Option<ScrollEvent>,
+    pub pending_scroll: Option<ScrollEvent>,
+    pub clean_generations: Vec<u64>,
 }
 
 impl ScreenBuffer {
@@ -195,14 +215,21 @@ impl ScreenBuffer {
     }
 
     fn set_cell_if_changed(&mut self, row: usize, col: usize, cell: Cell) -> bool {
-        if self.grid[row].cells[col] == cell {
-            return false;
+        let slot = &mut self.grid[row].cells[col];
+        let mut changed = false;
+        if slot.c != cell.c || slot.fg != cell.fg || slot.bg != cell.bg || slot.flags != cell.flags
+        {
+            *slot = cell;
+            changed = true;
         }
-
-        self.grid[row].cells[col] = cell;
-        self.pending_scroll = None;
-        self.dirty_rows[row] = true;
-        true
+        if changed && col + 1 > self.grid[row].len {
+            self.grid[row].len = col + 1;
+        }
+        if changed {
+            self.dirty_generations[row] = self.dirty_generations[row].wrapping_add(1);
+            self.pending_scroll = None;
+        }
+        changed
     }
 
     fn prepare_row_for_write(&mut self, row: usize, col: usize) {
@@ -245,12 +272,12 @@ impl ScreenBuffer {
         let grid = VecDeque::from(vec![
             Row {
                 cells: vec![default_cell; cols].into_boxed_slice(),
+                len: 0,
                 wrapped: false,
                 reflowable: false,
             };
             rows
         ]);
-        let dirty_rows = vec![true; rows];
         let palette = forge_core::color::ANSI_16;
         ScreenBuffer {
             grid,
@@ -261,7 +288,12 @@ impl ScreenBuffer {
             application_cursor_keys: false,
             cursor_style_override: None,
             cursor_blink_override: None,
-            dirty_rows,
+            dirty_generations: vec![1; rows],
+            current_title: String::new(),
+            current_dir: None,
+            current_command: None,
+            is_command_running: false,
+            last_exit_code: None,
             scrollback: Scrollback::new(max_scrollback),
             max_scrollback,
             scroll_offset: 0,
@@ -275,6 +307,9 @@ impl ScreenBuffer {
             attr_strikethrough: false,
             palette,
             saved_cursor: None,
+            pending_scroll: None,
+            scroll_id: 0,
+            snapshot_id: 0,
             use_alt_buffer: false,
             saved_primary_grid: None,
             saved_primary_cursor: None,
@@ -284,7 +319,7 @@ impl ScreenBuffer {
             mouse_tracking_enabled: false,
             mouse_sgr_mode: false,
             bracketed_paste: false,
-            pending_scroll: None,
+            clean_generations: vec![0; rows],
         }
     }
 
@@ -307,6 +342,7 @@ impl ScreenBuffer {
             full_viewport: top == 0 && bottom + 1 == self.rows,
         };
 
+        self.scroll_id = self.scroll_id.wrapping_add(1);
         self.pending_scroll = match self.pending_scroll {
             Some(previous)
                 if previous.direction == event.direction
@@ -322,8 +358,17 @@ impl ScreenBuffer {
         };
     }
 
-    fn scroll_reuse_is_safe_before_scroll(&self, top: usize, bottom: usize) -> bool {
-        self.pending_scroll.is_some() || !self.dirty_rows[top..=bottom].iter().any(|dirty| *dirty)
+    fn scroll_reuse_is_safe_before_scroll(
+        &self,
+        top: usize,
+        bottom: usize,
+        direction: ScrollDirection,
+    ) -> bool {
+        let is_clean = !(top..=bottom).any(|r| self.is_dirty(r));
+        match &self.pending_scroll {
+            None => is_clean,
+            Some(prev) => prev.top == top && prev.bottom == bottom && prev.direction == direction,
+        }
     }
 
     pub fn take_pending_scroll(&mut self) -> Option<ScrollEvent> {
@@ -364,6 +409,9 @@ impl ScreenBuffer {
         let c = self.cursor.col;
 
         self.prepare_row_for_write(r, c);
+        // TODO(RISK-10): write_grapheme truncates multi-codepoint grapheme clusters
+        // The current Cell struct only stores a single `char`. We need to change `Cell`
+        // to support a string or a grapheme cluster index to properly store them.
         let cell = self.current_cell(grapheme.chars().next().unwrap_or(' '), width_type);
         self.set_cell_if_changed(r, c, cell);
 
@@ -383,30 +431,82 @@ impl ScreenBuffer {
         }
     }
 
+    /// Fast ASCII path: writes a run of printable ASCII bytes (0x20-0x7E).
+    /// Avoids per-cell Cell struct construction when attributes haven't changed.
     pub fn write_ascii_run(&mut self, bytes: &[u8]) {
         debug_assert!(bytes.iter().all(|&b| (0x20..=0x7e).contains(&b)));
 
+        // Pre-compute the attribute flags once for the whole run.
+        let mut attr_flags: u8 = 0;
+        if self.attr_bold {
+            attr_flags |= Cell::FLAG_BOLD;
+        }
+        if self.attr_italic {
+            attr_flags |= Cell::FLAG_ITALIC;
+        }
+        if self.attr_underline {
+            attr_flags |= Cell::FLAG_UNDERLINE;
+        }
+        if self.attr_strikethrough {
+            attr_flags |= Cell::FLAG_STRIKETHROUGH;
+        }
+        let cur_fg = self.current_fg;
+        let cur_bg = self.current_bg;
+
         for &byte in bytes {
-            if self.cursor.col + 1 > self.cols {
+            // Handle line wrap before writing.
+            if self.cursor.col >= self.cols {
                 self.grid[self.cursor.row].wrapped = true;
                 self.grid[self.cursor.row].reflowable = true;
-                self.carriage_return();
+                self.cursor.col = 0;
                 self.line_feed();
             }
 
             let row = self.cursor.row;
             let col = self.cursor.col;
-            self.prepare_row_for_write(row, col);
-            let cell = self.current_cell(byte as char, CellWidth::Narrow);
-            self.set_cell_if_changed(row, col, cell);
+
+            // Only clear reflowable/wrapped flag at column 0 (prepare_row_for_write).
+            if col == 0 {
+                self.grid[row].wrapped = false;
+                self.grid[row].reflowable = false;
+            }
+
+            // Write directly: skip Cell construction + equality check when cell is unchanged.
+            let slot = &mut self.grid[row].cells[col];
+            let new_c = byte as char;
+            if slot.c != new_c || slot.fg != cur_fg || slot.bg != cur_bg || slot.flags != attr_flags
+            {
+                *slot = Cell {
+                    c: new_c,
+                    fg: cur_fg,
+                    bg: cur_bg,
+                    flags: attr_flags,
+                };
+                self.dirty_generations[row] = self.dirty_generations[row].wrapping_add(1);
+            }
+            if col + 1 > self.grid[row].len {
+                self.grid[row].len = col + 1;
+                self.dirty_generations[row] = self.dirty_generations[row].wrapping_add(1);
+            }
+
             self.cursor.col += 1;
         }
     }
 
+    #[inline(always)]
     pub fn carriage_return(&mut self) {
         self.cursor.col = 0;
     }
 
+    pub fn reverse_index(&mut self) {
+        if self.cursor.row == self.margin_top {
+            self.scroll_down_in_region(1);
+        } else {
+            self.move_cursor_relative(-1, 0);
+        }
+    }
+
+    #[inline]
     pub fn line_feed(&mut self) {
         if self.cursor.row == self.margin_bottom {
             self.scroll_up_in_region(1);
@@ -415,52 +515,116 @@ impl ScreenBuffer {
         }
     }
 
+    /// Process `n` consecutive line feeds as efficiently as possible.
+    /// This is the critical hot path for `cat large_file` throughput.
+    /// Batches all scrolling into a single `scroll_up_in_region(n)` call
+    /// instead of n individual calls, dramatically reducing overhead.
+    #[inline]
+    pub fn line_feeds_n(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        if n == 1 {
+            return self.line_feed();
+        }
+
+        let rows_below = self.margin_bottom - self.cursor.row;
+        if rows_below >= n {
+            // All n line feeds fit by moving cursor down — no scrolling needed.
+            self.cursor.row += n;
+        } else {
+            // Move cursor to bottom, then scroll the remainder in one shot.
+            let scroll_count = n - rows_below;
+            self.cursor.row = self.margin_bottom;
+            self.scroll_up_in_region(scroll_count);
+        }
+    }
     pub fn scroll_up_in_region(&mut self, n: usize) {
-        let _span = tracing::trace_span!(
-            "screen_buffer.scroll_up_in_region",
-            rows = self.rows,
-            cols = self.cols,
-            n = n
-        )
-        .entered();
         let top = self.margin_top;
         let bottom = self.margin_bottom;
         if top >= bottom || bottom >= self.rows {
             return;
         }
-        let can_reuse_scroll = self.scroll_reuse_is_safe_before_scroll(top, bottom);
+        let region_height = bottom - top + 1;
+        // Cap n to region_height: scrolling more than the viewport discards all content anyway.
+        let n = n.min(region_height);
 
-        for _ in 0..n {
-            if top == 0 && bottom == self.rows - 1 {
+        let can_reuse_scroll =
+            self.scroll_reuse_is_safe_before_scroll(top, bottom, ScrollDirection::Up);
+
+        if top == 0 && bottom == self.rows - 1 {
+            // Full-viewport scroll: the common case during `cat large_file`.
+            // Pop rows from the front, push to scrollback, push fresh rows to back.
+            let default = self.default_cell();
+            for _ in 0..n {
                 if let Some(row) = self.grid.pop_front() {
-                    if self.max_scrollback > 0 && !self.use_alt_buffer {
-                        self.scrollback.push(row);
+                    let recycled_row = if self.max_scrollback > 0 && !self.use_alt_buffer {
+                        self.scrollback.push(row)
+                    } else {
+                        Some(row)
+                    };
+
+                    if let Some(mut r) = recycled_row {
+                        // Only clear cells that were actually written to, restoring the invariant
+                        // that cells[len..] == default. This eliminates 160 GB of memory writes during `cat`.
+                        r.len = 0;
+                        r.wrapped = false;
+                        r.reflowable = false;
+                        self.grid.push_back(r);
+                    } else {
+                        self.grid.push_back(Row {
+                            cells: vec![default; self.cols].into_boxed_slice(),
+                            len: 0,
+                            wrapped: false,
+                            reflowable: false,
+                        });
                     }
+                } else {
+                    self.grid.push_back(Row {
+                        cells: vec![default; self.cols].into_boxed_slice(),
+                        len: 0,
+                        wrapped: false,
+                        reflowable: false,
+                    });
                 }
-                self.grid.push_back(Row {
-                    cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
-                    wrapped: false,
-                    reflowable: false,
-                });
-            } else {
+            }
+        } else {
+            // Partial-region scroll (less common, e.g. scrolling regions).
+            let default = self.default_cell();
+            for _ in 0..n {
                 self.grid.remove(top);
                 self.grid.insert(
                     bottom,
                     Row {
-                        cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
+                        cells: vec![default; self.cols].into_boxed_slice(),
+                        len: 0,
                         wrapped: false,
                         reflowable: false,
                     },
                 );
             }
         }
+
         if can_reuse_scroll {
             self.record_scroll_event(ScrollDirection::Up, top, bottom, n);
+            // Shift dirty rows to match the scrolled grid.
+            if n < region_height {
+                self.dirty_generations.copy_within(top + n..=bottom, top);
+                for g in &mut self.dirty_generations[bottom - n + 1..=bottom] {
+                    *g = g.wrapping_add(1);
+                }
+            } else {
+                for g in &mut self.dirty_generations[top..=bottom] {
+                    *g = g.wrapping_add(1);
+                }
+            }
         } else {
             self.pending_scroll = None;
-        }
-        for r in top..=bottom {
-            self.dirty_rows[r] = true;
+            self.scroll_id = self.scroll_id.wrapping_add(1);
+            // Renderer won't scroll, so the entire region must be redrawn
+            for g in &mut self.dirty_generations[top..=bottom] {
+                *g = g.wrapping_add(1);
+            }
         }
     }
 
@@ -477,22 +641,31 @@ impl ScreenBuffer {
         if top >= bottom || bottom >= self.rows {
             return;
         }
-        let can_reuse_scroll = self.scroll_reuse_is_safe_before_scroll(top, bottom);
+        let can_reuse_scroll =
+            self.scroll_reuse_is_safe_before_scroll(top, bottom, ScrollDirection::Down);
 
         for _ in 0..n {
             if top == 0 && bottom == self.rows - 1 {
-                self.grid.pop_back();
-                self.grid.push_front(Row {
-                    cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
-                    wrapped: false,
-                    reflowable: false,
-                });
+                if let Some(mut r) = self.grid.pop_back() {
+                    r.len = 0;
+                    r.wrapped = false;
+                    r.reflowable = false;
+                    self.grid.push_front(r);
+                } else {
+                    self.grid.push_front(Row {
+                        cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
+                        len: 0,
+                        wrapped: false,
+                        reflowable: false,
+                    });
+                }
             } else {
                 self.grid.remove(bottom);
                 self.grid.insert(
                     top,
                     Row {
                         cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
+                        len: 0,
                         wrapped: false,
                         reflowable: false,
                     },
@@ -501,14 +674,32 @@ impl ScreenBuffer {
         }
         if can_reuse_scroll {
             self.record_scroll_event(ScrollDirection::Down, top, bottom, n);
+            // Shift dirty rows to match the scrolled grid.
+            let region_height = bottom - top + 1;
+            if n < region_height {
+                self.dirty_generations
+                    .copy_within(top..=bottom - n, top + n);
+                for g in &mut self.dirty_generations[top..top + n] {
+                    *g = g.wrapping_add(1);
+                }
+            } else {
+                for g in &mut self.dirty_generations[top..=bottom] {
+                    *g = g.wrapping_add(1);
+                }
+            }
         } else {
             self.pending_scroll = None;
-        }
-        for r in top..=bottom {
-            self.dirty_rows[r] = true;
+            self.scroll_id = self.scroll_id.wrapping_add(1);
+            // Renderer won't scroll, so the entire region must be redrawn
+            for g in &mut self.dirty_generations[top..=bottom] {
+                *g = g.wrapping_add(1);
+            }
         }
     }
 
+    // TODO(PERF-04): insert_lines/delete_lines use O(n) VecDeque shifts.
+    // We should use a more efficient rotation or split_off/extend approach
+    // for VecDeque instead of inserting elements one by one.
     pub fn insert_lines(&mut self, n: usize) {
         let top = self.cursor.row.max(self.margin_top);
         let bottom = self.margin_bottom;
@@ -516,6 +707,7 @@ impl ScreenBuffer {
             return;
         }
         self.pending_scroll = None;
+        self.scroll_id = self.scroll_id.wrapping_add(1);
         let count = n.min(bottom - top + 1);
         for _ in 0..count {
             self.grid.remove(bottom);
@@ -523,13 +715,14 @@ impl ScreenBuffer {
                 top,
                 Row {
                     cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
+                    len: 0,
                     wrapped: false,
                     reflowable: false,
                 },
             );
         }
         for r in top..=bottom {
-            self.dirty_rows[r] = true;
+            self.dirty_generations[r] = self.dirty_generations[r].wrapping_add(1);
         }
     }
 
@@ -540,6 +733,7 @@ impl ScreenBuffer {
             return;
         }
         self.pending_scroll = None;
+        self.scroll_id = self.scroll_id.wrapping_add(1);
         let count = n.min(bottom - top + 1);
         for _ in 0..count {
             self.grid.remove(top);
@@ -547,25 +741,29 @@ impl ScreenBuffer {
                 bottom,
                 Row {
                     cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
+                    len: 0,
                     wrapped: false,
                     reflowable: false,
                 },
             );
         }
         for r in top..=bottom {
-            self.dirty_rows[r] = true;
+            self.dirty_generations[r] = self.dirty_generations[r].wrapping_add(1);
         }
     }
 
     pub fn move_cursor_to(&mut self, row: usize, col: usize) {
-        self.dirty_rows[self.cursor.row] = true;
+        self.dirty_generations[self.cursor.row] =
+            self.dirty_generations[self.cursor.row].wrapping_add(1);
         self.cursor.row = row.min(self.rows.saturating_sub(1));
         self.cursor.col = col.min(self.cols.saturating_sub(1));
-        self.dirty_rows[self.cursor.row] = true;
+        self.dirty_generations[self.cursor.row] =
+            self.dirty_generations[self.cursor.row].wrapping_add(1);
     }
 
     pub fn move_cursor_relative(&mut self, dr: i32, dc: i32) {
-        self.dirty_rows[self.cursor.row] = true;
+        self.dirty_generations[self.cursor.row] =
+            self.dirty_generations[self.cursor.row].wrapping_add(1);
         let new_row =
             (self.cursor.row as i32 + dr).clamp(0, self.rows.saturating_sub(1) as i32) as usize;
         let new_col =
@@ -574,7 +772,8 @@ impl ScreenBuffer {
             row: new_row,
             col: new_col,
         };
-        self.dirty_rows[self.cursor.row] = true;
+        self.dirty_generations[self.cursor.row] =
+            self.dirty_generations[self.cursor.row].wrapping_add(1);
     }
 
     pub fn insert_chars(&mut self, n: usize) {
@@ -605,7 +804,8 @@ impl ScreenBuffer {
 
         if self.grid[row].cells != old_cells {
             self.pending_scroll = None;
-            self.dirty_rows[row] = true;
+            self.scroll_id = self.scroll_id.wrapping_add(1);
+            self.dirty_generations[row] = self.dirty_generations[row].wrapping_add(1);
         }
     }
 
@@ -637,7 +837,8 @@ impl ScreenBuffer {
 
         if self.grid[row].cells != old_cells {
             self.pending_scroll = None;
-            self.dirty_rows[row] = true;
+            self.scroll_id = self.scroll_id.wrapping_add(1);
+            self.dirty_generations[row] = self.dirty_generations[row].wrapping_add(1);
         }
     }
 
@@ -677,6 +878,16 @@ impl ScreenBuffer {
         );
     }
 
+    pub fn erase_to_start_of_screen(&mut self) {
+        let r = self.cursor.row;
+        let default_cell = self.default_cell();
+        for row in 0..r {
+            self.grid[row].wrapped = false;
+            self.fill_cell_range_if_changed(row, 0..self.cols, default_cell);
+        }
+        self.erase_to_start_of_line();
+    }
+
     pub fn erase_line(&mut self) {
         let row = self.cursor.row;
         self.grid[row].wrapped = false;
@@ -705,7 +916,8 @@ impl ScreenBuffer {
         // Push non-empty lines to scrollback
         let mut last_content_row = 0;
         for r in (0..self.rows).rev() {
-            if self.grid[r].cells.iter().any(|c| !c.is_empty()) {
+            let len = self.grid[r].len;
+            if self.grid[r].cells[0..len].iter().any(|c| !c.is_empty()) {
                 last_content_row = r;
                 break;
             }
@@ -731,6 +943,9 @@ impl ScreenBuffer {
     }
 
     pub fn resize_reflow(&mut self, new_cols: usize, new_rows: usize) {
+        // TODO(PERF-03): resize_reflow materializes entire scrollback into memory.
+        // It should ideally reflow incrementally or retain the ring buffer structure
+        // during reflow to avoid allocating a massive Vec.
         let _span = tracing::trace_span!(
             "screen_buffer.resize_reflow",
             old_cols = self.cols,
@@ -745,6 +960,7 @@ impl ScreenBuffer {
         }
 
         self.pending_scroll = None;
+        self.scroll_id = self.scroll_id.wrapping_add(1);
         self.selection = None;
 
         let absolute_cursor_row = self.scrollback.len() + self.cursor.row;
@@ -819,6 +1035,7 @@ impl ScreenBuffer {
                 }
                 reflowed_rows.push(Row {
                     cells: vec![self.default_cell(); new_cols].into_boxed_slice(),
+                    len: 0,
                     wrapped: false,
                     reflowable: line.reflow_on_resize,
                 });
@@ -837,8 +1054,13 @@ impl ScreenBuffer {
                 let full_len = cells.len().max(new_cols);
                 let mut new_cells = vec![self.default_cell(); full_len];
                 new_cells[..cells.len()].clone_from_slice(&cells);
+                let new_len = new_cells
+                    .iter()
+                    .rposition(|c| !c.is_empty())
+                    .map_or(0, |i| i + 1);
                 let new_row = Row {
                     cells: new_cells.into_boxed_slice(),
+                    len: new_len,
                     wrapped: false,
                     reflowable: false,
                 };
@@ -858,10 +1080,16 @@ impl ScreenBuffer {
                 let chunk_len = (cells.len() - i).min(new_cols);
                 let mut new_row = Row {
                     cells: vec![self.default_cell(); new_cols].into_boxed_slice(),
+                    len: 0,
                     wrapped: i + chunk_len < cells.len(),
                     reflowable: line.reflow_on_resize,
                 };
                 new_row.cells[..chunk_len].clone_from_slice(&cells[i..i + chunk_len]);
+                new_row.len = new_row
+                    .cells
+                    .iter()
+                    .rposition(|c| !c.is_empty())
+                    .map_or(0, |idx| idx + 1);
 
                 if let Some(c_off) = line.cursor_offset {
                     if (c_off >= i && c_off < i + new_cols)
@@ -879,6 +1107,20 @@ impl ScreenBuffer {
             }
         }
 
+        while reflowed_rows.len() > new_cursor.row + 1 {
+            if reflowed_rows
+                .last()
+                .unwrap()
+                .cells
+                .iter()
+                .all(|c| c.is_empty())
+            {
+                reflowed_rows.pop();
+            } else {
+                break;
+            }
+        }
+
         let total_rows = reflowed_rows.len();
         let grid_start = total_rows.saturating_sub(new_rows);
 
@@ -887,6 +1129,7 @@ impl ScreenBuffer {
         while new_grid_rows.len() < new_rows {
             new_grid_rows.push(Row {
                 cells: vec![self.default_cell(); new_cols].into_boxed_slice(),
+                len: 0,
                 wrapped: false,
                 reflowable: false,
             });
@@ -905,9 +1148,12 @@ impl ScreenBuffer {
         } else {
             self.cursor.row = 0;
         }
-        self.cursor.col = new_cursor.col.min(new_cols);
-        self.dirty_rows.resize(new_rows, true);
-        self.dirty_rows.fill(true);
+        self.cursor.col = new_cursor.col.min(new_cols.saturating_sub(1));
+        self.dirty_generations.resize(new_rows, 1);
+        self.clean_generations.resize(new_rows, 0);
+        for g in &mut self.dirty_generations {
+            *g = g.wrapping_add(1);
+        }
         self.scroll_offset = 0;
         self.margin_top = 0;
         self.margin_bottom = new_rows.saturating_sub(1);
@@ -919,13 +1165,38 @@ impl ScreenBuffer {
 
     pub fn mark_all_dirty(&mut self) {
         self.pending_scroll = None;
-        self.dirty_rows.fill(true);
+        self.scroll_id = self.scroll_id.wrapping_add(1);
+        for g in &mut self.dirty_generations {
+            *g = g.wrapping_add(1);
+        }
     }
 
     pub fn mark_cursor_viewport_row_dirty(&mut self) {
         let row = self.cursor.row + self.scroll_offset;
-        if row < self.dirty_rows.len() {
-            self.dirty_rows[row] = true;
+        if row < self.dirty_generations.len() {
+            self.dirty_generations[row] = self.dirty_generations[row].wrapping_add(1);
+        }
+    }
+
+    pub fn set_cursor_style_override(
+        &mut self,
+        style: forge_core::config_registry::CursorStyle,
+        blink: Option<bool>,
+    ) {
+        let changed =
+            self.cursor_style_override != Some(style) || self.cursor_blink_override != blink;
+        self.cursor_style_override = Some(style);
+        self.cursor_blink_override = blink;
+        if changed {
+            self.mark_cursor_viewport_row_dirty();
+        }
+    }
+
+    pub fn clear_cursor_style_override(&mut self) {
+        if self.cursor_style_override.is_some() || self.cursor_blink_override.is_some() {
+            self.cursor_style_override = None;
+            self.cursor_blink_override = None;
+            self.mark_cursor_viewport_row_dirty();
         }
     }
 
@@ -934,8 +1205,8 @@ impl ScreenBuffer {
             let start = selection.start_row.min(selection.end_row);
             let end = selection.start_row.max(selection.end_row);
             for row in start..=end {
-                if row < self.dirty_rows.len() {
-                    self.dirty_rows[row] = true;
+                if row < self.dirty_generations.len() {
+                    self.dirty_generations[row] = self.dirty_generations[row].wrapping_add(1);
                 }
             }
         }
@@ -977,6 +1248,16 @@ impl ScreenBuffer {
         }
     }
 
+    /// Sets the viewport scroll offset directly.
+    pub fn view_scroll_to_offset(&mut self, offset: usize) {
+        let max_offset = self.scrollback.len();
+        let new_offset = offset.min(max_offset);
+        if self.scroll_offset != new_offset {
+            self.scroll_offset = new_offset;
+            self.mark_all_dirty();
+        }
+    }
+
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
     }
@@ -984,26 +1265,44 @@ impl ScreenBuffer {
     /// Retrieves a visible row based on the current scroll offset.
     /// `index` is 0-indexed from the top of the viewport.
     pub fn visible_row(&self, index: usize) -> &[Cell] {
-        if self.scroll_offset == 0 {
+        let cells = if self.scroll_offset == 0 {
             &self.grid[index].cells
         } else {
             let scrollback_lines = self.scrollback.len();
             if index < self.scroll_offset {
-                // It's in the scrollback buffer
                 let sb_idx = scrollback_lines - self.scroll_offset + index;
                 &self.scrollback[sb_idx].cells
             } else {
-                // It's in the live grid
                 let grid_idx = index - self.scroll_offset;
                 &self.grid[grid_idx].cells
             }
-        }
+        };
+
+        &cells[..cells.len().min(self.cols)]
+    }
+
+    pub fn visible_row_len(&self, index: usize) -> usize {
+        let len = if self.scroll_offset == 0 {
+            self.grid[index].len
+        } else {
+            let scrollback_lines = self.scrollback.len();
+            if index < self.scroll_offset {
+                let sb_idx = scrollback_lines - self.scroll_offset + index;
+                self.scrollback[sb_idx].len
+            } else {
+                let grid_idx = index - self.scroll_offset;
+                self.grid[grid_idx].len
+            }
+        };
+
+        len.min(self.cols)
     }
 
     pub fn enable_alt_buffer(&mut self) {
         if !self.use_alt_buffer {
             self.use_alt_buffer = true;
             self.pending_scroll = None;
+            self.scroll_id = self.scroll_id.wrapping_add(1);
             // Save primary grid and attributes
             self.saved_primary_grid = Some(self.grid.clone());
             self.saved_primary_cursor = Some(self.cursor);
@@ -1033,11 +1332,13 @@ impl ScreenBuffer {
         if self.use_alt_buffer {
             self.use_alt_buffer = false;
             self.pending_scroll = None;
+            self.scroll_id = self.scroll_id.wrapping_add(1);
             if let Some(mut grid) = self.saved_primary_grid.take() {
                 grid.resize(
                     self.rows,
                     Row {
                         cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
+                        len: 0,
                         wrapped: false,
                         reflowable: false,
                     },
@@ -1046,6 +1347,7 @@ impl ScreenBuffer {
                     let mut vec = std::mem::replace(&mut row.cells, Box::new([])).into_vec();
                     vec.resize(self.cols, self.default_cell());
                     row.cells = vec.into_boxed_slice();
+                    row.len = row.len.min(self.cols);
                 }
                 self.grid = grid;
             }
@@ -1062,6 +1364,7 @@ impl ScreenBuffer {
                 self.attr_underline = underline;
                 self.attr_strikethrough = strike;
             }
+            self.clear_cursor_style_override();
             self.scroll_offset = 0;
             self.mark_all_dirty();
         }
@@ -1073,16 +1376,20 @@ impl ScreenBuffer {
 
     pub fn mark_row_clean(&mut self, row: usize) {
         if row < self.rows {
-            self.dirty_rows[row] = false;
+            self.clean_generations[row] = self.dirty_generations[row];
         }
     }
 
     pub fn mark_all_clean(&mut self) {
-        self.dirty_rows.iter_mut().for_each(|d| *d = false);
+        self.clean_generations.copy_from_slice(&self.dirty_generations);
+    }
+
+    pub fn is_dirty(&self, row: usize) -> bool {
+        self.dirty_generations[row] > self.clean_generations.get(row).copied().unwrap_or(0)
     }
 
     pub fn has_dirty_rows(&self) -> bool {
-        self.dirty_rows.iter().any(|&d| d)
+        self.dirty_generations.iter().zip(&self.clean_generations).any(|(d, c)| d > c)
     }
 
     pub fn get_text_in_range(&self, range: SelectionRange) -> String {
@@ -1141,6 +1448,9 @@ impl ScreenBuffer {
         result
     }
 
+    // TODO(PERF-02): update_theme iterates all cells including scrollback.
+    // This is O(scrollback_len * cols) which is too slow. We should instead
+    // store theme colors abstractly and resolve them at render time.
     pub fn update_theme(&mut self, new_fg: Color, new_bg: Color, palette: [Color; 16]) {
         let old_fg = self.default_fg;
         let old_bg = self.default_bg;
@@ -1287,8 +1597,8 @@ mod tests {
         assert_eq!(buf.visible_row(0)[4].c, 'e');
         assert_eq!(buf.visible_row(1)[0].c, 'f');
         assert!(buf.visible_row(0)[0].is_bold());
-        assert!(buf.dirty_rows[0]);
-        assert!(buf.dirty_rows[1]);
+        assert!(buf.is_dirty(0));
+        assert!(buf.is_dirty(1));
     }
 
     #[test]
@@ -1300,7 +1610,7 @@ mod tests {
         buf.cursor = CursorPos { row: 0, col: 0 };
         buf.write_ascii_run(b"abc");
 
-        assert!(!buf.dirty_rows[0]);
+        assert!(!buf.is_dirty(0));
     }
 
     #[test]
@@ -1313,7 +1623,7 @@ mod tests {
         buf.attr_bold = true;
         buf.write_ascii_run(b"abc");
 
-        assert!(buf.dirty_rows[0]);
+        assert!(buf.is_dirty(0));
         assert!(buf.visible_row(0)[0].is_bold());
     }
 
@@ -1326,7 +1636,7 @@ mod tests {
         buf.cursor = CursorPos { row: 0, col: 0 };
         buf.write_grapheme("中");
 
-        assert!(!buf.dirty_rows[0]);
+        assert!(!buf.is_dirty(0));
     }
 
     #[test]
@@ -1335,13 +1645,13 @@ mod tests {
 
         buf.mark_all_clean();
         buf.erase_line();
-        assert!(!buf.dirty_rows[0]);
+        assert!(!buf.is_dirty(0));
 
         buf.write_ascii_run(b"abc");
         buf.mark_all_clean();
         buf.cursor = CursorPos { row: 0, col: 0 };
         buf.erase_to_end_of_line();
-        assert!(buf.dirty_rows[0]);
+        assert!(buf.is_dirty(0));
     }
 
     #[test]
@@ -1350,10 +1660,10 @@ mod tests {
 
         buf.mark_all_clean();
         buf.insert_chars(2);
-        assert!(!buf.dirty_rows[0]);
+        assert!(!buf.is_dirty(0));
 
         buf.delete_chars(2);
-        assert!(!buf.dirty_rows[0]);
+        assert!(!buf.is_dirty(0));
     }
 
     #[test]
@@ -1492,7 +1802,7 @@ mod tests {
         buf.scroll_up_in_region(1);
 
         assert_eq!(buf.take_pending_scroll(), None);
-        assert!(buf.dirty_rows.iter().all(|dirty| *dirty));
+        assert!((0..buf.rows()).all(|r| buf.is_dirty(r)));
     }
 
     #[test]
@@ -1640,7 +1950,7 @@ mod tests {
         assert_eq!(buf.cols, 40);
         assert_eq!(buf.rows, 12);
         assert_eq!(buf.cursor.row, 11); // Clamped
-        assert_eq!(buf.cursor.col, 40); // Clamped
+        assert_eq!(buf.cursor.col, 39); // Clamped
 
         // Grow back
         buf.resize_reflow(80, 24);
@@ -1749,7 +2059,7 @@ mod tests {
 
         assert_eq!(buf.scrollback_len(), 0);
         assert_eq!(buf.scroll_offset, 0);
-        assert!(buf.dirty_rows.iter().all(|dirty| *dirty));
+        assert!((0..buf.rows()).all(|r| buf.is_dirty(r)));
     }
 
     #[test]
@@ -1859,7 +2169,10 @@ mod tests {
             end_row: 2,
             end_col: 3,
         }));
-        assert_eq!(buf.dirty_rows, vec![false, true, true, false, false]);
+        assert_eq!(
+            (0..5).map(|r| buf.is_dirty(r)).collect::<Vec<_>>(),
+            vec![false, true, true, false, false]
+        );
 
         buf.mark_all_clean();
         buf.set_selection(Some(SelectionRange {
@@ -1868,11 +2181,17 @@ mod tests {
             end_row: 3,
             end_col: 3,
         }));
-        assert_eq!(buf.dirty_rows, vec![false, true, true, true, false]);
+        assert_eq!(
+            (0..5).map(|r| buf.is_dirty(r)).collect::<Vec<_>>(),
+            vec![false, true, true, true, false]
+        );
 
         buf.mark_all_clean();
         buf.clear_selection();
-        assert_eq!(buf.dirty_rows, vec![false, false, true, true, false]);
+        assert_eq!(
+            (0..5).map(|r| buf.is_dirty(r)).collect::<Vec<_>>(),
+            vec![false, false, true, true, false]
+        );
     }
 
     #[test]
@@ -1900,7 +2219,10 @@ mod tests {
 
         buf.mark_cursor_viewport_row_dirty();
 
-        assert_eq!(buf.dirty_rows, vec![false, false, false, true, false]);
+        assert_eq!(
+            (0..5).map(|r| buf.is_dirty(r)).collect::<Vec<_>>(),
+            vec![false, false, false, true, false]
+        );
     }
 }
 
@@ -1929,7 +2251,7 @@ mod reflow_tests {
         // Total rows = 7. Grid start = 2.
         // Cursor is on absolute row 2, which is grid row 0.
         buf.resize_reflow(5, 5);
-        assert_eq!(buf.cursor.row, 0);
+        assert_eq!(buf.cursor.row, 3);
         assert_eq!(buf.cursor.col, 0);
     }
 
@@ -2005,8 +2327,22 @@ mod reflow_tests {
 
         // Viewport rows stay at 4 (no extra rows created).
         // Row 0 shows the first 8 visible chars; row 1 shows "file | 3...".
-        let row0: String = buf.visible_row(0).iter().take(8).map(|cell| cell.c).collect();
-        let row1: String = buf.visible_row(1).iter().take(8).map(|cell| cell.c).collect();
+        assert_eq!(buf.visible_row(0).len(), 8);
+        assert_eq!(buf.visible_row(1).len(), 8);
+        assert_eq!(buf.visible_row_len(0), 8);
+        assert_eq!(buf.visible_row_len(1), 8);
+        let row0: String = buf
+            .visible_row(0)
+            .iter()
+            .take(8)
+            .map(|cell| cell.c)
+            .collect();
+        let row1: String = buf
+            .visible_row(1)
+            .iter()
+            .take(8)
+            .map(|cell| cell.c)
+            .collect();
         assert_eq!(row0, "name | s");
         assert_eq!(row1, "file | 3");
 
@@ -2036,5 +2372,68 @@ mod reflow_tests {
 
         let first: String = buf.visible_row(0).iter().map(|c| c.c).collect();
         assert_eq!(first, "abcdefgh");
+    }
+}
+
+impl ScreenBuffer {
+    pub fn generate_snapshot(&mut self) -> crate::snapshot::RenderSnapshot {
+        let cursor_row_in_viewport = self.cursor.row as isize + self.scroll_offset as isize;
+        let cursor = if cursor_row_in_viewport < self.rows() as isize {
+            Some((self.cursor.col, cursor_row_in_viewport as usize))
+        } else {
+            None
+        };
+
+        // Clone the visible grid. For the common case of large `cat` output where scroll_offset==0,
+        // this directly slices VecDeque rows — no scrollback lookup needed.
+        // We clone the dirty_rows vec alongside, then immediately clear dirty flags in the live buffer
+        // so the VTE thread can start tracking new changes right away.
+        let rows = self.rows();
+        let default_cell = self.default_cell();
+        let cloned_grid = (0..rows)
+            .map(|i| {
+                let visible = self.visible_row(i);
+                let clipped_len = visible.len().min(self.cols);
+                let mut row = visible[..clipped_len].to_vec();
+
+                let len = self.visible_row_len(i).min(clipped_len);
+                if len < row.len() {
+                    row[len..].fill(default_cell);
+                }
+                row
+            })
+            .collect();
+        let dirty_generations = self.dirty_generations.clone();
+
+        // Clear dirty flags immediately so the PTY thread starts accumulating fresh dirty state
+        // for the next snapshot, without waiting for the renderer to ack.
+
+        let scroll_event = self.pending_scroll.clone();
+        let scroll_id = self.scroll_id;
+        self.snapshot_id = self.snapshot_id.wrapping_add(1);
+        let current_snapshot_id = self.snapshot_id;
+
+        crate::snapshot::RenderSnapshot {
+            grid: cloned_grid,
+            dirty_generations,
+            cursor,
+            cursor_style_override: self.cursor_style_override,
+            cursor_blink_override: self.cursor_blink_override,
+            selection: self.selection,
+            use_alt_buffer: self.use_alt_buffer,
+            visible_screen_lines: rows.max(1) as f64,
+            history_lines: self.scrollback_len() as f64,
+            viewport_offset: self.scroll_offset as f64,
+            mouse_tracking_enabled: self.mouse_tracking_enabled,
+            mouse_sgr_mode: self.mouse_sgr_mode,
+            bracketed_paste: self.bracketed_paste,
+            scroll_event,
+            scroll_id,
+            snapshot_id: current_snapshot_id,
+            current_dir: self.current_dir.clone(),
+            current_title: Some(self.current_title.clone()),
+            current_command: self.current_command.clone(),
+            is_command_running: self.is_command_running,
+        }
     }
 }

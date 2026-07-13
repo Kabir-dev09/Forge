@@ -13,7 +13,9 @@ pub mod swapchain;
 pub mod sync;
 pub mod texture;
 
-pub use renderer::Renderer;
+pub use renderer::{
+    PaneRenderId, PaneRenderInput, PaneRenderRect, Renderer, SplitBorderRenderInput,
+};
 
 #[cfg(test)]
 mod tests {

@@ -8,7 +8,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 /// - ERROR — unrecoverable failures that require shutdown.
 fn init_logging() {
     let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("forge=debug,warn"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("forge=info,warn"));
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(true).with_thread_ids(true))
@@ -28,8 +28,13 @@ fn main() {
     }
 }
 
+pub mod confirm_modal;
+pub mod context_menu;
 pub mod event_loop;
 mod font_paths;
+pub mod mux;
+pub mod sidebar;
+pub mod statusbar;
 pub mod wayland;
 
 fn run() -> forge_core::Result<()> {
@@ -37,18 +42,18 @@ fn run() -> forge_core::Result<()> {
     let total_start = std::time::Instant::now();
 
     // --- Config Actor (Spawn Early in background) ---
-    let t_lua = std::time::Instant::now();
+    let t_config = std::time::Instant::now();
     let config_path = dirs::config_dir()
         .unwrap_or_default()
-        .join("forge/config.lua");
+        .join("forge/config.toml");
 
     let config_handle = {
         let _span = tracing::debug_span!("startup.spawn_config_actor").entered();
         forge_config::actor::spawn_config_actor(config_path.clone())
     };
-    tracing::info!(
-        "[PROFILER] Lua Config Actor Spawn took: {:?}",
-        t_lua.elapsed()
+    tracing::debug!(
+        "[PROFILER] TOML Config Actor Spawn took: {:?}",
+        t_config.elapsed()
     );
 
     // --- Fast-path startup ---
@@ -159,13 +164,13 @@ fn run() -> forge_core::Result<()> {
     // Store shm_buffer to keep it alive
     wayland_state.shm_buffer = Some(shm_buf);
 
-    tracing::info!("First frame presented. Entering event loop.");
-    tracing::info!(
+    tracing::info!("Window appeared in {:?}.", total_start.elapsed());
+    tracing::debug!(
         "[PROFILER] Fast-Path Cache & Wayland SHM First Frame took: {:?}",
         t_fast_path.elapsed()
     );
 
-    // Wait for the background config actor to finish reading config.lua
+    // Wait for the background config actor to finish reading config.toml
     // (This usually completes instantly because it was spawned at the very beginning)
     let config = {
         let _span = tracing::debug_span!("startup.receive_initial_config").entered();
@@ -232,7 +237,8 @@ fn run() -> forge_core::Result<()> {
             baseline,
         )?
     };
-    tracing::info!(
+    renderer.set_ligature_config(config.font.ligatures.clone());
+    tracing::debug!(
         "[PROFILER] Vulkan Boot (Renderer::new) took: {:?}",
         t_vulkan.elapsed()
     );
@@ -242,6 +248,8 @@ fn run() -> forge_core::Result<()> {
         window_size.height as f64,
         &config.window.padding,
         config.window.padding_balance,
+        &config.statusbar,
+        0,
         cell_w as f64,
         cell_h as f64,
     );
@@ -466,17 +474,12 @@ fn run() -> forge_core::Result<()> {
         }
     });
 
-    tracing::info!(
+    tracing::debug!(
         "[PROFILER] TOTAL TTFF PRE-LOOP took: {:?}",
         total_start.elapsed()
     );
 
-    // 2. Spawn config watcher.
-    // Keep the watcher alive by storing it in AppData.
-    let watcher =
-        forge_config::watcher::spawn_config_watcher(config_path, config_handle.tx.clone());
-
-    // Proxy thread to wake up event loop when config changes
+    // Proxy thread to wake up event loop after an explicit config reload.
     let (config_tx2, config_rx2) = crossbeam_channel::unbounded();
     let loop_sig_cfg = loop_signal.clone();
     let orig_cfg_rx = config_handle.rx;
@@ -487,14 +490,41 @@ fn run() -> forge_core::Result<()> {
         }
     });
 
+    let snapshot = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        screen_buffer.generate_snapshot(),
+    ));
+    let mut mux = crate::mux::MuxState::single_pane(
+        pty,
+        snapshot.clone(),
+        crate::mux::GridSize::new(cols, rows),
+    );
+    let startup_content_rect = crate::mux::PaneRect::new(
+        metrics.pad_x as f32,
+        metrics.pad_y as f32,
+        (cols as f64 * metrics.effective_cell_w) as f32,
+        (rows as f64 * metrics.effective_cell_h) as f32,
+    );
+    if let Err(err) = mux.relayout(crate::mux::LayoutParams::new(
+        startup_content_rect,
+        metrics.effective_cell_w as f32,
+        metrics.effective_cell_h as f32,
+        config.window.gap as f32,
+        forge_core::config_registry::PaddingConfig::default(),
+    )) {
+        tracing::warn!(
+            ?err,
+            "Initial mux relayout failed; using startup grid metrics"
+        );
+    }
+
     // --- Main Event Loop ---
     crate::event_loop::run_event_loop(
         event_loop,
         wayland_state,
         event_queue,
-        pty,
-        std::sync::Arc::new(std::sync::RwLock::new(screen_buffer)),
+        mux,
         vte_processor,
+        screen_buffer,
         key_rx,
         pointer_rx,
         paste_rx,
@@ -502,7 +532,6 @@ fn run() -> forge_core::Result<()> {
         Some(renderer),
         Some(font_rx),
         Some(config_rx2),
-        watcher,
         total_start,
     )?;
 

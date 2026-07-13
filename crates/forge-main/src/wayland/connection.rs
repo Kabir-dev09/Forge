@@ -24,9 +24,15 @@ pub enum PointerEvent {
     Enter { x: f64, y: f64 },
     Leave,
     Motion { x: f64, y: f64 },
-    Press { button: u32 },
+    Press { button: u32, serial: u32 },
     Release { button: u32 },
     Axis { amount: f64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingSplit {
+    Vertical,
+    Horizontal,
 }
 
 pub struct RepeatingKey {
@@ -61,6 +67,10 @@ pub struct WaylandState {
     pub repeating_key: Option<RepeatingKey>,
     pub keybindings:
         std::collections::HashMap<forge_core::bindings::KeyStroke, forge_core::bindings::Action>,
+    pub zoom_delta: f32,
+    pub zoom_reset: bool,
+    pub pending_splits: Vec<PendingSplit>,
+    pub pending_tab_actions: Vec<forge_core::bindings::Action>,
 }
 
 pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
@@ -155,6 +165,10 @@ pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
         repeat_info: None,
         repeating_key: None,
         keybindings: std::collections::HashMap::new(),
+        zoom_delta: 0.0,
+        zoom_reset: false,
+        pending_splits: Vec::new(),
+        pending_tab_actions: Vec::new(),
     };
 
     Ok((state, event_queue))

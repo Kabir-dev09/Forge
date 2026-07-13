@@ -8,6 +8,29 @@ use nix::unistd::{close, dup2, execvpe, fork, setsid, ForkResult};
 use std::ffi::CString;
 use std::os::unix::io::{AsRawFd, OwnedFd};
 
+fn ensure_integration_scripts() -> std::io::Result<std::path::PathBuf> {
+    let mut dir =
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()));
+    dir.push(".local");
+    dir.push("share");
+    dir.push("forge");
+    dir.push("shell-integration");
+
+    std::fs::create_dir_all(&dir)?;
+
+    let bash_script = include_str!("integration/bash.sh");
+    let zsh_script = include_str!("integration/zsh.sh");
+    let fish_script = include_str!("integration/fish.fish");
+    let nu_script = include_str!("integration/nu.nu");
+
+    std::fs::write(dir.join("bash.sh"), bash_script)?;
+    std::fs::write(dir.join("zsh.sh"), zsh_script)?;
+    std::fs::write(dir.join("fish.fish"), fish_script)?;
+    std::fs::write(dir.join("nu.nu"), nu_script)?;
+
+    Ok(dir)
+}
+
 pub fn size_to_winsize(size: Size, cell_w: u16, cell_h: u16) -> Winsize {
     Winsize {
         ws_col: (size.width as u16 / cell_w).max(1),
@@ -23,6 +46,13 @@ pub struct Pty {
     pub size: Winsize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyReadResult {
+    Data(usize),
+    WouldBlock,
+    Eof,
+}
+
 impl Pty {
     pub fn spawn(shell: &ShellConfig, winsize: Winsize) -> Result<Self> {
         let program_cstr = CString::new(shell.program.clone())
@@ -32,14 +62,53 @@ impl Pty {
 
         args.push(program_cstr.clone());
 
+        let mut base_args = Vec::new();
         for arg in &shell.args {
-            args.push(
+            base_args.push(
                 CString::new(arg.clone())
                     .map_err(|e| ForgeError::Pty(format!("Invalid arg: {}", e)))?,
             );
         }
 
         let mut env_map = std::collections::HashMap::new();
+
+        if let Ok(dir) = ensure_integration_scripts() {
+            let prog = shell.program.as_str();
+            if prog.ends_with("bash") {
+                let init_path = dir.join("bash-init.sh");
+                let init_script = format!(
+                    "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi\nsource {}",
+                    dir.join("bash.sh").display()
+                );
+                std::fs::write(&init_path, init_script).ok();
+
+                args.push(CString::new("--rcfile").unwrap());
+                args.push(CString::new(init_path.to_string_lossy().to_string()).unwrap());
+            } else if prog.ends_with("zsh") {
+                let init_path = dir.join(".zshrc");
+                let init_script = format!(
+                    "ZDOTDIR=\"${{OLD_ZDOTDIR:-$HOME}}\"\nif [ -f \"$ZDOTDIR/.zshrc\" ]; then\n    source \"$ZDOTDIR/.zshrc\"\nfi\nsource \"{}\"\n",
+                    dir.join("zsh.sh").display()
+                );
+                std::fs::write(&init_path, init_script).ok();
+                env_map.insert(
+                    "OLD_ZDOTDIR".to_string(),
+                    std::env::var("ZDOTDIR").unwrap_or_else(|_| "".to_string()),
+                );
+                env_map.insert("ZDOTDIR".to_string(), dir.to_string_lossy().to_string());
+            } else if prog.ends_with("fish") {
+                args.push(CString::new("--init-command").unwrap());
+                args.push(
+                    CString::new(format!("source {}", dir.join("fish.fish").display())).unwrap(),
+                );
+            } else if prog.ends_with("nu") {
+                args.push(CString::new("-e").unwrap());
+                args.push(CString::new(format!("source {}", dir.join("nu.nu").display())).unwrap());
+            }
+        }
+
+        args.extend(base_args);
+
         for (k, v) in std::env::vars() {
             env_map.insert(k, v);
         }
@@ -141,6 +210,16 @@ impl Pty {
         }
     }
 
+    pub fn read_nonblocking(&self, buf: &mut [u8]) -> Result<PtyReadResult> {
+        match nix::unistd::read(self.master_fd.as_raw_fd(), buf) {
+            Ok(0) => Ok(PtyReadResult::Eof),
+            Ok(n) => Ok(PtyReadResult::Data(n)),
+            Err(nix::errno::Errno::EAGAIN) => Ok(PtyReadResult::WouldBlock),
+            Err(nix::errno::Errno::EIO) => Ok(PtyReadResult::Eof),
+            Err(e) => Err(ForgeError::Pty(e.to_string())),
+        }
+    }
+
     pub fn write_all(&self, data: &[u8]) -> Result<()> {
         let mut written = 0;
         while written < data.len() {
@@ -148,7 +227,8 @@ impl Pty {
                 Ok(n) if n > 0 => written += n,
                 Ok(_) => return Err(ForgeError::Pty("Write returned 0".to_string())),
                 Err(nix::errno::Errno::EAGAIN) => {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    let mut pfd = nix::poll::PollFd::new(std::os::fd::AsFd::as_fd(&self.master_fd), nix::poll::PollFlags::POLLOUT);
+                    let _ = nix::poll::poll(&mut [pfd], 1000_u16);
                 }
                 Err(nix::errno::Errno::EIO) => {
                     return Err(ForgeError::Pty("Shell exited".to_string()))

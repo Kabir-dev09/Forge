@@ -112,7 +112,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                         let keysym = xkb_state.key_get_one_sym(keycode.into());
                         let utf8 = xkb_state.key_get_utf8(keycode.into());
 
-                        tracing::info!("Key pressed: sym={:?}, char={:?}", keysym, utf8);
+                        tracing::trace!("Key pressed: sym={:?}, char={:?}", keysym, utf8);
 
                         let mut bytes = Vec::new();
                         let keysym_u32: u32 = keysym.into();
@@ -139,18 +139,31 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                             active_modifiers |= forge_core::bindings::modifiers::LOGO;
                         }
 
-                        let mut normalized_keysym = keysym_u32;
-                        if (0x0041..=0x005A).contains(&normalized_keysym) {
-                            // Convert uppercase ASCII keysyms to lowercase
-                            normalized_keysym += 0x0020;
-                        }
-
+                        let normalized_keysym =
+                            forge_core::bindings::KeyStroke::normalized_keysym(keysym_u32);
                         let keystroke = forge_core::bindings::KeyStroke {
                             modifiers: active_modifiers,
                             keysym: normalized_keysym,
                         };
+                        let fallback_keystroke = if shift_active {
+                            forge_core::bindings::KeyStroke::unshifted_ascii_keysym(
+                                normalized_keysym,
+                            )
+                            .map(|keysym| {
+                                forge_core::bindings::KeyStroke {
+                                    modifiers: active_modifiers,
+                                    keysym,
+                                }
+                            })
+                        } else {
+                            None
+                        };
 
-                        if let Some(action) = state.keybindings.get(&keystroke) {
+                        let action = state.keybindings.get(&keystroke).or_else(|| {
+                            fallback_keystroke.and_then(|key| state.keybindings.get(&key))
+                        });
+
+                        if let Some(action) = action {
                             match action {
                                 forge_core::bindings::Action::Copy => {
                                     tracing::info!("Intercepted Copy via keybind");
@@ -177,6 +190,140 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                         }
                                         state.needs_flush = true;
                                     }
+                                }
+                                forge_core::bindings::Action::ZoomIn => {
+                                    state.zoom_delta += 1.0;
+                                }
+                                forge_core::bindings::Action::ZoomOut => {
+                                    state.zoom_delta -= 1.0;
+                                }
+                                forge_core::bindings::Action::ZoomReset => {
+                                    state.zoom_reset = true;
+                                }
+                                forge_core::bindings::Action::SplitVertical => {
+                                    state
+                                        .pending_splits
+                                        .push(crate::wayland::connection::PendingSplit::Vertical);
+                                }
+                                forge_core::bindings::Action::SplitHorizontal => {
+                                    state
+                                        .pending_splits
+                                        .push(crate::wayland::connection::PendingSplit::Horizontal);
+                                }
+                                forge_core::bindings::Action::TogglePaneZoom => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::TogglePaneZoom);
+                                }
+                                forge_core::bindings::Action::ToggleSidebar => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::ToggleSidebar);
+                                }
+                                forge_core::bindings::Action::ClosePane => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::ClosePane);
+                                }
+                                forge_core::bindings::Action::SpawnFloatingPane => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SpawnFloatingPane);
+                                }
+                                forge_core::bindings::Action::FocusPaneLeft => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::FocusPaneLeft);
+                                }
+                                forge_core::bindings::Action::FocusPaneRight => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::FocusPaneRight);
+                                }
+                                forge_core::bindings::Action::FocusPaneUp => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::FocusPaneUp);
+                                }
+                                forge_core::bindings::Action::FocusPaneDown => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::FocusPaneDown);
+                                }
+                                forge_core::bindings::Action::NewTab => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::NewTab);
+                                }
+                                forge_core::bindings::Action::CloseTab => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::CloseTab);
+                                }
+                                forge_core::bindings::Action::NextTab => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::NextTab);
+                                }
+                                forge_core::bindings::Action::PreviousTab => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::PreviousTab);
+                                }
+                                forge_core::bindings::Action::SwitchTab1 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SwitchTab1);
+                                }
+                                forge_core::bindings::Action::SwitchTab2 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SwitchTab2);
+                                }
+                                forge_core::bindings::Action::SwitchTab3 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SwitchTab3);
+                                }
+                                forge_core::bindings::Action::SwitchTab4 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SwitchTab4);
+                                }
+                                forge_core::bindings::Action::SwitchTab5 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SwitchTab5);
+                                }
+                                forge_core::bindings::Action::SwitchTab6 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SwitchTab6);
+                                }
+                                forge_core::bindings::Action::SwitchTab7 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SwitchTab7);
+                                }
+                                forge_core::bindings::Action::SwitchTab8 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SwitchTab8);
+                                }
+                                forge_core::bindings::Action::SwitchTab9 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::SwitchTab9);
+                                }
+                                forge_core::bindings::Action::MoveTabLeft => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MoveTabLeft);
+                                }
+                                forge_core::bindings::Action::MoveTabRight => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MoveTabRight);
                                 }
                             }
                         } else {
@@ -362,6 +509,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 }
             }
             wl_pointer::Event::Button {
+                serial,
                 button,
                 state: btn_state,
                 ..
@@ -369,7 +517,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 if let Some(tx) = &state.pointer_sender {
                     let evt = match btn_state {
                         wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed) => {
-                            PointerEvent::Press { button }
+                            PointerEvent::Press { button, serial }
                         }
                         wayland_client::WEnum::Value(wl_pointer::ButtonState::Released) => {
                             PointerEvent::Release { button }

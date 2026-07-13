@@ -5,7 +5,7 @@ Forge is a fast, hardware-accelerated terminal emulator written in Rust. It util
 ## Features
 - **GPU Accelerated Rendering**: Powered by Vulkan for ultra-low latency and smooth performance.
 - **Wayland Native**: Built from the ground up for modern Linux desktop environments.
-- **Configurable**: Fully customizable through Lua scripts. Change themes, keyboard shortcuts, window padding, and more dynamically without needing a restart.
+- **Configurable**: Fully customizable through TOML. Change themes, keyboard shortcuts, window padding, and more dynamically without needing a restart.
 - **Advanced Text Shaping**: Integrates `rustybuzz` for complex font ligatures and shaping.
 - **Smart Cursor Context**: Context-aware cursor switching between I-Beam (normal mode) and Block/Pointer (alternate buffer mode for tools like `vim` and `btop`).
 
@@ -14,7 +14,7 @@ To install the Forge terminal emulator, please use the `forge-installer` provide
 You can find the latest release [here (v1.0.0)](https://github.com/Kabir-dev09/Forge/releases/tag/v1.0.0).
 
 ## Build Requirements
-Building Forge requires `cmake` and a C compiler for `mlua` (vendored `luajit`) and `shaderc`.
+Building Forge requires the Rust toolchain and the native graphics/font dependencies needed by the renderer stack.
 
 To build the project in release mode:
 ```bash
@@ -22,7 +22,7 @@ cargo build --release
 ```
 
 ## Configuration
-Forge uses a `.lua` file for configuration. Check out `config.lua.example` or the `forge-config` crate documentation to get started with creating your own theme and keybindings.
+Forge uses `~/.config/forge/config.toml` for configuration. Check out `forge_config_example.toml` or the `forge-config` crate documentation to get started with creating your own theme and keybindings.
 
 ## License
 This project is licensed under the Apache License 2.0. See the `LICENSE` file for more details.

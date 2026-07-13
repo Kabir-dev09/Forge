@@ -53,7 +53,6 @@ impl Cell {
             CellWidth::Narrow
         }
     }
-
     #[inline(always)]
     pub fn set_bold(&mut self, val: bool) {
         if val {

@@ -1,9 +1,9 @@
-//! Forge config library - Lua VM and configuration actor.
+//! Forge config library - TOML parser and configuration actor.
 
 pub mod actor;
 pub mod extractor;
+pub mod imports;
 pub mod types;
-pub mod watcher;
 
 pub use types::ConfigUpdate;
 #[cfg(test)]

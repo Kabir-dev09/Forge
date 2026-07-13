@@ -55,9 +55,63 @@ impl<'a> Perform for TerminalPerformer<'a> {
         tracing::trace!("unhook");
     }
 
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         *self.parser_is_ground = true;
-        tracing::trace!("osc_dispatch");
+        if params.is_empty() {
+            return;
+        }
+
+        match params[0] {
+            b"0" | b"2" => {
+                if params.len() > 1 {
+                    if let Ok(title) = std::str::from_utf8(params[1]) {
+                        self.buffer.current_title = title.to_string();
+                    }
+                }
+            }
+            b"7" => {
+                if params.len() > 1 {
+                    if let Ok(uri) = std::str::from_utf8(params[1]) {
+                        if let Some(path) = uri.strip_prefix("file://") {
+                            // simple URL decoding could be added here, but typically path is enough
+                            let path = if let Some(slash_idx) = path.find('/') {
+                                &path[slash_idx..]
+                            } else {
+                                path
+                            };
+                            self.buffer.current_dir = Some(path.to_string());
+                        }
+                    }
+                }
+            }
+            b"133" => {
+                if params.len() > 1 {
+                    match params[1] {
+                        b"A" => {
+                            self.buffer.is_command_running = false;
+                        }
+                        b"C" => {
+                            self.buffer.is_command_running = true;
+                            self.buffer.current_command = params.get(2).and_then(|value| {
+                                std::str::from_utf8(value).ok().map(str::to_string)
+                            });
+                        }
+                        b"D" => {
+                            self.buffer.is_command_running = false;
+                            if params.len() > 2 {
+                                if let Ok(code_str) = std::str::from_utf8(params[2]) {
+                                    if let Ok(code) = code_str.parse::<i32>() {
+                                        self.buffer.last_exit_code = Some(code);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => tracing::trace!("osc_dispatch {:?}", params),
+        }
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
@@ -79,15 +133,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
             'J' => match get_param_or(params, 0, 0) {
                 0 => self.buffer.erase_to_end_of_screen(),
                 1 => {
-                    let r = self.buffer.cursor.row;
-                    for row in 0..r {
-                        let cols = self.buffer.cols();
-                        for col in 0..cols {
-                            self.buffer.move_cursor_to(row, col);
-                            self.buffer.write_grapheme(" ");
-                        }
-                    }
-                    self.buffer.erase_to_start_of_line();
+                    self.buffer.erase_to_start_of_screen();
                 }
                 2 => self.buffer.erase_screen(),
                 3 => self.buffer.clear_scrollback(),
@@ -144,40 +190,60 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     self.responses.extend_from_slice(response.as_bytes());
                 }
             }
+            'p' => {
+                if intermediates == [b'!'] {
+                    // DECSTR soft reset: cursor shape returns to the terminal profile default.
+                    self.buffer.clear_cursor_style_override();
+                } else {
+                    tracing::trace!(
+                        "Unhandled CSI private 'p' with intermediates: {:?}",
+                        intermediates
+                    );
+                }
+            }
             'h' | 'l' => handle_mode(params, intermediates, action, self.buffer),
             'q' => {
                 if intermediates.first() == Some(&b' ') {
                     let p0 = get_param_or(params, 0, 0);
                     match p0 {
-                        0 | 1 => {
-                            self.buffer.cursor_style_override =
-                                Some(forge_core::config_registry::CursorStyle::Block);
-                            self.buffer.cursor_blink_override = Some(true);
+                        0 => {
+                            self.buffer.clear_cursor_style_override();
+                        }
+                        1 => {
+                            self.buffer.set_cursor_style_override(
+                                forge_core::config_registry::CursorStyle::Block,
+                                Some(true),
+                            );
                         }
                         2 => {
-                            self.buffer.cursor_style_override =
-                                Some(forge_core::config_registry::CursorStyle::Block);
-                            self.buffer.cursor_blink_override = Some(false);
+                            self.buffer.set_cursor_style_override(
+                                forge_core::config_registry::CursorStyle::Block,
+                                Some(false),
+                            );
                         }
                         3 => {
-                            self.buffer.cursor_style_override =
-                                Some(forge_core::config_registry::CursorStyle::Underline);
-                            self.buffer.cursor_blink_override = Some(true);
+                            self.buffer.set_cursor_style_override(
+                                forge_core::config_registry::CursorStyle::Underline,
+                                Some(true),
+                            );
                         }
                         4 => {
-                            self.buffer.cursor_style_override =
-                                Some(forge_core::config_registry::CursorStyle::Underline);
-                            self.buffer.cursor_blink_override = Some(false);
+                            self.buffer.set_cursor_style_override(
+                                forge_core::config_registry::CursorStyle::Underline,
+                                Some(false),
+                            );
                         }
                         5 => {
-                            self.buffer.cursor_style_override =
-                                Some(forge_core::config_registry::CursorStyle::Beam);
-                            self.buffer.cursor_blink_override = Some(true);
+                            self.buffer.set_cursor_style_override(
+                                forge_core::config_registry::CursorStyle::Beam,
+                                Some(true),
+                            );
                         }
                         6 => {
-                            self.buffer.cursor_style_override =
-                                Some(forge_core::config_registry::CursorStyle::Beam);
-                            self.buffer.cursor_blink_override = Some(false);
+                            self.buffer.set_cursor_style_override(
+                                forge_core::config_registry::CursorStyle::Beam,
+                                Some(false),
+                            );
                         }
                         _ => {}
                     }
@@ -200,10 +266,13 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     self.buffer.cursor = c;
                 }
             }
+            (_, b'c') => {
+                // RIS reset: clear temporary app cursor shape so rendering falls back to config.
+                self.buffer.clear_cursor_style_override();
+            }
             (_, b'M') => {
                 // reverse index (scroll down)
-                // for now just log
-                tracing::trace!("Reverse index");
+                self.buffer.reverse_index();
             }
             _ => tracing::trace!(
                 "Unhandled ESC: intermediates={:?} byte=0x{:02X}",
@@ -455,6 +524,7 @@ impl VteProcessor {
         let mut responses = Vec::new();
 
         while offset < data.len() {
+            // Batch printable ASCII characters.
             let printable_start = offset;
             while offset < data.len() && is_printable_ascii(data[offset]) {
                 offset += 1;
@@ -470,12 +540,26 @@ impl VteProcessor {
 
             match data[offset] {
                 b'\n' => {
-                    buffer.line_feed();
-                    offset += 1;
+                    // Batch consecutive newlines into a single scroll call.
+                    // This is the critical hot path for `cat large_file` and `yes | head`.
+                    let nl_start = offset;
+                    while offset < data.len() && data[offset] == b'\n' {
+                        offset += 1;
+                    }
+                    let count = offset - nl_start;
+                    buffer.line_feeds_n(count);
                 }
                 b'\r' => {
                     buffer.carriage_return();
                     offset += 1;
+                    // Handle \r\n pair: batch the \n immediately after \r.
+                    if offset < data.len() && data[offset] == b'\n' {
+                        let nl_start = offset;
+                        while offset < data.len() && data[offset] == b'\n' {
+                            offset += 1;
+                        }
+                        buffer.line_feeds_n(offset - nl_start);
+                    }
                 }
                 b'\t' => {
                     let next_tab = ((buffer.cursor.col / 8) + 1) * 8;
@@ -780,5 +864,65 @@ mod tests {
                 a: 255
             }
         );
+    }
+
+    #[test]
+    fn decscusr_default_clears_cursor_style_override() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(10, 10);
+
+        processor.process(b"\x1b[2 q", &mut buf);
+        assert_eq!(
+            buf.cursor_style_override,
+            Some(forge_core::config_registry::CursorStyle::Block)
+        );
+        assert_eq!(buf.cursor_blink_override, Some(false));
+        assert_eq!(buf.generate_snapshot().cursor_blink_override, Some(false));
+
+        processor.process(b"\x1b[0 q", &mut buf);
+        assert_eq!(buf.cursor_style_override, None);
+        assert_eq!(buf.cursor_blink_override, None);
+    }
+
+    #[test]
+    fn alternate_screen_exit_clears_temporary_cursor_style_override() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(10, 10);
+
+        processor.process(b"\x1b[?1049h", &mut buf);
+        processor.process(b"\x1b[2 q", &mut buf);
+        assert_eq!(
+            buf.cursor_style_override,
+            Some(forge_core::config_registry::CursorStyle::Block)
+        );
+
+        processor.process(b"\x1b[?1049l", &mut buf);
+        assert_eq!(buf.cursor_style_override, None);
+        assert_eq!(buf.cursor_blink_override, None);
+    }
+
+    #[test]
+    fn terminal_resets_clear_cursor_style_override() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(10, 10);
+
+        processor.process(b"\x1b[6 q", &mut buf);
+        assert_eq!(
+            buf.cursor_style_override,
+            Some(forge_core::config_registry::CursorStyle::Beam)
+        );
+
+        processor.process(b"\x1b[!p", &mut buf);
+        assert_eq!(buf.cursor_style_override, None);
+
+        processor.process(b"\x1b[4 q", &mut buf);
+        assert_eq!(
+            buf.cursor_style_override,
+            Some(forge_core::config_registry::CursorStyle::Underline)
+        );
+
+        processor.process(b"\x1bc", &mut buf);
+        assert_eq!(buf.cursor_style_override, None);
+        assert_eq!(buf.cursor_blink_override, None);
     }
 }

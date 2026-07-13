@@ -10,7 +10,10 @@ pub struct ConfigChangeSet {
     pub shell: bool,
     pub theme: bool,
     pub behavior: bool,
+    pub panes: bool,
     pub render: bool,
+    pub confirm_close: bool,
+    pub statusbar: bool,
     pub keybindings: bool,
 }
 
@@ -25,7 +28,10 @@ impl ConfigChangeSet {
             shell: true,
             theme: true,
             behavior: true,
+            panes: true,
             render: true,
+            confirm_close: true,
+            statusbar: true,
             keybindings: true,
         }
     }
@@ -40,7 +46,10 @@ impl ConfigChangeSet {
             shell: old.shell != new.shell,
             theme: old.theme != new.theme,
             behavior: old.behavior != new.behavior,
+            panes: old.panes != new.panes,
             render: old.render != new.render,
+            confirm_close: old.confirm_close != new.confirm_close,
+            statusbar: old.statusbar != new.statusbar,
             keybindings: old.keybindings != new.keybindings,
         }
     }
@@ -54,7 +63,10 @@ impl ConfigChangeSet {
             || self.shell
             || self.theme
             || self.behavior
+            || self.panes
             || self.render
+            || self.confirm_close
+            || self.statusbar
             || self.keybindings
     }
 }
@@ -79,5 +91,36 @@ mod tests {
         assert!(changes.blur);
         assert!(changes.any());
         assert!(!changes.window);
+    }
+
+    #[test]
+    fn detects_statusbar_and_confirm_close_changes() {
+        let old = ForgeConfig::default();
+
+        let mut status_new = old.clone();
+        status_new.statusbar.enabled = !status_new.statusbar.enabled;
+        let status_changes = ConfigChangeSet::between(&old, &status_new);
+        assert!(status_changes.statusbar);
+        assert!(status_changes.any());
+
+        let mut confirm_new = old.clone();
+        confirm_new.confirm_close.panel_color.r =
+            confirm_new.confirm_close.panel_color.r.wrapping_add(1);
+        let confirm_changes = ConfigChangeSet::between(&old, &confirm_new);
+        assert!(confirm_changes.confirm_close);
+        assert!(confirm_changes.any());
+    }
+
+    #[test]
+    fn detects_pane_config_changes() {
+        let old = ForgeConfig::default();
+        let mut new = old.clone();
+        new.panes.mode = forge_core::config_registry::PaneManagerMode::Scrolling;
+
+        let changes = ConfigChangeSet::between(&old, &new);
+
+        assert!(changes.panes);
+        assert!(changes.any());
+        assert!(!changes.render);
     }
 }

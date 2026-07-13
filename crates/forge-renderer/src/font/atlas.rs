@@ -12,6 +12,13 @@ pub struct GlyphKey {
     pub is_bold: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShapedGlyphKey {
+    pub glyph_id: u16,
+    pub is_bold: bool,
+    pub font_hash: u64,
+}
+
 pub struct DynamicGlyphUpdate {
     pub x: u32,
     pub y: u32,
@@ -21,6 +28,13 @@ pub struct DynamicGlyphUpdate {
 }
 
 pub enum DynamicGlyphInsertResult {
+    AlreadyPresent,
+    AtlasFull,
+    Missing,
+    Inserted(Option<DynamicGlyphUpdate>),
+}
+
+pub enum ShapedGlyphInsertResult {
     AlreadyPresent,
     AtlasFull,
     Missing,
@@ -78,6 +92,7 @@ pub struct GlyphAtlas {
     pub atlas_height: u32,
     pub glyphs: HashMap<char, GlyphMetrics>,
     pub glyphs_bold: HashMap<char, GlyphMetrics>,
+    pub shaped_glyphs: HashMap<ShapedGlyphKey, GlyphMetrics>,
     pub descriptor: GlyphAtlasDescriptor,
     pub(crate) atlas_cell_width: u32,
     pub(crate) atlas_cell_height: u32,
@@ -85,7 +100,41 @@ pub struct GlyphAtlas {
     pub(crate) total_slots: u32,
 }
 
-fn font_hash(bytes: &[u8]) -> u64 {
+impl GlyphAtlas {
+    pub fn dummy_for_bench() -> Self {
+        let mut glyphs = HashMap::new();
+        for c in 0x20_u8..=0x7e {
+            glyphs.insert(
+                c as char,
+                GlyphMetrics {
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    width: 8,
+                    height: 16,
+                    bearing_y: 14,
+                    bearing_x: 0,
+                },
+            );
+        }
+        Self {
+            pixels: vec![255; 4],
+            atlas_width: 1,
+            atlas_height: 1,
+            glyphs,
+            glyphs_bold: HashMap::new(),
+            shaped_glyphs: HashMap::new(),
+            descriptor: GlyphAtlasDescriptor::dummy(),
+            atlas_cell_width: 8,
+            atlas_cell_height: 16,
+            next_dynamic_slot: 0,
+            total_slots: 100,
+        }
+    }
+}
+
+pub(crate) fn font_hash(bytes: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
     hasher.finish()
@@ -213,7 +262,7 @@ impl GlyphAtlas {
             rasterize_set(b_rast, &mut glyphs_bold);
         }
 
-        tracing::info!(
+        tracing::debug!(
             "[PROFILER] GlyphAtlas::build took: {:?} (glyphs={}, bold_glyphs={}, fast_mode={})",
             build_start.elapsed(),
             glyphs.len(),
@@ -227,12 +276,91 @@ impl GlyphAtlas {
             atlas_height,
             glyphs,
             glyphs_bold,
+            shaped_glyphs: HashMap::new(),
             descriptor,
             atlas_cell_width: atlas_cell_w,
             atlas_cell_height: atlas_cell_h,
             next_dynamic_slot: static_glyphs,
             total_slots,
         })
+    }
+
+    pub fn insert_shaped_glyph(
+        &mut self,
+        key: ShapedGlyphKey,
+        rasterizer: &FontRasterizer,
+        bold_rasterizer: Option<&FontRasterizer>,
+        px_size: f32,
+    ) -> ShapedGlyphInsertResult {
+        if self.shaped_glyphs.contains_key(&key) {
+            return ShapedGlyphInsertResult::AlreadyPresent;
+        }
+
+        if self.next_dynamic_slot >= self.total_slots {
+            return ShapedGlyphInsertResult::AtlasFull;
+        }
+
+        let regular_hash = font_hash(&rasterizer.bytes);
+        let bold_hash = bold_rasterizer.map(|rasterizer| font_hash(&rasterizer.bytes));
+        let active_rasterizer = if key.is_bold && bold_hash == Some(key.font_hash) {
+            bold_rasterizer.unwrap_or(rasterizer)
+        } else if !key.is_bold && regular_hash == key.font_hash {
+            rasterizer
+        } else {
+            return ShapedGlyphInsertResult::Missing;
+        };
+
+        let slot = self.next_dynamic_slot;
+        self.next_dynamic_slot += 1;
+
+        let col = slot % ATLAS_COLUMNS;
+        let row = slot / ATLAS_COLUMNS;
+        let cell_x = col * self.atlas_cell_width;
+        let cell_y = row * self.atlas_cell_height;
+        let (metrics, bitmap) = active_rasterizer.rasterize_glyph_id(key.glyph_id, px_size);
+        let blit_w = (metrics.width as u32).min(self.atlas_cell_width);
+        let blit_h = (metrics.height as u32).min(self.atlas_cell_height);
+
+        let glyph_metrics = GlyphMetrics {
+            u0: cell_x as f32 / self.atlas_width as f32,
+            v0: cell_y as f32 / self.atlas_height as f32,
+            u1: (cell_x + blit_w) as f32 / self.atlas_width as f32,
+            v1: (cell_y + blit_h) as f32 / self.atlas_height as f32,
+            width: blit_w,
+            height: blit_h,
+            bearing_y: metrics.ymin + metrics.height as i32,
+            bearing_x: metrics.xmin,
+        };
+        self.shaped_glyphs.insert(key, glyph_metrics);
+
+        if blit_w == 0 || blit_h == 0 {
+            return ShapedGlyphInsertResult::Inserted(None);
+        }
+
+        let mut pixels = vec![0u8; (blit_w * blit_h * 4) as usize];
+        for py in 0..blit_h {
+            for px in 0..blit_w {
+                let src_idx = (py * metrics.width as u32 + px) as usize;
+                let dst_idx = ((py * blit_w + px) * 4) as usize;
+                let coverage = bitmap.get(src_idx).copied().unwrap_or(0);
+                pixels[dst_idx] = coverage;
+                pixels[dst_idx + 1] = coverage;
+                pixels[dst_idx + 2] = coverage;
+                pixels[dst_idx + 3] = coverage;
+            }
+        }
+
+        ShapedGlyphInsertResult::Inserted(Some(DynamicGlyphUpdate {
+            x: cell_x,
+            y: cell_y,
+            width: blit_w,
+            height: blit_h,
+            pixels,
+        }))
+    }
+
+    pub fn get_shaped(&self, key: ShapedGlyphKey) -> Option<&GlyphMetrics> {
+        self.shaped_glyphs.get(&key)
     }
 
     pub fn insert_dynamic_glyph(
@@ -404,6 +532,27 @@ mod tests {
             update.pixels.len(),
             (update.width * update.height * 4) as usize
         );
+    }
+
+    #[test]
+    fn shaped_glyph_insert_uses_glyph_id_key() {
+        let rasterizer = test_rasterizer();
+        let mut atlas = GlyphAtlas::build(&rasterizer, None, 16.0, true).unwrap();
+        let key = ShapedGlyphKey {
+            glyph_id: rasterizer.font.lookup_glyph_index('A'),
+            is_bold: false,
+            font_hash: font_hash(&rasterizer.bytes),
+        };
+
+        assert!(atlas.get_shaped(key).is_none());
+        let update = match atlas.insert_shaped_glyph(key, &rasterizer, None, 16.0) {
+            ShapedGlyphInsertResult::Inserted(Some(update)) => update,
+            _ => panic!("visible shaped glyph should produce an atlas update"),
+        };
+
+        assert!(atlas.get_shaped(key).is_some());
+        assert!(update.width > 0);
+        assert!(update.height > 0);
     }
 
     #[test]

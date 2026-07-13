@@ -19,9 +19,8 @@ bytemuck = { version = "1.16", features = ["derive"] }
 smallvec = "1.11"
 ash = "0.38"
 raw-window-handle = "0.6"
-nix = { version = "0.28", features = ["process", "term", "signal", "fs"] }
-mlua = { version = "0.9", features = ["luajit", "vendored", "send"] }
-notify = "6.1"
+nix = { version = "0.28", features = ["process", "term", "signal", "fs", "poll"] }
+toml = "0.8"
 memmap2 = "0.9"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.31", features = ["client", "staging", "unstable"] }

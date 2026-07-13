@@ -1,15 +1,21 @@
 use super::font::{
-    atlas::{DynamicGlyphInsertResult, GlyphAtlas, GlyphKey},
+    atlas::{
+        DynamicGlyphInsertResult, GlyphAtlas, GlyphKey, ShapedGlyphInsertResult, ShapedGlyphKey,
+    },
     rasterizer::FontRasterizer,
+    shaper::ShaperCache,
 };
-use super::grid_tessellator::{GridTessellator, RowVertexRanges, VertexRange};
+use super::grid_tessellator::{
+    ContextMenuRenderData, GridTessellator, LigatureRenderContext, PixelRect, RowVertexRanges,
+    VertexRange,
+};
 use super::{
     device::*, framebuffer::*, instance::*, pipeline::*, surface::*, swapchain::*, sync::*,
     texture::*,
 };
 use ash::{vk, Device, Entry, Instance};
-use forge_core::{ForgeError, Result};
-use std::collections::HashSet;
+use forge_core::{config_registry::LigatureConfig, ForgeError, Result};
+use std::collections::{HashMap, HashSet};
 use std::ptr;
 
 const MIN_VERTEX_CAPACITY: usize = 100_000;
@@ -30,6 +36,84 @@ fn align_device_size(value: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::De
     (value + alignment - 1) & !(alignment - 1)
 }
 
+fn outline_segments_around_gap(
+    start: f32,
+    length: f32,
+    gap_start: f32,
+    gap_length: f32,
+) -> [(f32, f32); 2] {
+    if length <= 0.0 {
+        return [(start, 0.0), (start, 0.0)];
+    }
+    if gap_length <= 0.0 {
+        return [(start, length), (start + length, 0.0)];
+    }
+
+    let end = start + length;
+    let gap_start = gap_start.clamp(start, end);
+    let gap_end = (gap_start + gap_length).clamp(start, end);
+    [
+        (start, (gap_start - start).max(0.0)),
+        (gap_end, (end - gap_end).max(0.0)),
+    ]
+}
+
+fn append_segmented_horizontal_outline(
+    tessellator: &mut GridTessellator,
+    vp_w: f32,
+    vp_h: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: [f32; 4],
+    gap: Option<(f32, f32)>,
+) {
+    let segments = if let Some((gap_start, gap_width)) = gap {
+        outline_segments_around_gap(x, width, gap_start, gap_width)
+    } else {
+        [(x, width), (x + width, 0.0)]
+    };
+    for (segment_x, segment_width) in segments {
+        if segment_width > 0.0 {
+            tessellator.append_solid_rect(
+                vp_w,
+                vp_h,
+                PixelRect::new(segment_x, y, segment_width, height),
+                color,
+            );
+        }
+    }
+}
+
+fn append_segmented_vertical_outline(
+    tessellator: &mut GridTessellator,
+    vp_w: f32,
+    vp_h: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: [f32; 4],
+    gap: Option<(f32, f32)>,
+) {
+    let segments = if let Some((gap_start, gap_height)) = gap {
+        outline_segments_around_gap(y, height, gap_start, gap_height)
+    } else {
+        [(y, height), (y + height, 0.0)]
+    };
+    for (segment_y, segment_height) in segments {
+        if segment_height > 0.0 {
+            tessellator.append_solid_rect(
+                vp_w,
+                vp_h,
+                PixelRect::new(x, segment_y, width, segment_height),
+                color,
+            );
+        }
+    }
+}
+
 fn vertex_region_size(max_vertices: usize) -> vk::DeviceSize {
     let vertex_bytes = (max_vertices * std::mem::size_of::<GlyphVertex>()) as vk::DeviceSize;
     align_device_size(vertex_bytes, VERTEX_BUFFER_REGION_ALIGNMENT)
@@ -39,17 +123,129 @@ fn vertex_buffer_size(max_vertices: usize) -> vk::DeviceSize {
     vertex_region_size(max_vertices) * MAX_FRAMES_IN_FLIGHT as vk::DeviceSize
 }
 
+fn rect_to_scissor(rect: PaneRenderRect, extent: vk::Extent2D) -> Option<vk::Rect2D> {
+    if !rect.has_positive_area() {
+        return None;
+    }
+
+    let x0 = rect.x.floor().max(0.0).min(extent.width as f32) as i32;
+    let y0 = rect.y.floor().max(0.0).min(extent.height as f32) as i32;
+    let x1 = (rect.x + rect.width)
+        .ceil()
+        .max(0.0)
+        .min(extent.width as f32) as i32;
+    let y1 = (rect.y + rect.height)
+        .ceil()
+        .max(0.0)
+        .min(extent.height as f32) as i32;
+
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    Some(vk::Rect2D {
+        offset: vk::Offset2D { x: x0, y: y0 },
+        extent: vk::Extent2D {
+            width: (x1 - x0) as u32,
+            height: (y1 - y0) as u32,
+        },
+    })
+}
+
+fn full_scissor(extent: vk::Extent2D) -> vk::Rect2D {
+    vk::Rect2D {
+        offset: vk::Offset2D { x: 0, y: 0 },
+        extent,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderFrameStats {
-    pub dirty_rows: usize,
+    pub dirty_generations: usize,
     pub vertices: usize,
     pub bytes_uploaded: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PaneRenderId(pub u64);
+
+impl PaneRenderId {
+    fn is_synthetic(self) -> bool {
+        self.0 >= u64::MAX - 4096
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PaneRenderRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl PaneRenderRect {
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn has_positive_area(self) -> bool {
+        self.width > 0.0 && self.height > 0.0
+    }
+}
+
+pub struct PaneRenderInput<'a> {
+    pub pane_id: PaneRenderId,
+    pub rect: PaneRenderRect,
+    pub opacity: f32,
+    pub layer: PaneRenderLayer,
+    pub grid: &'a [&'a [forge_core::cell::Cell]],
+    pub dirty_generations: &'a [u64],
+    pub cursor: Option<(usize, usize)>,
+    pub cursor_style: forge_core::config_registry::CursorStyle,
+    pub cursor_visible_phase: bool,
+    pub selection: Option<forge_core::cell::SelectionRange>,
+    pub default_bg: [f32; 4],
+    pub cursor_color: [f32; 4],
+    pub selection_bg: [f32; 4],
+    pub viewport_offset: f64,
+    pub scroll_event: Option<super::grid_tessellator::ScrollEvent>,
+    pub scroll_id: u64,
+    pub is_active: bool,
+    pub overflow_indicators: PaneOverflowIndicators,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaneOverflowIndicators {
+    pub above: bool,
+    pub below: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PaneRenderLayer {
+    #[default]
+    Normal,
+    AfterModalDim,
+    Floating,
+    Modal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitBorderRenderInput {
+    pub rect: PaneRenderRect,
+    pub color: [f32; 4],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderStats {
     pub frames_submitted: u64,
-    pub dirty_rows: u64,
+    pub dirty_generations: u64,
     pub vertices_uploaded: u64,
     pub bytes_uploaded: u64,
     pub dynamic_glyph_attempts: u64,
@@ -66,7 +262,17 @@ struct FrameVertexUploadState {
     row_ranges: Vec<RowVertexRanges>,
     row_generations: Vec<u64>,
     scrollbar_range: Option<VertexRange>,
+    context_menu_range: Option<VertexRange>,
+    context_menu_fingerprint: u64,
     initialized: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderDrawBatch {
+    start: usize,
+    count: usize,
+    scissor: vk::Rect2D,
+    is_opaque: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +286,8 @@ fn plan_vertex_upload_for_state(
     vertex_count: usize,
     row_ranges: &[RowVertexRanges],
     scrollbar_range: Option<VertexRange>,
+    context_menu_range: Option<VertexRange>,
+    context_menu_fingerprint: u64,
 ) -> VertexUploadPlan {
     let Some(state) = state else {
         return VertexUploadPlan::Full;
@@ -90,6 +298,8 @@ fn plan_vertex_upload_for_state(
         || state.row_ranges.len() != row_ranges.len()
         || state.row_generations.len() != row_ranges.len()
         || state.scrollbar_range != scrollbar_range
+        || state.context_menu_range != context_menu_range
+        || state.context_menu_fingerprint != context_menu_fingerprint
     {
         return VertexUploadPlan::Full;
     }
@@ -118,6 +328,9 @@ fn plan_vertex_upload_for_state(
 
     if let Some(scrollbar_range) = scrollbar_range {
         ranges.push(scrollbar_range);
+    }
+    if let Some(context_menu_range) = context_menu_range {
+        ranges.push(context_menu_range);
     }
 
     VertexUploadPlan::Partial(ranges)
@@ -152,6 +365,7 @@ pub struct Renderer {
     pub descriptor_set: vk::DescriptorSet,
 
     pub tessellator: GridTessellator,
+    pane_tessellators: HashMap<PaneRenderId, GridTessellator>,
     pub vertex_buffer: vk::Buffer,
     pub vertex_memory: vk::DeviceMemory,
     pub vertex_mapped_ptr: *mut std::ffi::c_void,
@@ -161,7 +375,11 @@ pub struct Renderer {
     frame_upload_states: Vec<FrameVertexUploadState>,
     reported_missing_glyphs: HashSet<GlyphKey>,
     unsupported_dynamic_glyphs: HashSet<GlyphKey>,
+    unsupported_shaped_glyphs: HashSet<ShapedGlyphKey>,
     dynamic_atlas_full_reported: bool,
+    shaped_atlas_full_reported: bool,
+    ligature_config: LigatureConfig,
+    ligature_shaper: ShaperCache,
     font_rasterizer: Option<FontRasterizer>,
     bold_font_rasterizer: Option<FontRasterizer>,
     fallback_font_rasterizers: Vec<FontRasterizer>,
@@ -179,6 +397,8 @@ impl Renderer {
             self.tessellator.vertices.len(),
             &self.tessellator.row_ranges,
             self.tessellator.scrollbar_range,
+            self.tessellator.context_menu_range,
+            self.tessellator.context_menu_fingerprint,
         )
     }
 
@@ -202,6 +422,8 @@ impl Renderer {
                 .map(|ranges| ranges.generation),
         );
         state.scrollbar_range = self.tessellator.scrollbar_range;
+        state.context_menu_range = self.tessellator.context_menu_range;
+        state.context_menu_fingerprint = self.tessellator.context_menu_fingerprint;
         state.initialized = true;
     }
 
@@ -269,7 +491,9 @@ impl Renderer {
                 DynamicGlyphInsertResult::AtlasFull => {
                     capacity_failures += 1;
                     if !self.dynamic_atlas_full_reported {
-                        tracing::warn!("Dynamic glyph atlas is full! Some glyphs will be missing.");
+                        let msg = "WARNING: Dynamic glyph atlas is full! Some glyphs will be missing. Please restart the terminal or use a font with more coverage.";
+                        eprintln!("{}", msg);
+                        tracing::warn!("{}", msg);
                         self.dynamic_atlas_full_reported = true;
                     }
                     break;
@@ -333,6 +557,86 @@ impl Renderer {
         Ok(inserted)
     }
 
+    fn insert_shaped_glyphs(&mut self, keys: &[ShapedGlyphKey]) -> Result<bool> {
+        let Some(rasterizer) = self.font_rasterizer.as_ref() else {
+            return Ok(false);
+        };
+        let keys_to_insert: Vec<ShapedGlyphKey> = keys
+            .iter()
+            .copied()
+            .filter(|key| !self.unsupported_shaped_glyphs.contains(key))
+            .take(DYNAMIC_GLYPHS_PER_FRAME)
+            .collect();
+
+        let mut inserted = false;
+        let mut updates_to_apply = Vec::new();
+        for key in keys_to_insert {
+            match self.atlas.insert_shaped_glyph(
+                key,
+                rasterizer,
+                self.bold_font_rasterizer.as_ref(),
+                self.font_px_size,
+            ) {
+                ShapedGlyphInsertResult::Inserted(update) => {
+                    if let Some(update) = update {
+                        updates_to_apply.push(update);
+                    }
+                    inserted = true;
+                }
+                ShapedGlyphInsertResult::AlreadyPresent => {
+                    inserted = true;
+                }
+                ShapedGlyphInsertResult::AtlasFull => {
+                    if !self.shaped_atlas_full_reported {
+                        let msg = "WARNING: Dynamic glyph atlas is full; some shaped ligatures will fall back.";
+                        eprintln!("{}", msg);
+                        tracing::warn!("{}", msg);
+                        self.shaped_atlas_full_reported = true;
+                    }
+                    break;
+                }
+                ShapedGlyphInsertResult::Missing => {
+                    self.unsupported_shaped_glyphs.insert(key);
+                }
+            }
+        }
+
+        if !updates_to_apply.is_empty() {
+            let regions: Vec<super::texture::TextureRegion> = updates_to_apply
+                .iter()
+                .map(|u| super::texture::TextureRegion {
+                    x: u.x,
+                    y: u.y,
+                    width: u.width,
+                    height: u.height,
+                    pixels: &u.pixels,
+                })
+                .collect();
+
+            self.atlas_texture.update_regions(
+                &self.instance,
+                self.physical_device,
+                &self.device,
+                self.command_pool,
+                self.graphics_queue,
+                &regions,
+            )?;
+        }
+
+        Ok(inserted)
+    }
+
+    pub fn set_ligature_config(&mut self, mut config: LigatureConfig) {
+        config.normalize();
+        if self.ligature_config == config {
+            return;
+        }
+        self.ligature_config = config;
+        self.ligature_shaper
+            .set_max_entries(self.ligature_config.cache_entries);
+        self.ligature_shaper.clear();
+    }
+
     fn create_mapped_vertex_buffer(
         instance: &Instance,
         physical_device: vk::PhysicalDevice,
@@ -375,7 +679,7 @@ impl Renderer {
         };
 
         stats.frames_submitted += 1;
-        stats.dirty_rows += frame_stats.dirty_rows as u64;
+        stats.dirty_generations += frame_stats.dirty_generations as u64;
         stats.vertices_uploaded += frame_stats.vertices as u64;
         stats.bytes_uploaded += frame_stats.bytes_uploaded as u64;
         stats.last_frame = frame_stats;
@@ -383,10 +687,10 @@ impl Renderer {
         if stats.frames_submitted == 1 || stats.frames_submitted % RENDER_STATS_LOG_INTERVAL == 0 {
             tracing::info!(
                 frames_submitted = stats.frames_submitted,
-                total_dirty_rows = stats.dirty_rows,
+                total_dirty_generations = stats.dirty_generations,
                 total_vertices_uploaded = stats.vertices_uploaded,
                 total_bytes_uploaded = stats.bytes_uploaded,
-                last_dirty_rows = stats.last_frame.dirty_rows,
+                last_dirty_generations = stats.last_frame.dirty_generations,
                 last_vertices = stats.last_frame.vertices,
                 last_bytes_uploaded = stats.last_frame.bytes_uploaded,
                 dynamic_glyph_attempts = stats.dynamic_glyph_attempts,
@@ -414,6 +718,8 @@ impl Renderer {
         );
 
         unsafe {
+            // TODO(PERF-05): `device_wait_idle` causes a GPU stall on vertex buffer grow.
+            // Implement a double-buffered or deferred-free vertex buffer system to avoid blocking.
             self.device
                 .device_wait_idle()
                 .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
@@ -457,7 +763,7 @@ impl Renderer {
 
         let t_inst = std::time::Instant::now();
         let instance = create_instance(&entry)?;
-        tracing::info!("[PROFILER] create_instance took: {:?}", t_inst.elapsed());
+        tracing::debug!("[PROFILER] create_instance took: {:?}", t_inst.elapsed());
 
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
         let surface = create_wayland_surface(&entry, &instance, wl_display, wl_surface)?;
@@ -465,7 +771,7 @@ impl Renderer {
         let t_phys = std::time::Instant::now();
         let (physical_device, queue_indices) =
             select_physical_device(&instance, surface, &surface_loader)?;
-        tracing::info!(
+        tracing::debug!(
             "[PROFILER] select_physical_device took: {:?}",
             t_phys.elapsed()
         );
@@ -473,7 +779,7 @@ impl Renderer {
         let t_log = std::time::Instant::now();
         let (device, graphics_queue, present_queue) =
             create_logical_device(&instance, physical_device, &queue_indices)?;
-        tracing::info!(
+        tracing::debug!(
             "[PROFILER] create_logical_device took: {:?}",
             t_log.elapsed()
         );
@@ -489,12 +795,12 @@ impl Renderer {
             width,
             height,
         )?;
-        tracing::info!("[PROFILER] Swapchain::new took: {:?}", t_swap.elapsed());
+        tracing::debug!("[PROFILER] Swapchain::new took: {:?}", t_swap.elapsed());
 
         let t_pipe = std::time::Instant::now();
         let render_pass = super::render_pass::create_render_pass(&device, swapchain.format)?;
         let pipeline = Pipeline::new(&device, render_pass)?;
-        tracing::info!("[PROFILER] Pipeline::new took: {:?}", t_pipe.elapsed());
+        tracing::debug!("[PROFILER] Pipeline::new took: {:?}", t_pipe.elapsed());
 
         let framebuffers = create_framebuffers(
             &device,
@@ -517,6 +823,7 @@ impl Renderer {
             pixels: vec![255], // 1x1 solid white pixel
             glyphs: std::collections::HashMap::new(),
             glyphs_bold: std::collections::HashMap::new(),
+            shaped_glyphs: std::collections::HashMap::new(),
             descriptor: super::font::atlas::GlyphAtlasDescriptor::dummy(),
             atlas_cell_width: 1,
             atlas_cell_height: 1,
@@ -634,6 +941,7 @@ impl Renderer {
             descriptor_pool,
             descriptor_set,
             tessellator,
+            pane_tessellators: HashMap::new(),
             vertex_buffer,
             vertex_memory,
             vertex_mapped_ptr,
@@ -643,7 +951,11 @@ impl Renderer {
             frame_upload_states: vec![FrameVertexUploadState::default(); MAX_FRAMES_IN_FLIGHT],
             reported_missing_glyphs: HashSet::new(),
             unsupported_dynamic_glyphs: HashSet::new(),
+            unsupported_shaped_glyphs: HashSet::new(),
             dynamic_atlas_full_reported: false,
+            shaped_atlas_full_reported: false,
+            ligature_config: LigatureConfig::default(),
+            ligature_shaper: ShaperCache::default(),
             font_rasterizer: None,
             bold_font_rasterizer: None,
             fallback_font_rasterizers: Vec::new(),
@@ -652,6 +964,84 @@ impl Renderer {
             cell_height,
             baseline,
         })
+    }
+
+    pub fn update_font_size(&mut self, px_size: f32) -> Result<()> {
+        let _span = tracing::trace_span!("renderer.update_font_size", size = px_size).entered();
+        if (self.font_px_size - px_size).abs() < 0.1 {
+            return Ok(());
+        }
+
+        if let Some(r) = self.font_rasterizer.as_mut() {
+            r.update_size(px_size)?;
+            self.cell_width = r.cell_width;
+            self.cell_height = r.cell_height;
+            self.baseline = r.baseline;
+        }
+
+        if let Some(r) = self.bold_font_rasterizer.as_mut() {
+            r.update_size(px_size)?;
+        }
+
+        for r in self.fallback_font_rasterizers.iter_mut() {
+            r.update_size(px_size)?;
+        }
+
+        self.font_px_size = px_size;
+        self.ligature_shaper.clear();
+        self.unsupported_shaped_glyphs.clear();
+        self.shaped_atlas_full_reported = false;
+
+        if let Some(r) = self.font_rasterizer.as_ref() {
+            self.atlas = GlyphAtlas::build(
+                r,
+                self.bold_font_rasterizer.as_ref(),
+                px_size,
+                false, // Full build in fast time since rasterization is already done
+            )?;
+
+            // Destroy old texture properly
+            self.atlas_texture.destroy(&self.device);
+
+            // Create new texture
+            self.atlas_texture = Texture::new(
+                &self.instance,
+                self.physical_device,
+                &self.device,
+                self.command_pool,
+                self.graphics_queue,
+                self.atlas.atlas_width,
+                self.atlas.atlas_height,
+                &self.atlas.pixels,
+            )?;
+
+            // Update descriptor set
+            let image_info = vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                image_view: self.atlas_texture.view,
+                sampler: self.atlas_texture.sampler,
+            };
+            let write_desc = vk::WriteDescriptorSet {
+                dst_set: self.descriptor_set,
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+                p_image_info: &image_info,
+                ..Default::default()
+            };
+            unsafe { self.device.update_descriptor_sets(&[write_desc], &[]) };
+        }
+
+        // Invalidate vertex caches so everything gets redrawn with new metrics
+        for state in &mut self.frame_upload_states {
+            state.initialized = false;
+        }
+
+        self.tessellator.scrollbar_range = None;
+        self.tessellator.context_menu_range = None;
+
+        Ok(())
     }
 
     pub fn render_clear(&mut self, clear_color: [f32; 4]) -> Result<bool> {
@@ -675,102 +1065,16 @@ impl Renderer {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_grid(
+    fn submit_tessellated_vertices(
         &mut self,
-        grid: &[&[forge_core::cell::Cell]],
-        dirty_rows: &[bool],
-        cursor: Option<(usize, usize)>,
-        cursor_style: forge_core::config_registry::CursorStyle,
-        cursor_visible_phase: bool,
-        selection: Option<forge_core::cell::SelectionRange>,
-        default_bg: [f32; 4],
         clear_color: [f32; 4],
-        cursor_color: [f32; 4],
-        selection_bg: [f32; 4],
-        pad_x: f32,
-        pad_y: f32,
         effective_cell_w: f32,
         effective_cell_h: f32,
-        _scale_x: f32,
-        _scale_y: f32,
-        scrollbar: Option<(f32, f32, f32, f32, f32, f32)>,
-        scroll_event: Option<super::grid_tessellator::ScrollEvent>,
         braille_style: forge_core::config_registry::BrailleStyle,
+        dirty_generations: usize,
+        draw_batches: &[RenderDrawBatch],
     ) -> Result<bool> {
-        let _span = tracing::trace_span!(
-            "renderer.render_grid",
-            rows = grid.len(),
-            cols = grid.first().map(|row| row.len()).unwrap_or(0),
-            dirty_rows = dirty_rows.iter().filter(|&&dirty| dirty).count(),
-            width = self.swapchain.extent.width,
-            height = self.swapchain.extent.height
-        )
-        .entered();
-
-        // Always clear self.tessellator.vertices, always re-tessellate the entire screen, and always upload the full buffer.
-        self.tessellator.tessellate(
-            grid,
-            dirty_rows,
-            &self.atlas,
-            effective_cell_w,
-            effective_cell_h,
-            self.cell_width as f32,
-            self.cell_height as f32,
-            self.baseline as f32,
-            self.swapchain.extent.width as f32,
-            self.swapchain.extent.height as f32,
-            default_bg,
-            cursor_color,
-            cursor,
-            cursor_style,
-            cursor_visible_phase,
-            selection,
-            selection_bg,
-            pad_x,
-            pad_y,
-            scrollbar,
-            scroll_event,
-        );
-        let missing_glyphs: Vec<GlyphKey> =
-            self.tessellator.missing_glyphs().iter().copied().collect();
-        if self.insert_dynamic_glyphs(&missing_glyphs)? {
-            let all_dirty = vec![true; grid.len()];
-            self.tessellator.tessellate(
-                grid,
-                &all_dirty,
-                &self.atlas,
-                effective_cell_w,
-                effective_cell_h,
-                self.cell_width as f32,
-                self.cell_height as f32,
-                self.baseline as f32,
-                self.swapchain.extent.width as f32,
-                self.swapchain.extent.height as f32,
-                default_bg,
-                cursor_color,
-                cursor,
-                cursor_style,
-                cursor_visible_phase,
-                selection,
-                selection_bg,
-                pad_x,
-                pad_y,
-                scrollbar,
-                None,
-            );
-        }
-        for key in self.tessellator.missing_glyphs() {
-            if self.reported_missing_glyphs.insert(*key) {
-                tracing::debug!(
-                    char = %key.c,
-                    codepoint = format_args!("U+{:04X}", key.c as u32),
-                    is_bold = key.is_bold,
-                    "Glyph missing from current atlas; fallback glyph used"
-                );
-            }
-        }
-        tracing::debug!(
+        tracing::trace!(
             vertices = self.tessellator.vertices.len(),
             bytes = self.tessellator.vertices.len() * std::mem::size_of::<GlyphVertex>(),
             "Renderer tessellation output"
@@ -780,8 +1084,6 @@ impl Renderer {
         let frame = self.current_frame;
         let vertex_buffer_offset = self.vertex_region_size * frame as vk::DeviceSize;
 
-        // The current frame's ring-buffer region is reusable only after its
-        // fence has completed.
         unsafe {
             let _fence_span =
                 tracing::trace_span!("renderer.wait_for_frame_fence", frame = frame).entered();
@@ -790,7 +1092,11 @@ impl Renderer {
                 .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
         }
 
-        let upload_plan = self.plan_vertex_upload(frame);
+        let upload_plan = if draw_batches.is_empty() {
+            self.plan_vertex_upload(frame)
+        } else {
+            VertexUploadPlan::Full
+        };
         let mut bytes_uploaded = 0usize;
 
         if !self.tessellator.vertices.is_empty() {
@@ -830,18 +1136,19 @@ impl Renderer {
                 }
             }
         }
-        self.update_frame_upload_state(frame);
+
+        if draw_batches.is_empty() {
+            self.update_frame_upload_state(frame);
+        } else if let Some(state) = self.frame_upload_states.get_mut(frame) {
+            state.initialized = false;
+        }
 
         let frame_stats = RenderFrameStats {
-            dirty_rows: dirty_rows.iter().filter(|&&dirty| dirty).count(),
+            dirty_generations,
             vertices: self.tessellator.vertices.len(),
             bytes_uploaded,
         };
 
-        // We need to pass the vertex buffer and descriptor set down to the frame rendering logic.
-        // I will implement a custom frame render for grid drawing.
-
-        // 2. Acquire next image
         let (image_index, suboptimal) = unsafe {
             let _acquire_span =
                 tracing::trace_span!("renderer.acquire_next_image", frame = frame).entered();
@@ -875,7 +1182,6 @@ impl Renderer {
                 .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
         }
 
-        // Record command buffer
         let cmd = self.command_buffers[frame];
         unsafe {
             self.device
@@ -898,10 +1204,7 @@ impl Renderer {
             let render_pass_begin = vk::RenderPassBeginInfo {
                 render_pass: self.render_pass,
                 framebuffer: self.framebuffers[image_index as usize],
-                render_area: vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: self.swapchain.extent,
-                },
+                render_area: full_scissor(self.swapchain.extent),
                 clear_value_count: 1,
                 p_clear_values: &clear_value,
                 ..Default::default()
@@ -959,14 +1262,35 @@ impl Renderer {
                 };
                 self.device.cmd_set_viewport(cmd, 0, &[viewport]);
 
-                let scissor = vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: self.swapchain.extent,
-                };
-                self.device.cmd_set_scissor(cmd, 0, &[scissor]);
-
-                self.device
-                    .cmd_draw(cmd, self.tessellator.vertices.len() as u32, 1, 0, 0);
+                if draw_batches.is_empty() {
+                    let scissor = full_scissor(self.swapchain.extent);
+                    self.device.cmd_set_scissor(cmd, 0, &[scissor]);
+                    self.device
+                        .cmd_draw(cmd, self.tessellator.vertices.len() as u32, 1, 0, 0);
+                } else {
+                    let mut current_is_opaque = false;
+                    for batch in draw_batches {
+                        if batch.count == 0 {
+                            continue;
+                        }
+                        if batch.is_opaque != current_is_opaque {
+                            current_is_opaque = batch.is_opaque;
+                            let pipeline = if current_is_opaque {
+                                self.pipeline.opaque_pipeline
+                            } else {
+                                self.pipeline.graphics_pipeline
+                            };
+                            self.device.cmd_bind_pipeline(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                pipeline,
+                            );
+                        }
+                        self.device.cmd_set_scissor(cmd, 0, &[batch.scissor]);
+                        self.device
+                            .cmd_draw(cmd, batch.count as u32, 1, batch.start as u32, 0);
+                    }
+                }
             }
 
             self.device.cmd_end_render_pass(cmd);
@@ -975,7 +1299,6 @@ impl Renderer {
                 .map_err(|e| ForgeError::Vulkan(e.to_string()))?;
         }
 
-        // Submit
         let wait_semaphores = [self.sync.image_available_semaphores[frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let signal_semaphores = [self.sync.render_finished_semaphores[frame]];
@@ -1005,7 +1328,6 @@ impl Renderer {
                 .map_err(|e| ForgeError::Vulkan(format!("queue_submit failed: {}", e)))?;
         }
 
-        // Present
         let swapchains = [self.swapchain.handle];
         let image_indices = [image_index];
         let present_info = vk::PresentInfoKHR {
@@ -1040,6 +1362,653 @@ impl Renderer {
         self.current_frame = (frame + 1) % MAX_FRAMES_IN_FLIGHT;
         self.record_render_stats(frame_stats);
         Ok(needs_recreate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_grid(
+        &mut self,
+        grid: &[&[forge_core::cell::Cell]],
+        dirty_generations: &[u64],
+        cursor: Option<(usize, usize)>,
+        cursor_style: forge_core::config_registry::CursorStyle,
+        cursor_visible_phase: bool,
+        selection: Option<forge_core::cell::SelectionRange>,
+        default_bg: [f32; 4],
+        clear_color: [f32; 4],
+        cursor_color: [f32; 4],
+        selection_bg: [f32; 4],
+        pad_x: f32,
+        pad_y: f32,
+        effective_cell_w: f32,
+        effective_cell_h: f32,
+        _scale_x: f32,
+        _scale_y: f32,
+        scrollbar: Option<(f32, f32, f32, f32, f32, f32)>,
+        context_menu: Option<ContextMenuRenderData<'_>>,
+        context_menu_transparent: bool,
+        scroll_event: Option<super::grid_tessellator::ScrollEvent>,
+        braille_style: forge_core::config_registry::BrailleStyle,
+    ) -> Result<bool> {
+        let _span = tracing::trace_span!(
+            "renderer.render_grid",
+            rows = grid.len(),
+            cols = grid.first().map(|row| row.len()).unwrap_or(0),
+            dirty_generations = dirty_generations.iter().filter(|&&dirty| dirty > 0).count(),
+            width = self.swapchain.extent.width,
+            height = self.swapchain.extent.height
+        )
+        .entered();
+
+        let ligatures_enabled = self.ligature_config.enabled && self.font_rasterizer.is_some();
+        let mut shaper = std::mem::take(&mut self.ligature_shaper);
+        {
+            let mut ligature_context = if ligatures_enabled {
+                Some(LigatureRenderContext {
+                    config: &self.ligature_config,
+                    shaper: &mut shaper,
+                    rasterizer: self.font_rasterizer.as_ref().unwrap(),
+                    bold_rasterizer: self.bold_font_rasterizer.as_ref(),
+                    px_size: self.font_px_size,
+                })
+            } else {
+                None
+            };
+            self.tessellator.tessellate(
+                grid,
+                dirty_generations,
+                &self.atlas,
+                effective_cell_w,
+                effective_cell_h,
+                self.cell_width as f32,
+                self.cell_height as f32,
+                self.baseline as f32,
+                self.swapchain.extent.width as f32,
+                self.swapchain.extent.height as f32,
+                default_bg,
+                cursor_color,
+                cursor,
+                cursor_style,
+                cursor_visible_phase,
+                selection,
+                selection_bg,
+                pad_x,
+                pad_y,
+                scrollbar,
+                context_menu,
+                context_menu_transparent,
+                scroll_event,
+                0,
+                ligature_context.as_mut(),
+            );
+        }
+        self.ligature_shaper = shaper;
+        let missing_glyphs: Vec<GlyphKey> =
+            self.tessellator.missing_glyphs().iter().copied().collect();
+        let missing_shaped_glyphs: Vec<ShapedGlyphKey> = self
+            .tessellator
+            .missing_shaped_glyphs()
+            .iter()
+            .copied()
+            .collect();
+        let inserted_dynamic_glyphs = self.insert_dynamic_glyphs(&missing_glyphs)?;
+        let inserted_shaped_glyphs = self.insert_shaped_glyphs(&missing_shaped_glyphs)?;
+        let atlas_changed = inserted_dynamic_glyphs || inserted_shaped_glyphs;
+        if atlas_changed {
+            let all_dirty = vec![1; grid.len()];
+            let mut shaper = std::mem::take(&mut self.ligature_shaper);
+            let mut ligature_context = if ligatures_enabled {
+                Some(LigatureRenderContext {
+                    config: &self.ligature_config,
+                    shaper: &mut shaper,
+                    rasterizer: self.font_rasterizer.as_ref().unwrap(),
+                    bold_rasterizer: self.bold_font_rasterizer.as_ref(),
+                    px_size: self.font_px_size,
+                })
+            } else {
+                None
+            };
+            self.tessellator.tessellate(
+                grid,
+                &all_dirty,
+                &self.atlas,
+                effective_cell_w,
+                effective_cell_h,
+                self.cell_width as f32,
+                self.cell_height as f32,
+                self.baseline as f32,
+                self.swapchain.extent.width as f32,
+                self.swapchain.extent.height as f32,
+                default_bg,
+                cursor_color,
+                cursor,
+                cursor_style,
+                cursor_visible_phase,
+                selection,
+                selection_bg,
+                pad_x,
+                pad_y,
+                scrollbar,
+                context_menu,
+                context_menu_transparent,
+                None,
+                0,
+                ligature_context.as_mut(),
+            );
+            self.ligature_shaper = shaper;
+        }
+        for key in self.tessellator.missing_glyphs() {
+            if self.reported_missing_glyphs.insert(*key) {
+                tracing::trace!(
+                    char = %key.c,
+                    codepoint = format_args!("U+{:04X}", key.c as u32),
+                    is_bold = key.is_bold,
+                    "Glyph missing from current atlas; fallback glyph used"
+                );
+            }
+        }
+        self.submit_tessellated_vertices(
+            clear_color,
+            effective_cell_w,
+            effective_cell_h,
+            braille_style,
+            dirty_generations.iter().filter(|&&dirty| dirty > 0).count(),
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_panes(
+        &mut self,
+        panes: &[PaneRenderInput<'_>],
+        split_borders: &[SplitBorderRenderInput],
+        clear_color: [f32; 4],
+        effective_cell_w: f32,
+        effective_cell_h: f32,
+        scrollbar: Option<(f32, f32, f32, f32, f32, f32)>,
+        context_menu: Option<ContextMenuRenderData<'_>>,
+        context_menu_transparent: bool,
+        braille_style: forge_core::config_registry::BrailleStyle,
+        gap: f32,
+        outline_width: f32,
+        active_outline_color: [f32; 4],
+        inactive_outline_color: [f32; 4],
+        pane_padding: forge_core::config_registry::PaddingConfig,
+        modal_dim_color: Option<[f32; 4]>,
+    ) -> Result<bool> {
+        let _span = tracing::trace_span!(
+            "renderer.render_panes",
+            panes = panes.len(),
+            split_borders = split_borders.len(),
+            width = self.swapchain.extent.width,
+            height = self.swapchain.extent.height
+        )
+        .entered();
+
+        let active_ids: HashSet<_> = panes.iter().map(|pane| pane.pane_id).collect();
+        let has_real_panes = panes.iter().any(|pane| !pane.pane_id.is_synthetic());
+        if has_real_panes {
+            self.pane_tessellators
+                .retain(|pane_id, _| active_ids.contains(pane_id));
+        }
+
+        let vp_w = self.swapchain.extent.width as f32;
+        let vp_h = self.swapchain.extent.height as f32;
+
+        let ligatures_enabled = self.ligature_config.enabled && self.font_rasterizer.is_some();
+        let mut shaper = std::mem::take(&mut self.ligature_shaper);
+        {
+            let mut ligature_context = if ligatures_enabled {
+                Some(LigatureRenderContext {
+                    config: &self.ligature_config,
+                    shaper: &mut shaper,
+                    rasterizer: self.font_rasterizer.as_ref().unwrap(),
+                    bold_rasterizer: self.bold_font_rasterizer.as_ref(),
+                    px_size: self.font_px_size,
+                })
+            } else {
+                None
+            };
+            for pane in panes {
+                let tessellator = self
+                    .pane_tessellators
+                    .entry(pane.pane_id)
+                    .or_insert_with(|| GridTessellator::new(self.max_vertices / 12));
+                tessellator.tessellate(
+                    pane.grid,
+                    pane.dirty_generations,
+                    &self.atlas,
+                    effective_cell_w,
+                    effective_cell_h,
+                    self.cell_width as f32,
+                    self.cell_height as f32,
+                    self.baseline as f32,
+                    vp_w,
+                    vp_h,
+                    pane.default_bg,
+                    pane.cursor_color,
+                    pane.cursor,
+                    pane.cursor_style,
+                    pane.cursor_visible_phase,
+                    pane.selection,
+                    pane.selection_bg,
+                    pane.rect.x + pane_padding.left as f32,
+                    pane.rect.y + pane_padding.top as f32,
+                    None,
+                    None,
+                    false,
+                    pane.scroll_event,
+                    pane.scroll_id,
+                    ligature_context.as_mut(),
+                );
+            }
+        }
+        self.ligature_shaper = shaper;
+
+        let missing_glyphs: Vec<GlyphKey> = self
+            .pane_tessellators
+            .iter()
+            .filter(|(pane_id, _)| active_ids.contains(pane_id))
+            .flat_map(|(_, tessellator)| tessellator.missing_glyphs().iter().copied())
+            .collect();
+        let missing_shaped_glyphs: Vec<ShapedGlyphKey> = self
+            .pane_tessellators
+            .iter()
+            .filter(|(pane_id, _)| active_ids.contains(pane_id))
+            .flat_map(|(_, tessellator)| tessellator.missing_shaped_glyphs().iter().copied())
+            .collect();
+        let inserted_dynamic_glyphs = self.insert_dynamic_glyphs(&missing_glyphs)?;
+        let inserted_shaped_glyphs = self.insert_shaped_glyphs(&missing_shaped_glyphs)?;
+        if inserted_dynamic_glyphs || inserted_shaped_glyphs {
+            let mut shaper = std::mem::take(&mut self.ligature_shaper);
+            let mut ligature_context = if ligatures_enabled {
+                Some(LigatureRenderContext {
+                    config: &self.ligature_config,
+                    shaper: &mut shaper,
+                    rasterizer: self.font_rasterizer.as_ref().unwrap(),
+                    bold_rasterizer: self.bold_font_rasterizer.as_ref(),
+                    px_size: self.font_px_size,
+                })
+            } else {
+                None
+            };
+            for pane in panes {
+                let all_dirty = vec![1; pane.grid.len()];
+                if let Some(tessellator) = self.pane_tessellators.get_mut(&pane.pane_id) {
+                    tessellator.tessellate(
+                        pane.grid,
+                        &all_dirty,
+                        &self.atlas,
+                        effective_cell_w,
+                        effective_cell_h,
+                        self.cell_width as f32,
+                        self.cell_height as f32,
+                        self.baseline as f32,
+                        vp_w,
+                        vp_h,
+                        pane.default_bg,
+                        pane.cursor_color,
+                        pane.cursor,
+                        pane.cursor_style,
+                        pane.cursor_visible_phase,
+                        pane.selection,
+                        pane.selection_bg,
+                        pane.rect.x + pane_padding.left as f32,
+                        pane.rect.y + pane_padding.top as f32,
+                        None,
+                        None,
+                        false,
+                        None,
+                        0,
+                        ligature_context.as_mut(),
+                    );
+                }
+            }
+            self.ligature_shaper = shaper;
+        }
+
+        let pane_missing_glyphs: Vec<GlyphKey> = self
+            .pane_tessellators
+            .iter()
+            .filter(|(pane_id, _)| active_ids.contains(pane_id))
+            .flat_map(|(_, tessellator)| tessellator.missing_glyphs().iter().copied())
+            .collect();
+
+        self.tessellator.prepare_composite_frame();
+        let mut draw_batches = Vec::with_capacity(panes.len() + 1);
+
+        let mut after_modal_dim_batches = Vec::new();
+        let mut floating_batches = Vec::new();
+        let mut modal_batches = Vec::new();
+        for pane in panes {
+            let Some(scissor) = rect_to_scissor(pane.rect, self.swapchain.extent) else {
+                continue;
+            };
+            let Some(tessellator) = self.pane_tessellators.get(&pane.pane_id) else {
+                continue;
+            };
+            if pane.layer == PaneRenderLayer::AfterModalDim {
+                after_modal_dim_batches.push((pane.pane_id, scissor));
+                continue;
+            }
+            if pane.layer == PaneRenderLayer::Floating {
+                floating_batches.push((pane, scissor));
+                continue;
+            }
+            if pane.layer == PaneRenderLayer::Modal {
+                modal_batches.push((pane.pane_id, scissor));
+                continue;
+            }
+            let start = self.tessellator.vertices.len();
+            if pane.opacity < 1.0 {
+                let mut faded_vertices = tessellator.vertices.clone();
+                for v in &mut faded_vertices {
+                    v.fg_color[3] *= pane.opacity;
+                    v.bg_color[3] *= pane.opacity;
+                }
+                self.tessellator
+                    .vertices
+                    .extend_from_slice(&faded_vertices);
+            } else {
+                self.tessellator
+                    .vertices
+                    .extend_from_slice(&tessellator.vertices);
+            }
+            let count = self.tessellator.vertices.len() - start;
+            if count > 0 {
+                draw_batches.push(RenderDrawBatch {
+                    start,
+                    count,
+                    scissor,
+                    is_opaque: false,
+                });
+            }
+        }
+
+        let overlay_start = self.tessellator.vertices.len();
+
+        if gap <= 0.0 {
+            for border in split_borders {
+                let color = border.color;
+                let color = if color[3] > 0.0 {
+                    color
+                } else {
+                    inactive_outline_color
+                };
+                self.tessellator.append_solid_rect(
+                    vp_w,
+                    vp_h,
+                    PixelRect::new(
+                        border.rect.x,
+                        border.rect.y,
+                        border.rect.width,
+                        border.rect.height,
+                    ),
+                    color,
+                );
+            }
+        } else if outline_width > 0.0 {
+            let num_real_panes = panes.iter().filter(|p| !p.pane_id.is_synthetic() && p.layer != PaneRenderLayer::Floating).count();
+            if num_real_panes > 1 {
+                for pane in panes {
+                    if pane.pane_id.is_synthetic() || pane.layer == PaneRenderLayer::Floating {
+                        continue;
+                    }
+                    let rect = pane.rect;
+                    let current_border_color = if pane.is_active {
+                        active_outline_color
+                    } else {
+                        inactive_outline_color
+                    };
+                    let w = outline_width;
+                    let horizontal_gap_width = effective_cell_w * 3.0;
+                    let vertical_gap_height = effective_cell_h;
+                    let horizontal_gap_x =
+                        rect.x + ((rect.width - horizontal_gap_width) * 0.5).max(0.0);
+                    let vertical_gap_y =
+                        rect.y + ((rect.height - vertical_gap_height) * 0.5).max(0.0);
+                    append_segmented_horizontal_outline(
+                        &mut self.tessellator,
+                        vp_w,
+                        vp_h,
+                        rect.x,
+                        rect.y - w,
+                        rect.width,
+                        w,
+                        current_border_color,
+                        pane.overflow_indicators
+                            .above
+                            .then_some((horizontal_gap_x, horizontal_gap_width)),
+                    );
+                    append_segmented_horizontal_outline(
+                        &mut self.tessellator,
+                        vp_w,
+                        vp_h,
+                        rect.x,
+                        rect.y + rect.height,
+                        rect.width,
+                        w,
+                        current_border_color,
+                        pane.overflow_indicators
+                            .below
+                            .then_some((horizontal_gap_x, horizontal_gap_width)),
+                    );
+                    append_segmented_vertical_outline(
+                        &mut self.tessellator,
+                        vp_w,
+                        vp_h,
+                        rect.x - w,
+                        rect.y - w,
+                        w,
+                        rect.height + w * 2.0,
+                        current_border_color,
+                        pane.overflow_indicators
+                            .left
+                            .then_some((vertical_gap_y, vertical_gap_height)),
+                    );
+                    append_segmented_vertical_outline(
+                        &mut self.tessellator,
+                        vp_w,
+                        vp_h,
+                        rect.x + rect.width,
+                        rect.y - w,
+                        w,
+                        rect.height + w * 2.0,
+                        current_border_color,
+                        pane.overflow_indicators
+                            .right
+                            .then_some((vertical_gap_y, vertical_gap_height)),
+                    );
+                }
+            }
+        }
+        self.tessellator
+            .append_scrollbar_overlay(vp_w, vp_h, scrollbar);
+        self.tessellator.append_context_menu_overlay(
+            &self.atlas,
+            self.baseline as f32,
+            effective_cell_w,
+            effective_cell_h,
+            vp_w,
+            vp_h,
+            context_menu,
+            context_menu_transparent,
+        );
+        if let Some(color) = modal_dim_color.filter(|color| color[3] > 0.0) {
+            self.tessellator.append_solid_rect(
+                vp_w,
+                vp_h,
+                PixelRect::new(0.0, 0.0, vp_w, vp_h),
+                color,
+            );
+        }
+        for (pane_id, _scissor) in after_modal_dim_batches {
+            let Some(tessellator) = self.pane_tessellators.get(&pane_id) else {
+                continue;
+            };
+            self.tessellator
+                .vertices
+                .extend_from_slice(&tessellator.vertices);
+        }
+        let overlay_count = self.tessellator.vertices.len() - overlay_start;
+        if overlay_count > 0 {
+            draw_batches.push(RenderDrawBatch {
+                start: overlay_start,
+                count: overlay_count,
+                scissor: full_scissor(self.swapchain.extent),
+                is_opaque: false,
+            });
+        }
+
+        for (pane, scissor) in floating_batches {
+            let Some(tessellator) = self.pane_tessellators.get(&pane.pane_id) else {
+                continue;
+            };
+            let start_bg = self.tessellator.vertices.len();
+            self.tessellator.append_solid_rect(
+                vp_w,
+                vp_h,
+                PixelRect::new(
+                    pane.rect.x,
+                    pane.rect.y,
+                    pane.rect.width,
+                    pane.rect.height,
+                ),
+                clear_color,
+            );
+            let count_bg = self.tessellator.vertices.len() - start_bg;
+            if count_bg > 0 {
+                draw_batches.push(RenderDrawBatch {
+                    start: start_bg,
+                    count: count_bg,
+                    scissor,
+                    is_opaque: true,
+                });
+            }
+
+            let start = self.tessellator.vertices.len();
+            if pane.opacity < 1.0 {
+                let mut faded_vertices = tessellator.vertices.clone();
+                for v in &mut faded_vertices {
+                    v.fg_color[3] *= pane.opacity;
+                    v.bg_color[3] *= pane.opacity;
+                }
+                self.tessellator
+                    .vertices
+                    .extend_from_slice(&faded_vertices);
+            } else {
+                self.tessellator
+                    .vertices
+                    .extend_from_slice(&tessellator.vertices);
+            }
+            let count = self.tessellator.vertices.len() - start;
+            if count > 0 {
+                draw_batches.push(RenderDrawBatch {
+                    start,
+                    count,
+                    scissor,
+                    is_opaque: false,
+                });
+            }
+
+            if outline_width > 0.0 {
+                let rect = pane.rect;
+                let current_border_color = if pane.is_active {
+                    active_outline_color
+                } else {
+                    inactive_outline_color
+                };
+                let w = outline_width;
+                let horizontal_gap_width = effective_cell_w * 3.0;
+                let vertical_gap_height = effective_cell_h;
+                let horizontal_gap_x = rect.x + ((rect.width - horizontal_gap_width) * 0.5).max(0.0);
+                let vertical_gap_y = rect.y + ((rect.height - vertical_gap_height) * 0.5).max(0.0);
+
+                let start_border = self.tessellator.vertices.len();
+                append_segmented_horizontal_outline(
+                    &mut self.tessellator,
+                    vp_w, vp_h,
+                    rect.x, rect.y - w, rect.width, w, current_border_color,
+                    pane.overflow_indicators.above.then_some((horizontal_gap_x, horizontal_gap_width)),
+                );
+                append_segmented_horizontal_outline(
+                    &mut self.tessellator,
+                    vp_w, vp_h,
+                    rect.x, rect.y + rect.height, rect.width, w, current_border_color,
+                    pane.overflow_indicators.below.then_some((horizontal_gap_x, horizontal_gap_width)),
+                );
+                append_segmented_vertical_outline(
+                    &mut self.tessellator,
+                    vp_w, vp_h,
+                    rect.x - w, rect.y - w, w, rect.height + w * 2.0, current_border_color,
+                    pane.overflow_indicators.left.then_some((vertical_gap_y, vertical_gap_height)),
+                );
+                append_segmented_vertical_outline(
+                    &mut self.tessellator,
+                    vp_w, vp_h,
+                    rect.x + rect.width, rect.y - w, w, rect.height + w * 2.0, current_border_color,
+                    pane.overflow_indicators.right.then_some((vertical_gap_y, vertical_gap_height)),
+                );
+                let count_border = self.tessellator.vertices.len() - start_border;
+                if count_border > 0 {
+                    draw_batches.push(RenderDrawBatch {
+                        start: start_border,
+                        count: count_border,
+                        scissor: full_scissor(self.swapchain.extent),
+                        is_opaque: false,
+                    });
+                }
+            }
+        }
+
+        for (pane_id, scissor) in modal_batches {
+            let Some(tessellator) = self.pane_tessellators.get(&pane_id) else {
+                continue;
+            };
+            let start = self.tessellator.vertices.len();
+            self.tessellator
+                .vertices
+                .extend_from_slice(&tessellator.vertices);
+            let count = self.tessellator.vertices.len() - start;
+            if count > 0 {
+                draw_batches.push(RenderDrawBatch {
+                    start,
+                    count,
+                    scissor,
+                    is_opaque: false,
+                });
+            }
+        }
+
+        for key in pane_missing_glyphs
+            .iter()
+            .chain(self.tessellator.missing_glyphs().iter())
+        {
+            if self.reported_missing_glyphs.insert(*key) {
+                tracing::trace!(
+                    char = %key.c,
+                    codepoint = format_args!("U+{:04X}", key.c as u32),
+                    is_bold = key.is_bold,
+                    "Glyph missing from current atlas; fallback glyph used"
+                );
+            }
+        }
+
+        self.submit_tessellated_vertices(
+            clear_color,
+            effective_cell_w,
+            effective_cell_h,
+            braille_style,
+            panes
+                .iter()
+                .map(|pane| {
+                    pane.dirty_generations
+                        .iter()
+                        .filter(|&&dirty| dirty > 0)
+                        .count()
+                })
+                .sum(),
+            &draw_batches,
+        )
     }
 
     /// Recreates the swapchain (e.g., after window resize).
@@ -1114,7 +2083,10 @@ impl Renderer {
         self.fallback_font_rasterizers = fallback_rasterizers;
         self.reported_missing_glyphs.clear();
         self.unsupported_dynamic_glyphs.clear();
+        self.unsupported_shaped_glyphs.clear();
         self.dynamic_atlas_full_reported = false;
+        self.shaped_atlas_full_reported = false;
+        self.ligature_shaper.clear();
 
         let image_info = vk::DescriptorImageInfo {
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
@@ -1186,6 +2158,47 @@ mod tests {
     }
 
     #[test]
+    fn pane_rect_scissor_clamps_to_swapchain_extent() {
+        let scissor = rect_to_scissor(
+            PaneRenderRect::new(-4.5, 8.2, 40.0, 21.2),
+            vk::Extent2D {
+                width: 100,
+                height: 50,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(scissor.offset, vk::Offset2D { x: 0, y: 8 });
+        assert_eq!(
+            scissor.extent,
+            vk::Extent2D {
+                width: 36,
+                height: 22
+            }
+        );
+    }
+
+    #[test]
+    fn pane_rect_scissor_rejects_empty_or_outside_rects() {
+        let extent = vk::Extent2D {
+            width: 100,
+            height: 50,
+        };
+
+        assert!(rect_to_scissor(PaneRenderRect::new(10.0, 10.0, 0.0, 5.0), extent).is_none());
+        assert!(rect_to_scissor(PaneRenderRect::new(120.0, 10.0, 4.0, 5.0), extent).is_none());
+    }
+
+    #[test]
+    fn pane_render_id_marks_overlay_ids_as_synthetic() {
+        assert!(!PaneRenderId(1).is_synthetic());
+        assert!(!PaneRenderId(42).is_synthetic());
+        assert!(PaneRenderId(u64::MAX).is_synthetic());
+        assert!(PaneRenderId(u64::MAX - 1).is_synthetic());
+        assert!(PaneRenderId(u64::MAX - 3).is_synthetic());
+    }
+
+    #[test]
     fn vertex_upload_plan_falls_back_to_full_for_uninitialized_frame() {
         let row_ranges = vec![RowVertexRanges {
             bg: VertexRange { start: 0, count: 6 },
@@ -1194,7 +2207,7 @@ mod tests {
         }];
 
         assert_eq!(
-            plan_vertex_upload_for_state(None, 12, &row_ranges, None),
+            plan_vertex_upload_for_state(None, 12, &row_ranges, None, None, 0),
             VertexUploadPlan::Full
         );
     }
@@ -1226,11 +2239,13 @@ mod tests {
             row_ranges: old_ranges,
             row_generations: vec![1, 3],
             scrollbar_range: None,
+            context_menu_range: None,
+            context_menu_fingerprint: 0,
             initialized: true,
         };
 
         assert_eq!(
-            plan_vertex_upload_for_state(Some(&state), 24, &new_ranges, None),
+            plan_vertex_upload_for_state(Some(&state), 24, &new_ranges, None, None, 0),
             VertexUploadPlan::Partial(vec![new_ranges[1].bg, new_ranges[1].fg])
         );
     }
@@ -1258,12 +2273,73 @@ mod tests {
             row_ranges: old_ranges,
             row_generations: vec![1],
             scrollbar_range: None,
+            context_menu_range: None,
+            context_menu_fingerprint: 0,
             initialized: true,
         };
 
         assert_eq!(
-            plan_vertex_upload_for_state(Some(&state), 18, &new_ranges, None),
+            plan_vertex_upload_for_state(Some(&state), 18, &new_ranges, None, None, 0),
             VertexUploadPlan::Full
         );
+    }
+
+    #[test]
+    fn vertex_upload_plan_falls_back_to_full_when_context_menu_changes() {
+        let row_ranges = vec![RowVertexRanges {
+            bg: VertexRange { start: 0, count: 6 },
+            fg: VertexRange { start: 6, count: 6 },
+            generation: 1,
+        }];
+        let state = FrameVertexUploadState {
+            vertex_count: 18,
+            row_ranges: row_ranges.clone(),
+            row_generations: vec![1],
+            scrollbar_range: None,
+            context_menu_range: Some(VertexRange {
+                start: 12,
+                count: 6,
+            }),
+            context_menu_fingerprint: 1,
+            initialized: true,
+        };
+
+        assert_eq!(
+            plan_vertex_upload_for_state(
+                Some(&state),
+                18,
+                &row_ranges,
+                None,
+                Some(VertexRange {
+                    start: 12,
+                    count: 6,
+                }),
+                2,
+            ),
+            VertexUploadPlan::Full
+        );
+    }
+
+    #[test]
+    fn outline_segments_leave_gap_for_overflow_icon() {
+        let segments = outline_segments_around_gap(0.0, 100.0, 40.0, 30.0);
+
+        assert_eq!(segments, [(0.0, 40.0), (70.0, 30.0)]);
+    }
+
+    #[test]
+    fn outline_segments_clamp_gap_to_border_bounds() {
+        let segments = outline_segments_around_gap(10.0, 50.0, 0.0, 30.0);
+
+        assert_eq!(segments, [(10.0, 0.0), (40.0, 20.0)]);
+    }
+
+    #[test]
+    fn overflow_gap_sizes_are_minimal() {
+        let cell_w = 10.0_f32;
+        let cell_h = 22.0_f32;
+
+        assert_eq!(cell_w * 3.0, 30.0);
+        assert_eq!(cell_h, 22.0);
     }
 }

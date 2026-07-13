@@ -24,7 +24,22 @@ void main() {
             out_color = v_bg_color;
             return;
         }
-        
+
+        if (proc_id == -42.0) {
+            vec2 local_pos = v_fg_color.xy;
+            vec2 size = v_fg_color.zw;
+            vec2 half_size = size * 0.5;
+            float radius = min(v_tex_coord.y, min(half_size.x, half_size.y));
+            vec2 p = local_pos - half_size;
+            vec2 q = abs(p) - (half_size - vec2(radius));
+            float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+            float edge = max(fwidth(dist), 0.001);
+            float alpha = clamp(0.5 - dist / edge, 0.0, 1.0);
+            if (alpha <= 0.0) discard;
+            out_color = vec4(v_bg_color.rgb, v_bg_color.a * alpha);
+            return;
+        }
+
         if (proc_id <= -100.0 && proc_id > -500.0) {
             int data = int(abs(proc_id) - 100.0);
             int u = data & 3;
@@ -232,6 +247,8 @@ void main() {
             } else if (proc_id == -9.0) {
                 // Angled Left Upper ()
                 d = 1.0 - (local.x + local.y);
+            } else {
+                discard;
             }
             
             float pixel_w = 1.0 / pc.cell_size.x;

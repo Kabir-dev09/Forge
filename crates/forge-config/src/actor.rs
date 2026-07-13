@@ -1,7 +1,6 @@
 use crate::types::{ConfigChangeSet, ConfigUpdate};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use forge_core::config_registry::ForgeConfig;
-use mlua::{Lua, Table};
 use std::path::PathBuf;
 use std::thread;
 
@@ -17,7 +16,7 @@ pub struct ConfigActorHandle {
     pub thread_handle: Option<thread::JoinHandle<()>>,
 }
 
-/// Spawns the Lua configuration actor on a dedicated background thread.
+/// Spawns the configuration actor on a dedicated background thread.
 /// Returns a handle for bidirectional communication.
 pub fn spawn_config_actor(config_path: PathBuf) -> ConfigActorHandle {
     let (main_tx, actor_rx) = bounded(16);
@@ -45,7 +44,7 @@ fn actor_loop(config_path: PathBuf, rx: Receiver<ActorMessage>, tx: Sender<Confi
         if let Some(parent) = config_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let default_config = include_str!("../../../forge_config_example.lua");
+        let default_config = include_str!("../../../forge_config_example.toml");
         if let Err(e) = std::fs::write(&config_path, default_config) {
             tracing::warn!("Failed to write default config to {:?}: {}", config_path, e);
         } else {
@@ -53,11 +52,8 @@ fn actor_loop(config_path: PathBuf, rx: Receiver<ActorMessage>, tx: Sender<Confi
         }
     }
 
-    // Initialize Lua VM
-    let lua = Lua::new();
-
     // Load initial config
-    let initial_config = load_and_eval(&lua, &config_path).unwrap_or_else(|| {
+    let initial_config = load_config(&config_path).unwrap_or_else(|| {
         tracing::warn!("Initial config load failed. Falling back to defaults.");
         forge_core::config_registry::ForgeConfig::default()
     });
@@ -72,7 +68,7 @@ fn actor_loop(config_path: PathBuf, rx: Receiver<ActorMessage>, tx: Sender<Confi
         match msg {
             ActorMessage::Shutdown => break,
             ActorMessage::Reload => {
-                if let Some(config) = load_and_eval(&lua, &config_path) {
+                if let Some(config) = load_config(&config_path) {
                     let changes = ConfigChangeSet::between(&current_config, &config);
                     if changes.any() {
                         current_config = config.clone();
@@ -88,46 +84,25 @@ fn actor_loop(config_path: PathBuf, rx: Receiver<ActorMessage>, tx: Sender<Confi
     tracing::debug!("Config Actor thread shutting down.");
 }
 
-const DEFAULT_CONFIG: &str = include_str!("default_config.lua");
+const DEFAULT_CONFIG: &str = include_str!("default_config.toml");
 
-fn load_and_eval(lua: &Lua, config_path: &PathBuf) -> Option<ForgeConfig> {
-    // 1. Read file contents. If missing, write the default config and use it.
-    let source = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            tracing::info!(
-                "No config found at {:?}, generating default config.",
-                config_path
-            );
-            if let Some(parent) = config_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(config_path, DEFAULT_CONFIG);
-        } else {
-            tracing::info!(
-                "Failed to read config at {:?}: {}, using default.",
-                config_path,
-                e
-            );
+fn load_config(config_path: &PathBuf) -> Option<ForgeConfig> {
+    if !config_path.exists() {
+        tracing::info!(
+            "No config found at {:?}, generating default config.",
+            config_path
+        );
+        if let Some(parent) = config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
-        DEFAULT_CONFIG.to_string()
-    });
+        let _ = std::fs::write(config_path, DEFAULT_CONFIG);
+    }
 
-    // 2. Evaluate Lua code.
-    let result = lua.load(&source).eval::<Table>();
-    let table = match result {
-        Ok(t) => t,
+    match crate::imports::parse_config_file(config_path) {
+        Ok(config) => Some(config),
         Err(e) => {
-            tracing::warn!("Lua config parse/eval error in {:?}: {}", config_path, e);
-            return None; // Keep previous state on error
+            tracing::warn!("TOML config load error in {:?}: {}", config_path, e);
+            None
         }
-    };
-
-    // 3. Extract values from the table to build ForgeConfig.
-    let mut config = ForgeConfig::default();
-    crate::extractor::extract_config(table, &mut config);
-
-    // 4. Validate limits.
-    config.validate();
-
-    Some(config)
+    }
 }

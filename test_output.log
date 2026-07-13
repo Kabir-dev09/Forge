@@ -1,0 +1,421 @@
+warning: variable does not need to be mutable
+   --> crates/forge-pty/src/pty.rs:230:25
+    |
+230 | ...   let mut pfd = nix::poll::PollFd::new(std::os::fd::AsFd::as_fd(&se...
+    |           ----^^^
+    |           |
+    |           help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `forge-pty` (lib) generated 1 warning (run `cargo fix --lib -p forge-pty` to apply 1 suggestion)
+warning: constant `CONTEXT_MENU_RADIUS` is never used
+  --> crates/forge-renderer/src/grid_tessellator.rs:10:7
+   |
+10 | const CONTEXT_MENU_RADIUS: f32 = 15.0;
+   |       ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `push_antialiased_rounded_pixel_quad` is never used
+   --> crates/forge-renderer/src/grid_tessellator.rs:529:4
+    |
+529 | fn push_antialiased_rounded_pixel_quad(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `forge-renderer` (lib) generated 2 warnings
+   Compiling forge-main v0.1.0 (/home/kabir/PROJECTS/Forge/crates/forge-main)
+warning: unused import: `std::collections::HashMap`
+ --> crates/forge-renderer/benches/tessellation_baseline.rs:1:5
+  |
+1 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `GlyphAtlasDescriptor` and `GlyphMetrics`
+ --> crates/forge-renderer/benches/tessellation_baseline.rs:8:47
+  |
+8 | ...las::{GlyphAtlas, GlyphAtlasDescriptor, GlyphMetrics};
+  |                      ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: `forge-renderer` (bench "tessellation_baseline") generated 2 warnings (run `cargo fix --bench "tessellation_baseline" -p forge-renderer` to apply 2 suggestions)
+warning: `forge-renderer` (lib test) generated 2 warnings (2 duplicates)
+warning: `forge-pty` (lib test) generated 1 warning (1 duplicate)
+warning: unused variable: `loop_signal_clone`
+    --> crates/forge-main/src/event_loop.rs:1375:9
+     |
+1375 |     let loop_signal_clone = loop_signal.clone();
+     |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_signal_clone`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `metrics`
+    --> crates/forge-main/src/event_loop.rs:2023:29
+     |
+2023 |                         let metrics = pointer_layout_metrics(&app_data);
+     |                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_metrics`
+
+warning: unused variable: `active_pane`
+    --> crates/forge-main/src/event_loop.rs:2624:17
+     |
+2624 |             let active_pane = app_data.tab_manager.active_mux().active...
+     |                 ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_active_pane`
+
+warning: unused variable: `new_offset`
+    --> crates/forge-main/src/event_loop.rs:3078:45
+     |
+3078 | ...                   let new_offset =
+     |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_offset`
+
+warning: unused variable: `cursor`
+    --> crates/forge-main/src/event_loop.rs:3810:21
+     |
+3810 |                 let cursor = sb.cursor;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_cursor`
+
+warning: value assigned to `new_ratio` is never read
+    --> crates/forge-main/src/event_loop.rs:2838:45
+     |
+2838 |                         let mut new_ratio = border.current_ratio;
+     |                                             ^^^^^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+2844 |                             new_ratio = rel_y / parent.height;
+     |                             --------------------------------- `new_ratio` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> crates/forge-main/src/event_loop.rs:4797:9
+     |
+4797 |     let mut avail_w =
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/forge-main/src/statusbar.rs:188:13
+    |
+188 | ...   let mut process_items = |items: &Vec<StatusbarItem>| -> Vec<(Cell...
+    |           ----^^^^^^^^^^^^^
+    |           |
+    |           help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/forge-main/src/statusbar.rs:335:13
+    |
+335 |         let mut place_cell = |c: Cell,
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: function `point_inside_rounded_rect` is never used
+   --> crates/forge-main/src/context_menu.rs:368:4
+    |
+368 | fn point_inside_rounded_rect(x: f64, y: f64, width: f64, height: f64, r...
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `mark_cursor_row_dirty` is never used
+   --> crates/forge-main/src/event_loop.rs:311:4
+    |
+311 | fn mark_cursor_row_dirty(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `forge-main` (bin "forge-main" test) generated 11 warnings (run `cargo fix --bin "forge-main" -p forge-main --tests` to apply 8 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.18s
+     Running unittests src/lib.rs (target/debug/deps/forge_config-bfa8154099007208)
+
+running 19 tests
+test extractor::tests::panes_mode_defaults_to_tiling ... ok
+test extractor::tests::invalid_panes_mode_falls_back_to_tiling ... ok
+test extractor::tests::invalid_values_fall_back_or_validate ... ok
+test extractor::tests::parses_explicit_scrolling_panes_mode ... ok
+test extractor::tests::parses_explicit_tiling_panes_mode ... ok
+test imports::tests::detects_import_cycles ... ok
+test extractor::tests::supports_legacy_key_to_action_bindings_table ... ok
+test imports::tests::later_imports_override_earlier_imports ... ok
+test imports::tests::loads_multiple_imports_in_order ... ok
+test imports::tests::loads_one_imported_file ... ok
+test imports::tests::main_config_overrides_imported_values ... ok
+test extractor::tests::parses_toml_config ... ok
+test imports::tests::missing_import_is_an_error ... ok
+test imports::tests::resolves_imports_relative_to_containing_file ... ok
+test types::tests::detects_blur_changes ... ok
+test imports::tests::supports_nested_imports ... ok
+test types::tests::detects_pane_config_changes ... ok
+test types::tests::detects_statusbar_and_confirm_close_changes ... ok
+test config_test::test_config_colors_load ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/forge_core-9436253681bee47f)
+
+running 12 tests
+test bindings::tests::normalizes_uppercase_ascii_keysyms ... ok
+test cache::tests::read_startup_cache_rejects_bad_checksum ... ok
+test cache::tests::read_startup_cache_accepts_current_version ... ok
+test cache::tests::read_startup_cache_rejects_stale_version ... ok
+test cache::tests::read_startup_cache_rejects_wrong_size ... ok
+test bindings::tests::maps_shifted_ascii_punctuation_to_physical_base_key ... ok
+test cell::tests::test_default_cell_c ... ok
+test color::tests::test_to_srgb_linear ... ok
+test cache::tests::roundtrip_cache ... ok
+test config_registry::tests::validate_clamps_values ... ok
+test config_registry::tests::default_keybindings_include_pane_splits ... ok
+test error::tests::test_error_display ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/forge_main-8400d35878e7d198)
+
+running 125 tests
+test confirm_modal::tests::default_base_layer_has_opaque_panel_background ... ok
+test confirm_modal::tests::base_layer_keeps_viewport_outside_panel_transparent ... ok
+test confirm_modal::tests::enter_cancels_by_default ... ok
+test confirm_modal::tests::footer_is_hidden_when_it_does_not_fit ... ok
+test confirm_modal::tests::tab_then_enter_confirms_close ... ok
+test confirm_modal::tests::modal_uses_theme_foreground_for_final_text ... ok
+test context_menu::tests::clamps_to_window_edges ... ok
+test context_menu::tests::hit_testing_ignores_transparent_rounded_corners ... ok
+test context_menu::tests::hit_tests_menu_items ... ok
+test context_menu::tests::menu_does_not_include_config_reload ... ok
+test context_menu::tests::split_submenu_opens_on_hover_and_returns_split_actions ... ok
+test context_menu::tests::split_submenu_stays_open_until_another_main_item_is_hovered ... ok
+test context_menu::tests::stores_target_pane_for_menu_actions ... ok
+test event_loop::metric_tests::center_keeps_native_cell_size_and_centers_leftover_pixels ... ok
+test event_loop::metric_tests::fill_expands_cell_geometry_and_anchors_to_configured_padding ... ok
+test event_loop::metric_tests::frame_redraw_predicate_renders_for_each_dirty_source ... ok
+test event_loop::metric_tests::frame_redraw_predicate_skips_idle_frames ... ok
+test event_loop::metric_tests::passive_pointer_motion_has_no_effect_in_alt_buffer ... ok
+test event_loop::metric_tests::passive_pointer_motion_has_no_effect_without_scrollback ... ok
+test event_loop::metric_tests::pointer_motion_has_effect_for_scrollbar_selection_and_drag_reporting ... ok
+test event_loop::metric_tests::recreated_swapchain_frame_keeps_rows_dirty_for_new_geometry ... ok
+test event_loop::metric_tests::scrollbar_overlay_does_not_redraw_in_alt_buffer ... ok
+test event_loop::metric_tests::scrollbar_overlay_does_not_redraw_without_scrollback ... ok
+test event_loop::metric_tests::scrollbar_overlay_redraws_during_reveal_delay ... ok
+test event_loop::metric_tests::scrollbar_overlay_stops_after_idle_fade_settles ... ok
+test event_loop::metric_tests::scrollbar_overlay_redraws_while_visible_or_interactive ... ok
+test font_paths::tests::push_unique_font_path_deduplicates_paths ... ok
+test event_loop::metric_tests::sidebar_reserves_left_columns_and_shifts_statusbar ... ok
+test event_loop::metric_tests::runtime_reload_keeps_restart_required_options ... ok
+test font_paths::tests::returns_none_when_no_regular_font_exists ... ok
+test font_paths::tests::resolves_configured_regular_and_bold_paths ... ok
+test mux::layout::tests::horizontal_split_produces_top_and_bottom_panes_with_border ... ok
+test mux::layout::tests::non_finite_ratio_falls_back_to_half ... ok
+test mux::layout::tests::nested_splits_are_deterministic_and_non_overlapping ... ok
+test mux::layout::tests::pane_below_minimum_is_rejected ... ok
+test mux::layout::tests::ratios_are_clamped_without_mutating_tree ... ok
+test mux::layout::tests::replace_leaf_swaps_only_matching_pane ... ok
+test mux::layout::tests::single_pane_fills_content_rect ... ok
+test mux::layout::tests::split_that_creates_too_small_child_is_rejected ... ok
+test mux::layout::tests::vertical_split_produces_left_and_right_panes_with_border ... ok
+test mux::runtime::tests::default_config_constructs_tiling_runtime_without_scrolling_manager ... ok
+test mux::runtime::tests::scrolling_config_constructs_scrolling_runtime ... ok
+test mux::runtime::tests::scrolling_render_subset_excludes_invisible_panes ... ok
+test mux::runtime::tests::scrolling_runtime_adds_split_panes_to_virtual_space ... ok
+test mux::runtime::tests::scrolling_runtime_focuses_clicked_pane ... ok
+test mux::runtime::tests::scrolling_runtime_focuses_panes_by_direction ... ok
+test mux::runtime::tests::scrolling_viewport_resize_reports_grid_changes ... ok
+test mux::runtime::tests::scrolling_runtime_tracks_new_active_tab ... ok
+test mux::scrolling::tests::add_pane_right_and_below_updates_active_pane ... ok
+test mux::scrolling::tests::directional_focus_scrolls_target_into_view ... ok
+test mux::scrolling::tests::gravity_normalization_moves_pane_left_until_blocked_by_gap ... ok
+test mux::scrolling::tests::gravity_normalization_moves_pane_up_until_blocked_by_gap ... ok
+test mux::scrolling::tests::directional_focus_uses_virtual_pane_positions ... ok
+test mux::scrolling::tests::gravity_normalization_preserves_gap_and_prevents_overlap ... ok
+test mux::scrolling::tests::gravity_normalization_removes_diagonal_empty_space_without_resizing ... ok
+test mux::scrolling::tests::hit_testing_accounts_for_scroll_offset ... ok
+test mux::scrolling::tests::interrupted_scroll_animation_starts_from_current_visual_offset ... ok
+test mux::scrolling::tests::overflow_indicators_mark_hidden_horizontal_panes ... ok
+test mux::scrolling::tests::pane_removal_cancels_scroll_animation ... ok
+test mux::scrolling::tests::overflow_indicators_mark_hidden_vertical_panes ... ok
+test mux::scrolling::tests::partial_visibility_reports_visible_span_inside_pane ... ok
+test mux::scrolling::tests::removal_compaction_keeps_mixed_layout_non_overlapping ... ok
+test mux::scrolling::tests::removing_middle_horizontal_pane_compacts_right_neighbor_without_resizing ... ok
+test mux::scrolling::tests::removing_active_pane_falls_back_to_next_then_previous ... ok
+test mux::scrolling::tests::removing_middle_vertical_pane_compacts_lower_neighbor_without_resizing ... ok
+test mux::scrolling::tests::removing_to_single_pane_restores_full_viewport ... ok
+test mux::scrolling::tests::render_visible_panes_use_finished_visual_target ... ok
+test mux::scrolling::tests::repeated_horizontal_split_extends_virtual_space_instead_of_shrinking ... ok
+test mux::scrolling::tests::repeated_vertical_split_extends_virtual_space_instead_of_shrinking ... ok
+test mux::scrolling::tests::resize_drag_updates_adjacent_scrolling_pane_sizes ... ok
+test mux::scrolling::tests::resize_drag_updates_all_panes_sharing_horizontal_boundary ... ok
+test mux::scrolling::tests::resize_drag_updates_all_panes_sharing_vertical_boundary ... ok
+test mux::scrolling::tests::resize_handle_hit_test_finds_scrolling_split_gap ... ok
+test mux::scrolling::tests::resize_handle_hit_test_rejects_distant_panes ... ok
+test mux::scrolling::tests::scroll_animation_interpolates_and_finishes_at_target ... ok
+test mux::scrolling::tests::scroll_clamps_on_x_and_y_axes ... ok
+test mux::scrolling::tests::split_active_horizontal_halves_active_pane ... ok
+test mux::scrolling::tests::scroll_animation_updates_logical_offset_immediately ... ok
+test mux::scrolling::tests::split_active_vertical_halves_active_pane ... ok
+test mux::scrolling::tests::viewport_resize_cancels_scroll_animation ... ok
+test mux::scrolling::tests::visible_cache_is_reused_and_invalidated ... ok
+test mux::scrolling::tests::visible_pane_calculation_returns_intersecting_panes ... ok
+test mux::scrolling::tests::viewport_resize_preserves_multi_pane_virtual_rects ... ok
+test mux::scrolling::tests::visual_render_offset_is_separate_from_logical_hit_testing ... ok
+test mux::scrolling::tests::zoom_active_pane_temporarily_uses_full_viewport ... ok
+test mux::state::tests::focus_pane_changes_active_pane_only_for_known_panes ... ok
+test mux::state::tests::changed_relayout_reports_grid_change ... ok
+test mux::state::tests::commit_split_active_replaces_active_leaf_and_focuses_new_pane ... ok
+test mux::state::tests::invalid_pane_removal_is_safe ... ok
+test mux::state::tests::hit_testing_returns_pane_under_point ... ok
+test mux::state::tests::insert_detached_pane_does_not_mutate_layout_tree ... ok
+test mux::state::tests::point_target_translates_to_pane_local_coordinates ... ok
+test mux::state::tests::preview_split_active_rejects_too_small_pane ... ok
+test mux::state::tests::preview_split_active_validates_layout_without_mutating_mux ... ok
+test mux::state::tests::relayout_preserves_minimum_pane_constraints ... ok
+test mux::state::tests::relayout_sets_single_pane_rect_without_grid_change ... ok
+test mux::state::tests::remove_detached_root_leaf_repairs_root_to_remaining_pane ... ok
+test mux::state::tests::remove_leaf_from_two_pane_split_promotes_surviving_sibling ... ok
+test mux::state::tests::remove_pane_from_nested_layout_preserves_sibling_subtree ... ok
+test mux::state::tests::removing_inactive_pane_preserves_active_pane_when_valid ... ok
+test mux::state::tests::removing_active_pane_focuses_surviving_sibling ... ok
+test mux::state::tests::removing_last_pane_reports_terminal_should_exit ... ok
+test mux::state::tests::unchanged_relayout_reports_no_changes ... ok
+test mux::state::tests::split_is_rejected_while_zoomed ... ok
+test mux::state::tests::zoom_renders_only_active_pane_and_restores_layout ... ok
+test mux::state::tests::zoomed_hit_testing_targets_only_zoomed_pane ... ok
+test mux::tab::tests::closing_active_tab_shifts_focus ... ok
+test mux::tab::tests::closing_last_tab_signals_exit ... ok
+test mux::tab::tests::move_tab_left_right ... ok
+test mux::tab::tests::global_pane_lookup_resolves_across_tabs ... ok
+test mux::tab::tests::pane_zoom_state_is_tab_local ... ok
+test mux::tab::tests::switching_tabs_updates_active_index ... ok
+test mux::tab::tests::tab_manager_creates_and_closes_tabs ... ok
+test sidebar::tests::hidden_sidebar_reserves_no_columns ... ok
+test sidebar::tests::visible_sidebar_renders_blank_design_surface ... ok
+test statusbar::tests::tab_edges_use_tab_background_as_foreground ... ok
+test statusbar::tests::tabs_format_renders_zoom_indicator_only_for_zoomed_tabs ... ok
+test statusbar::tests::zoom_indicator_keeps_tab_click_region_target ... ok
+test wayland::niri_blur_rule::tests::detects_existing_forge_blur_rule ... ok
+test wayland::niri_blur_rule::tests::detects_existing_managed_rule ... ok
+test wayland::niri_blur_rule::tests::appends_rule_when_missing ... ok
+test wayland::niri_blur_rule::tests::ignores_blur_rule_for_different_window ... ok
+test wayland::niri_blur_rule::tests::does_not_append_duplicate_rule ... ok
+test wayland::seat::tests::test_xkb_keymap_loading ... ok
+test font_paths::tests::falls_back_to_bundled_fonts ... ok
+
+test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/lib.rs (target/debug/deps/forge_plugins-777e5ff055143c20)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/forge_pty-6e831fb694cb9c90)
+
+running 53 tests
+test screen_buffer::reflow_tests::resize_still_reflows_soft_wrapped_rows ... ok
+test screen_buffer::reflow_tests::resize_does_not_join_rows_after_wrapped_row_is_rewritten ... ok
+test screen_buffer::reflow_tests::resize_preserves_non_reflowable_overflow_in_wider_row ... ok
+test screen_buffer::reflow_tests::test_cursor_linear_index_preserved ... FAILED
+test screen_buffer::reflow_tests::test_delete_chars ... ok
+test screen_buffer::reflow_tests::test_insert_chars ... ok
+test screen_buffer::reflow_tests::writing_from_column_zero_clears_stale_wrap_flag ... ok
+test screen_buffer::tests::coalesced_scrolls_still_record_when_no_other_dirty_rows_exist ... ok
+test screen_buffer::tests::full_viewport_scroll_records_coalesced_scroll_event ... ok
+test screen_buffer::tests::erase_blank_cells_does_not_dirty_row ... FAILED
+test screen_buffer::tests::erase_after_scroll_clears_pending_scroll_event ... FAILED
+test screen_buffer::tests::insert_delete_chars_on_blank_row_do_not_dirty_row ... ok
+test screen_buffer::tests::insert_and_delete_after_scroll_clear_pending_scroll_event ... ok
+test screen_buffer::tests::repeated_ascii_write_with_changed_style_dirties_row ... ok
+test screen_buffer::tests::partial_region_scroll_records_region_bounds ... ok
+test screen_buffer::tests::repeated_identical_ascii_write_does_not_dirty_row ... ok
+test screen_buffer::tests::repeated_identical_wide_write_does_not_dirty_row ... ok
+test screen_buffer::tests::resize_clears_pending_scroll_event ... ok
+test screen_buffer::tests::scroll_after_dirty_write_does_not_record_reusable_scroll_event ... FAILED
+test screen_buffer::tests::test_clear_scrollback_resets_viewport ... ok
+test screen_buffer::tests::test_alt_buffer_does_not_append_scrollback ... ok
+test screen_buffer::tests::test_cursor_viewport_dirty_row_respects_scroll_offset ... ok
+test screen_buffer::tests::test_erase ... ok
+test screen_buffer::tests::test_line_feed_and_scroll ... ok
+test screen_buffer::tests::test_partial_scroll_region_preserves_outer_rows ... ok
+test screen_buffer::tests::test_resize ... ok
+test screen_buffer::tests::test_scrollback_viewport_uses_logical_order_after_wrap ... ok
+test screen_buffer::tests::test_resize_shrink_grow ... FAILED
+test screen_buffer::tests::test_selection_dirty_rows_are_limited_to_changed_ranges ... ok
+test screen_buffer::tests::test_write_ascii ... ok
+test screen_buffer::tests::test_write_ascii_run_wraps_and_preserves_attrs ... ok
+test screen_buffer::tests::test_write_wide_char ... ok
+test screen_buffer::tests::write_after_scroll_clears_pending_scroll_event ... FAILED
+test snapshot::tests::text_in_range_extracts_multiline_selection ... ok
+test snapshot::tests::text_in_range_ignores_wide_placeholders_and_trims_line_ends ... ok
+test vte_parser::tests::alternate_screen_exit_clears_temporary_cursor_style_override ... ok
+test vte_parser::tests::terminal_resets_clear_cursor_style_override ... ok
+test vte_parser::tests::decscusr_default_clears_cursor_style_override ... ok
+test vte_parser::tests::test_ascii_fast_path_preserves_sgr_state ... ok
+test vte_parser::tests::test_cursor_movement ... ok
+test screen_buffer::tests::test_scrollback_overflow ... ok
+test vte_parser::tests::test_cursor_movement_edge_cases ... ok
+test vte_parser::tests::test_dec_special_graphics_draws_box_lines ... ok
+test vte_parser::tests::test_dec_special_graphics_state_survives_split_batches ... ok
+test vte_parser::tests::test_dec_special_graphics_g1_shift ... ok
+test vte_parser::tests::test_erase_line ... ok
+test vte_parser::tests::test_print_ascii ... ok
+test vte_parser::tests::test_sgr_256_colors ... ok
+test vte_parser::tests::test_sgr_colon_separated ... ok
+test vte_parser::tests::test_sgr_colors ... ok
+test vte_parser::tests::test_split_csi_after_newline_does_not_print_numeric_continuation ... ok
+test vte_parser::tests::test_split_escape_does_not_fast_path_payload ... ok
+test pty::tests::spawn_echo_and_read ... ok
+
+failures:
+
+---- screen_buffer::reflow_tests::test_cursor_linear_index_preserved stdout ----
+
+thread 'screen_buffer::reflow_tests::test_cursor_linear_index_preserved' (13674) panicked at crates/forge-pty/src/screen_buffer.rs:2253:9:
+assertion `left == right` failed
+  left: 3
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- screen_buffer::tests::erase_blank_cells_does_not_dirty_row stdout ----
+
+thread 'screen_buffer::tests::erase_blank_cells_does_not_dirty_row' (13680) panicked at crates/forge-pty/src/screen_buffer.rs:1647:9:
+assertion failed: !buf.is_dirty(0)
+
+---- screen_buffer::tests::erase_after_scroll_clears_pending_scroll_event stdout ----
+
+thread 'screen_buffer::tests::erase_after_scroll_clears_pending_scroll_event' (13679) panicked at crates/forge-pty/src/screen_buffer.rs:1845:9:
+assertion `left == right` failed
+  left: Some(ScrollEvent { direction: Up, top: 0, bottom: 2, lines: 1, full_viewport: true })
+ right: None
+
+---- screen_buffer::tests::scroll_after_dirty_write_does_not_record_reusable_scroll_event stdout ----
+
+thread 'screen_buffer::tests::scroll_after_dirty_write_does_not_record_reusable_scroll_event' (13689) panicked at crates/forge-pty/src/screen_buffer.rs:1803:9:
+assertion `left == right` failed
+  left: Some(ScrollEvent { direction: Up, top: 0, bottom: 2, lines: 1, full_viewport: true })
+ right: None
+
+---- screen_buffer::tests::test_resize_shrink_grow stdout ----
+
+thread 'screen_buffer::tests::test_resize_shrink_grow' (13698) panicked at crates/forge-pty/src/screen_buffer.rs:1952:9:
+assertion `left == right` failed
+  left: 39
+ right: 40
+
+---- screen_buffer::tests::write_after_scroll_clears_pending_scroll_event stdout ----
+
+thread 'screen_buffer::tests::write_after_scroll_clears_pending_scroll_event' (13705) panicked at crates/forge-pty/src/screen_buffer.rs:1791:9:
+assertion `left == right` failed
+  left: Some(ScrollEvent { direction: Up, top: 0, bottom: 2, lines: 1, full_viewport: true })
+ right: None
+
+
+failures:
+    screen_buffer::reflow_tests::test_cursor_linear_index_preserved
+    screen_buffer::tests::erase_after_scroll_clears_pending_scroll_event
+    screen_buffer::tests::erase_blank_cells_does_not_dirty_row
+    screen_buffer::tests::scroll_after_dirty_write_does_not_record_reusable_scroll_event
+    screen_buffer::tests::test_resize_shrink_grow
+    screen_buffer::tests::write_after_scroll_clears_pending_scroll_event
+
+test result: FAILED. 47 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p forge-pty --lib`

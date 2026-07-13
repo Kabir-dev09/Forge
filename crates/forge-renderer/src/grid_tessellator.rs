@@ -1,7 +1,13 @@
-use super::font::atlas::{GlyphAtlas, GlyphKey, GlyphMetrics};
+use super::font::atlas::{GlyphAtlas, GlyphKey, GlyphMetrics, ShapedGlyphKey};
+use super::font::ligature::{row_has_ligature_candidate, tokenize_ligature_candidates};
+use super::font::rasterizer::FontRasterizer;
+use super::font::shaper::{font_identity, ShapedGlyph, ShaperCache, ShaperCacheEntry, TextRunKey};
 use super::pipeline::GlyphVertex;
 use forge_core::cell::Cell;
+use forge_core::config_registry::LigatureConfig;
 use std::collections::HashSet;
+
+const CONTEXT_MENU_RADIUS: f32 = 15.0;
 
 #[derive(Clone, Default)]
 pub struct RowTessellation {
@@ -62,17 +68,143 @@ pub struct ScrollEvent {
     pub full_viewport: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContextMenuRenderItem<'a> {
+    pub label: &'a str,
+    pub right_label: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContextMenuPanelRenderData<'a> {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub item_height: f32,
+    pub hovered_item: Option<usize>,
+    pub items: &'a [ContextMenuRenderItem<'a>],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContextMenuRenderData<'a> {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub item_height: f32,
+    pub hovered_item: Option<usize>,
+    pub items: &'a [ContextMenuRenderItem<'a>],
+    pub submenu: Option<ContextMenuPanelRenderData<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PixelRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl PixelRect {
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub fn has_positive_area(self) -> bool {
+        self.width > 0.0 && self.height > 0.0
+    }
+}
+
 pub struct GridTessellator {
     pub vertices: Vec<GlyphVertex>,
     pub rows: Vec<RowTessellation>,
     pub row_ranges: Vec<RowVertexRanges>,
     pub scrollbar_range: Option<VertexRange>,
+    pub context_menu_range: Option<VertexRange>,
+    pub context_menu_fingerprint: u64,
     pub rebuilt_rows: Vec<usize>,
     missing_glyphs: HashSet<GlyphKey>,
+    missing_shaped_glyphs: HashSet<ShapedGlyphKey>,
+    last_dirty_generations: Vec<u64>,
+    last_scroll_id: u64,
     actual_dirty: Vec<bool>,
     last_cursor: Option<(usize, usize)>,
     last_cursor_visible: bool,
     last_selection: Option<forge_core::cell::SelectionRange>,
+    ligature_suppressed_cells: Vec<bool>,
+    last_geometry: Option<RenderGeometryKey>,
+}
+
+pub struct LigatureRenderContext<'a> {
+    pub config: &'a LigatureConfig,
+    pub shaper: &'a mut ShaperCache,
+    pub rasterizer: &'a FontRasterizer,
+    pub bold_rasterizer: Option<&'a FontRasterizer>,
+    pub px_size: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderGeometryKey {
+    rows: usize,
+    cols: usize,
+    cell_w: u32,
+    cell_h: u32,
+    native_cell_w: u32,
+    native_cell_h: u32,
+    baseline: u32,
+    vp_w: u32,
+    vp_h: u32,
+    pad_x: u32,
+    pad_y: u32,
+    default_bg: [u32; 4],
+    cursor_color: [u32; 4],
+    selection_bg: [u32; 4],
+    cursor_style: u8,
+}
+
+impl RenderGeometryKey {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        grid: &[&[Cell]],
+        cell_w: f32,
+        cell_h: f32,
+        native_cell_w: f32,
+        native_cell_h: f32,
+        baseline: f32,
+        vp_w: f32,
+        vp_h: f32,
+        default_bg: [f32; 4],
+        cursor_color: [f32; 4],
+        selection_bg: [f32; 4],
+        cursor_style: forge_core::config_registry::CursorStyle,
+        pad_x: f32,
+        pad_y: f32,
+    ) -> Self {
+        Self {
+            rows: grid.len(),
+            cols: grid.first().map(|row| row.len()).unwrap_or(0),
+            cell_w: cell_w.to_bits(),
+            cell_h: cell_h.to_bits(),
+            native_cell_w: native_cell_w.to_bits(),
+            native_cell_h: native_cell_h.to_bits(),
+            baseline: baseline.to_bits(),
+            vp_w: vp_w.to_bits(),
+            vp_h: vp_h.to_bits(),
+            pad_x: pad_x.to_bits(),
+            pad_y: pad_y.to_bits(),
+            default_bg: default_bg.map(f32::to_bits),
+            cursor_color: cursor_color.map(f32::to_bits),
+            selection_bg: selection_bg.map(f32::to_bits),
+            cursor_style: match cursor_style {
+                forge_core::config_registry::CursorStyle::Block => 0,
+                forge_core::config_registry::CursorStyle::Underline => 1,
+                forge_core::config_registry::CursorStyle::Beam => 2,
+            },
+        }
+    }
 }
 
 fn reserve_capacity<T>(values: &mut Vec<T>, required: usize) {
@@ -117,6 +249,575 @@ fn glyph_for<'a>(
     atlas.fallback()
 }
 
+#[allow(clippy::too_many_arguments)]
+fn plan_ligatures_for_row<Nd, Push, ColorFn>(
+    row: &[Cell],
+    row_idx: usize,
+    cursor_col: Option<usize>,
+    selection: Option<forge_core::cell::SelectionRange>,
+    context: &mut LigatureRenderContext<'_>,
+    atlas: &GlyphAtlas,
+    missing_shaped_glyphs: &mut HashSet<ShapedGlyphKey>,
+    suppressed_cells: &mut [bool],
+    shaped_vertices: &mut Vec<GlyphVertex>,
+    cell_w: f32,
+    baseline: f32,
+    origin_y: f32,
+    inset_x: f32,
+    pad_x: f32,
+    ndc: &Nd,
+    push_quad: &Push,
+    color_to_f32: &ColorFn,
+) where
+    Nd: Fn(f32, f32) -> [f32; 2],
+    Push: Fn(&mut Vec<GlyphVertex>, [f32; 2], [f32; 2], [f32; 2], [f32; 2], [f32; 4], [f32; 4]),
+    ColorFn: Fn(forge_core::color::Color) -> [f32; 4],
+{
+    if !context.config.enabled || row.len() < 2 || !row_has_ligature_candidate(row) {
+        return;
+    }
+
+    let max_token_len = context.config.max_token_len;
+    let tokens = tokenize_ligature_candidates(row, max_token_len, cursor_col, selection, row_idx);
+    if tokens.is_empty() {
+        return;
+    }
+
+    for token in tokens {
+        if !token.text.is_ascii() {
+            continue;
+        }
+        let active_rasterizer = if token.style.is_bold() {
+            context.bold_rasterizer.unwrap_or(context.rasterizer)
+        } else {
+            context.rasterizer
+        };
+        let font_hash = font_identity(&active_rasterizer.bytes);
+        let key = TextRunKey {
+            text: token.text.clone(),
+            font_hash,
+            px_size_bits: context.px_size.to_bits(),
+            style: token.style.clone(),
+            features: context.config.features.clone(),
+            mode: context.config.mode,
+        };
+        let ShaperCacheEntry::Positive(run) = context.shaper.shape_run(
+            key,
+            context.rasterizer,
+            context.bold_rasterizer,
+            context.px_size,
+        ) else {
+            continue;
+        };
+
+        let cluster_bounds = cluster_bounds(&run.glyphs, run.char_count);
+        for (cluster_start, cluster_end) in cluster_bounds {
+            if cluster_end <= cluster_start {
+                continue;
+            }
+            let absolute_start = token.start_col + cluster_start;
+            let absolute_end = token.start_col + cluster_end;
+            if absolute_end > row.len() || absolute_start >= absolute_end {
+                continue;
+            }
+
+            let cluster_glyphs: Vec<&ShapedGlyph> = run
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.cluster as usize == cluster_start)
+                .collect();
+            if cluster_glyphs.is_empty() {
+                continue;
+            }
+
+            let is_bold = token.style.is_bold();
+            let shaped_keys: Vec<_> = cluster_glyphs
+                .iter()
+                .map(|glyph| ShapedGlyphKey {
+                    glyph_id: glyph.glyph_id,
+                    is_bold,
+                    font_hash,
+                })
+                .collect();
+            if shaped_keys
+                .iter()
+                .any(|key| atlas.get_shaped(*key).is_none())
+            {
+                missing_shaped_glyphs.extend(shaped_keys);
+                continue;
+            }
+
+            for col in absolute_start..absolute_end {
+                suppressed_cells[col] = true;
+            }
+
+            let fg = color_to_f32(row[absolute_start].fg);
+            let bg = color_to_f32(row[absolute_start].bg);
+            let cluster_x = absolute_start as f32 * cell_w + pad_x;
+            let mut pen_x = 0.0;
+            for (glyph, key) in cluster_glyphs.iter().zip(shaped_keys.iter()) {
+                let Some(metrics) = atlas.get_shaped(*key) else {
+                    continue;
+                };
+                let x = (cluster_x + inset_x + pen_x + glyph.x_offset + metrics.bearing_x as f32)
+                    .round();
+                let y = (origin_y + baseline - metrics.bearing_y as f32 - glyph.y_offset).round();
+                let tl = ndc(x, y);
+                let br = ndc(x + metrics.width as f32, y + metrics.height as f32);
+                push_quad(
+                    shaped_vertices,
+                    tl,
+                    br,
+                    [metrics.u0, metrics.v0],
+                    [metrics.u1, metrics.v1],
+                    fg,
+                    bg,
+                );
+                pen_x += glyph.x_advance;
+            }
+        }
+    }
+}
+
+fn cluster_bounds(glyphs: &[ShapedGlyph], char_count: usize) -> Vec<(usize, usize)> {
+    let mut starts: Vec<usize> = glyphs
+        .iter()
+        .map(|glyph| glyph.cluster as usize)
+        .filter(|&cluster| cluster < char_count)
+        .collect();
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(idx, &start)| {
+            let end = starts.get(idx + 1).copied().unwrap_or(char_count);
+            (start, end)
+        })
+        .collect()
+}
+
+fn context_menu_fingerprint(menu: Option<ContextMenuRenderData<'_>>) -> u64 {
+    let Some(menu) = menu else {
+        return 0;
+    };
+
+    let mut hash = 0xcbf29ce484222325_u64;
+    hash_context_menu_panel(
+        &mut hash,
+        ContextMenuPanelRenderData {
+            x: menu.x,
+            y: menu.y,
+            width: menu.width,
+            item_height: menu.item_height,
+            hovered_item: menu.hovered_item,
+            items: menu.items,
+        },
+    );
+    if let Some(submenu) = menu.submenu {
+        hash ^= 1;
+        hash = hash.wrapping_mul(0x100000001b3);
+        hash_context_menu_panel(&mut hash, submenu);
+    }
+    hash
+}
+
+fn hash_context_menu_panel(hash: &mut u64, menu: ContextMenuPanelRenderData<'_>) {
+    for value in [
+        menu.x.to_bits(),
+        menu.y.to_bits(),
+        menu.width.to_bits(),
+        menu.item_height.to_bits(),
+        menu.hovered_item.unwrap_or(usize::MAX) as u32,
+        menu.items.len() as u32,
+    ] {
+        *hash ^= value as u64;
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for item in menu.items {
+        for byte in item.label.as_bytes() {
+            *hash ^= *byte as u64;
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+        if let Some(right_label) = item.right_label {
+            for byte in right_label.as_bytes() {
+                *hash ^= *byte as u64;
+                *hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+}
+
+fn ndc(vp_w: f32, vp_h: f32, px_x: f32, px_y: f32) -> [f32; 2] {
+    [(px_x / vp_w) * 2.0 - 1.0, (px_y / vp_h) * 2.0 - 1.0]
+}
+
+fn push_quad_vertices(
+    vertices: &mut Vec<GlyphVertex>,
+    tl: [f32; 2],
+    br: [f32; 2],
+    uv_tl: [f32; 2],
+    uv_br: [f32; 2],
+    fg: [f32; 4],
+    bg: [f32; 4],
+) {
+    let tr = [br[0], tl[1]];
+    let bl = [tl[0], br[1]];
+    let uv_tr = [uv_br[0], uv_tl[1]];
+    let uv_bl = [uv_tl[0], uv_br[1]];
+
+    vertices.push(GlyphVertex {
+        position: tl,
+        tex_coord: uv_tl,
+        fg_color: fg,
+        bg_color: bg,
+    });
+    vertices.push(GlyphVertex {
+        position: bl,
+        tex_coord: uv_bl,
+        fg_color: fg,
+        bg_color: bg,
+    });
+    vertices.push(GlyphVertex {
+        position: br,
+        tex_coord: uv_br,
+        fg_color: fg,
+        bg_color: bg,
+    });
+    vertices.push(GlyphVertex {
+        position: tl,
+        tex_coord: uv_tl,
+        fg_color: fg,
+        bg_color: bg,
+    });
+    vertices.push(GlyphVertex {
+        position: br,
+        tex_coord: uv_br,
+        fg_color: fg,
+        bg_color: bg,
+    });
+    vertices.push(GlyphVertex {
+        position: tr,
+        tex_coord: uv_tr,
+        fg_color: fg,
+        bg_color: bg,
+    });
+}
+
+fn push_pixel_quad(
+    vertices: &mut Vec<GlyphVertex>,
+    vp_w: f32,
+    vp_h: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: [f32; 4],
+    uv: [f32; 2],
+) {
+    push_quad_vertices(
+        vertices,
+        ndc(vp_w, vp_h, x, y),
+        ndc(vp_w, vp_h, x + width, y + height),
+        uv,
+        uv,
+        color,
+        color,
+    );
+}
+
+fn push_antialiased_rounded_pixel_quad(
+    vertices: &mut Vec<GlyphVertex>,
+    vp_w: f32,
+    vp_h: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    radius: f32,
+    color: [f32; 4],
+) {
+    let radius = radius.min(width * 0.5).min(height * 0.5).max(0.0);
+    if radius <= 0.0 {
+        push_pixel_quad(
+            vertices,
+            vp_w,
+            vp_h,
+            x,
+            y,
+            width,
+            height,
+            color,
+            [-1.0, 0.0],
+        );
+        return;
+    }
+
+    let tl = ndc(vp_w, vp_h, x, y);
+    let tr = ndc(vp_w, vp_h, x + width, y);
+    let br = ndc(vp_w, vp_h, x + width, y + height);
+    let bl = ndc(vp_w, vp_h, x, y + height);
+    let uv = [-42.0, radius];
+
+    vertices.extend_from_slice(&[
+        GlyphVertex {
+            position: tl,
+            tex_coord: uv,
+            fg_color: [0.0, 0.0, width, height],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: bl,
+            tex_coord: uv,
+            fg_color: [0.0, height, width, height],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: br,
+            tex_coord: uv,
+            fg_color: [width, height, width, height],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: tl,
+            tex_coord: uv,
+            fg_color: [0.0, 0.0, width, height],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: br,
+            tex_coord: uv,
+            fg_color: [width, height, width, height],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: tr,
+            tex_coord: uv,
+            fg_color: [width, 0.0, width, height],
+            bg_color: color,
+        },
+    ]);
+}
+
+fn tessellate_context_menu(
+    vertices: &mut Vec<GlyphVertex>,
+    atlas: &GlyphAtlas,
+    missing_glyphs: &mut HashSet<GlyphKey>,
+    menu: ContextMenuRenderData<'_>,
+    baseline: f32,
+    cell_w: f32,
+    cell_h: f32,
+    vp_w: f32,
+    vp_h: f32,
+    transparent: bool,
+) {
+    if menu.items.is_empty() || cell_w <= 0.0 || cell_h <= 0.0 {
+        return;
+    }
+
+    tessellate_context_menu_panel(
+        vertices,
+        atlas,
+        missing_glyphs,
+        ContextMenuPanelRenderData {
+            x: menu.x,
+            y: menu.y,
+            width: menu.width,
+            item_height: menu.item_height,
+            hovered_item: menu.hovered_item,
+            items: menu.items,
+        },
+        baseline,
+        cell_w,
+        cell_h,
+        vp_w,
+        vp_h,
+        transparent,
+    );
+
+    if let Some(submenu) = menu.submenu {
+        tessellate_context_menu_panel(
+            vertices,
+            atlas,
+            missing_glyphs,
+            submenu,
+            baseline,
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+            transparent,
+        );
+    }
+}
+
+fn tessellate_context_menu_panel(
+    vertices: &mut Vec<GlyphVertex>,
+    atlas: &GlyphAtlas,
+    missing_glyphs: &mut HashSet<GlyphKey>,
+    menu: ContextMenuPanelRenderData<'_>,
+    baseline: f32,
+    cell_w: f32,
+    cell_h: f32,
+    vp_w: f32,
+    vp_h: f32,
+    transparent: bool,
+) {
+    if menu.items.is_empty() || cell_w <= 0.0 || cell_h <= 0.0 {
+        return;
+    }
+
+    let bg_color = forge_core::color::Color {
+        r: 30,
+        g: 30,
+        b: 46,
+        a: 255,
+    }
+    .to_srgb_linear();
+    let mut background = [bg_color.r, bg_color.g, bg_color.b, bg_color.a];
+    if transparent {
+        background[3] = 0.0;
+    }
+
+    let border = forge_core::color::Color {
+        r: 137,
+        g: 180,
+        b: 250,
+        a: 255,
+    }
+    .to_srgb_linear();
+    let border_color = [border.r, border.g, border.b, border.a];
+
+    let txt = forge_core::color::Color {
+        r: 205,
+        g: 214,
+        b: 244,
+        a: 255,
+    }
+    .to_srgb_linear();
+    let text = [txt.r, txt.g, txt.b, txt.a];
+
+    let hover = border_color;
+    let hover_text = [bg_color.r, bg_color.g, bg_color.b, bg_color.a];
+
+    let max_len = menu
+        .items
+        .iter()
+        .map(|item| {
+            item.label.chars().count()
+                + item
+                    .right_label
+                    .map(|right| right.chars().count() + 1)
+                    .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0);
+    let cols = max_len + 4; // 1 left border, 1 left pad, text, 1 right pad, 1 right border
+    let rows = menu.items.len() + 2; // 1 top border, items, 1 bottom border
+
+    let menu_width = (cols as f32) * cell_w;
+    let menu_height = (rows as f32) * cell_h;
+
+    let x = menu.x.min((vp_w - menu_width).max(0.0)).max(0.0).round();
+    let y = menu.y.min((vp_h - menu_height).max(0.0)).max(0.0).round();
+
+    let bg_uv = [-1.0, 0.0];
+
+    for row in 0..rows {
+        for col in 0..cols {
+            let is_top = row == 0;
+            let is_bottom = row == rows - 1;
+            let is_left = col == 0;
+            let is_right = col == cols - 1;
+
+            let cell_x = x + (col as f32) * cell_w;
+            let cell_y = y + (row as f32) * cell_h;
+
+            let is_border = is_top || is_bottom || is_left || is_right;
+
+            let mut current_bg = background;
+            let mut current_fg = text;
+
+            let item_idx = if !is_border { Some(row - 1) } else { None };
+            let is_hovered = item_idx.is_some() && menu.hovered_item == item_idx;
+
+            if is_hovered {
+                current_bg = hover;
+                current_fg = hover_text;
+            } else if is_border {
+                current_fg = border_color;
+            }
+
+            // Draw Background Quad for this cell
+            push_pixel_quad(
+                vertices, vp_w, vp_h, cell_x, cell_y, cell_w, cell_h, current_bg, bg_uv,
+            );
+
+            // Draw Foreground
+            if is_border {
+                let c = if is_top && is_left {
+                    '\u{250C}'
+                } else if is_top && is_right {
+                    '\u{2510}'
+                } else if is_bottom && is_left {
+                    '\u{2514}'
+                } else if is_bottom && is_right {
+                    '\u{2518}'
+                } else if is_top || is_bottom {
+                    '\u{2500}'
+                } else {
+                    '\u{2502}'
+                };
+
+                if let Some((u, d, l, r, rnd)) = decode_box_drawing(c) {
+                    let encoded = u | (d << 2) | (l << 4) | (r << 6) | ((rnd as u32) << 8);
+                    let proc_id = -100.0 - encoded as f32;
+                    let uv_tl = [proc_id, 0.0];
+                    let uv_br = [proc_id + 1.0, 1.0];
+                    let g_tl = ndc(vp_w, vp_h, cell_x, cell_y);
+                    let g_br = ndc(vp_w, vp_h, cell_x + cell_w, cell_y + cell_h);
+                    push_quad_vertices(vertices, g_tl, g_br, uv_tl, uv_br, current_fg, current_bg);
+                }
+            } else if let Some(idx) = item_idx {
+                let label = menu.items[idx].label;
+                let right_label = menu.items[idx].right_label;
+                let char_idx = col - 2; // padding is col 1, text starts at col 2
+                let mut c = ' ';
+                if col >= 2 && char_idx < label.chars().count() {
+                    c = label.chars().nth(char_idx).unwrap_or(' ');
+                } else if let Some(right_label) = right_label {
+                    let right_len = right_label.chars().count();
+                    let right_start = cols.saturating_sub(2 + right_len);
+                    if col >= right_start && col < right_start + right_len {
+                        c = right_label.chars().nth(col - right_start).unwrap_or(' ');
+                    }
+                }
+
+                if c != ' ' {
+                    if let Some(glyph) = glyph_for(atlas, missing_glyphs, c, is_hovered) {
+                        let glyph_x = (cell_x + glyph.bearing_x as f32).round();
+                        let glyph_y = (cell_y + baseline - glyph.bearing_y as f32).round();
+                        push_quad_vertices(
+                            vertices,
+                            ndc(vp_w, vp_h, glyph_x, glyph_y),
+                            ndc(
+                                vp_w,
+                                vp_h,
+                                glyph_x + glyph.width as f32,
+                                glyph_y + glyph.height as f32,
+                            ),
+                            [glyph.u0, glyph.v0],
+                            [glyph.u1, glyph.v1],
+                            current_fg,
+                            current_fg,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl RowTessellation {
     fn translate_y(&mut self, delta_ndc_y: f32) {
         translate_vertices_y(&mut self.bg_vertices, delta_ndc_y);
@@ -132,12 +833,19 @@ impl GridTessellator {
             rows: Vec::new(),
             row_ranges: Vec::new(),
             scrollbar_range: None,
+            context_menu_range: None,
+            context_menu_fingerprint: 0,
             rebuilt_rows: Vec::new(),
             missing_glyphs: HashSet::new(),
+            missing_shaped_glyphs: HashSet::new(),
+            last_dirty_generations: Vec::new(),
+            last_scroll_id: u64::MAX,
             actual_dirty: Vec::new(),
             last_cursor: None,
             last_cursor_visible: true,
             last_selection: None,
+            ligature_suppressed_cells: Vec::new(),
+            last_geometry: None,
         }
     }
 
@@ -145,9 +853,126 @@ impl GridTessellator {
         &self.missing_glyphs
     }
 
+    pub fn missing_shaped_glyphs(&self) -> &HashSet<ShapedGlyphKey> {
+        &self.missing_shaped_glyphs
+    }
+
+    pub fn prepare_composite_frame(&mut self) {
+        self.vertices.clear();
+        self.row_ranges.clear();
+        self.scrollbar_range = None;
+        self.context_menu_range = None;
+        self.context_menu_fingerprint = 0;
+        self.rebuilt_rows.clear();
+        self.missing_glyphs.clear();
+        self.missing_shaped_glyphs.clear();
+    }
+
+    pub fn append_solid_rect(
+        &mut self,
+        vp_w: f32,
+        vp_h: f32,
+        rect: PixelRect,
+        color: [f32; 4],
+    ) -> Option<VertexRange> {
+        if !rect.has_positive_area() {
+            return None;
+        }
+
+        let start = self.vertices.len();
+        push_pixel_quad(
+            &mut self.vertices,
+            vp_w,
+            vp_h,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            color,
+            [-1.0, 0.0],
+        );
+        Some(VertexRange::new(start, self.vertices.len() - start))
+    }
+
+    pub fn append_scrollbar_overlay(
+        &mut self,
+        vp_w: f32,
+        vp_h: f32,
+        scrollbar: Option<(f32, f32, f32, f32, f32, f32)>,
+    ) {
+        self.scrollbar_range = None;
+
+        let Some((thumb_y, thumb_height, thumb_width, thumb_x, thumb_opacity, track_opacity)) =
+            scrollbar
+        else {
+            return;
+        };
+
+        let start = self.vertices.len();
+        if track_opacity > 0.0 {
+            let track_x = thumb_x;
+            let tl = ndc(vp_w, vp_h, track_x, 4.0);
+            let br = ndc(vp_w, vp_h, track_x + thumb_width, vp_h - 4.0);
+            let uv_tl = [-30.0, 0.0];
+            let uv_br = [-29.0, 1.0];
+            let bg = [0.5, 0.5, 0.5, track_opacity];
+            push_quad_vertices(&mut self.vertices, tl, br, uv_tl, uv_br, bg, bg);
+        }
+
+        if thumb_opacity > 0.0 {
+            let tl = ndc(vp_w, vp_h, thumb_x, thumb_y);
+            let br = ndc(vp_w, vp_h, thumb_x + thumb_width, thumb_y + thumb_height);
+            let uv_tl = [-31.0, 0.0];
+            let uv_br = [-30.0, 1.0];
+            let bg = [0.8, 0.8, 0.8, thumb_opacity * 0.6];
+            push_quad_vertices(&mut self.vertices, tl, br, uv_tl, uv_br, bg, bg);
+        }
+
+        let count = self.vertices.len() - start;
+        if count > 0 {
+            self.scrollbar_range = Some(VertexRange::new(start, count));
+        }
+    }
+
+    pub fn append_context_menu_overlay(
+        &mut self,
+        atlas: &GlyphAtlas,
+        baseline: f32,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+        context_menu: Option<ContextMenuRenderData<'_>>,
+        transparent: bool,
+    ) {
+        self.context_menu_range = None;
+        self.context_menu_fingerprint = context_menu_fingerprint(context_menu.clone());
+
+        if let Some(menu) = context_menu {
+            let start = self.vertices.len();
+            tessellate_context_menu(
+                &mut self.vertices,
+                atlas,
+                &mut self.missing_glyphs,
+                menu,
+                baseline,
+                cell_w,
+                cell_h,
+                vp_w,
+                vp_h,
+                transparent,
+            );
+            let count = self.vertices.len() - start;
+            if count > 0 {
+                self.context_menu_range = Some(VertexRange::new(start, count));
+            }
+        }
+    }
+
     fn apply_scroll_reuse(
         &mut self,
         scroll_event: Option<ScrollEvent>,
+        scroll_id: u64,
         row_count: usize,
         cell_h: f32,
         vp_h: f32,
@@ -156,6 +981,10 @@ impl GridTessellator {
         let Some(event) = scroll_event else {
             return true;
         };
+        if scroll_id == self.last_scroll_id {
+            return true;
+        }
+        self.last_scroll_id = scroll_id;
 
         if !event.full_viewport
             || event.top != 0
@@ -175,23 +1004,28 @@ impl GridTessellator {
         match event.direction {
             ScrollDirection::Up => {
                 self.rows.rotate_left(lines);
+                self.last_dirty_generations.rotate_left(lines);
                 let translate_count = row_count - lines;
                 for row in self.rows.iter_mut().take(translate_count) {
                     row.translate_y(-(lines as f32) * delta_ndc_per_row);
                 }
-                self.actual_dirty.fill(false);
                 for row in row_count - lines..row_count {
-                    self.actual_dirty[row] = true;
+                    if row < self.actual_dirty.len() {
+                        self.actual_dirty[row] = true;
+                    }
                 }
             }
             ScrollDirection::Down => {
                 self.rows.rotate_right(lines);
-                for row in self.rows.iter_mut().skip(lines) {
+                self.last_dirty_generations.rotate_right(lines);
+                let translate_start = lines;
+                for row in self.rows.iter_mut().skip(translate_start) {
                     row.translate_y(lines as f32 * delta_ndc_per_row);
                 }
-                self.actual_dirty.fill(false);
                 for row in 0..lines {
-                    self.actual_dirty[row] = true;
+                    if row < self.actual_dirty.len() {
+                        self.actual_dirty[row] = true;
+                    }
                 }
             }
         }
@@ -203,7 +1037,7 @@ impl GridTessellator {
     pub fn tessellate(
         &mut self,
         grid: &[&[Cell]],
-        dirty_rows: &[bool],
+        dirty_generations: &[u64],
         atlas: &GlyphAtlas,
         cell_w: f32,
         cell_h: f32,
@@ -222,13 +1056,17 @@ impl GridTessellator {
         pad_x: f32,
         pad_y: f32,
         scrollbar: Option<(f32, f32, f32, f32, f32, f32)>, // (thumb_y, thumb_height, thumb_width, thumb_x, thumb_opacity, track_opacity)
+        context_menu: Option<ContextMenuRenderData<'_>>,
+        context_menu_transparent: bool,
         scroll_event: Option<ScrollEvent>,
+        scroll_id: u64,
+        mut ligature_context: Option<&mut LigatureRenderContext<'_>>,
     ) {
         let _span = tracing::trace_span!(
             "renderer.tessellate_grid",
             rows = grid.len(),
             cols = grid.first().map(|row| row.len()).unwrap_or(0),
-            dirty_rows = dirty_rows.iter().filter(|&&dirty| dirty).count()
+            dirty_generations = dirty_generations.iter().filter(|&&dirty| dirty > 0).count()
         )
         .entered();
 
@@ -247,13 +1085,46 @@ impl GridTessellator {
         }
 
         self.actual_dirty.clear();
-        self.actual_dirty.extend_from_slice(dirty_rows);
-        self.actual_dirty.resize(grid.len(), true);
+        self.actual_dirty.resize(grid.len(), false);
+        self.last_dirty_generations.resize(grid.len(), 0);
+        for i in 0..grid.len() {
+            if i < dirty_generations.len() {
+                if dirty_generations[i] > 0
+                    && self.last_dirty_generations[i] != dirty_generations[i]
+                {
+                    self.actual_dirty[i] = true;
+                    self.last_dirty_generations[i] = dirty_generations[i];
+                }
+            }
+        }
+
+        let geometry = RenderGeometryKey::new(
+            grid,
+            cell_w,
+            cell_h,
+            native_cell_w,
+            native_cell_h,
+            baseline,
+            vp_w,
+            vp_h,
+            default_bg,
+            cursor_color,
+            selection_bg,
+            cursor_style,
+            pad_x,
+            pad_y,
+        );
+        if self.last_geometry != Some(geometry) {
+            self.actual_dirty.fill(true);
+            self.last_geometry = Some(geometry);
+        }
+
         self.rebuilt_rows.clear();
         self.missing_glyphs.clear();
+        self.missing_shaped_glyphs.clear();
 
         let can_reuse_scroll =
-            self.apply_scroll_reuse(scroll_event, grid.len(), cell_h, vp_h, selection);
+            self.apply_scroll_reuse(scroll_event, scroll_id, grid.len(), cell_h, vp_h, selection);
         if !can_reuse_scroll && scroll_event.is_some() {
             self.actual_dirty.fill(true);
         }
@@ -323,7 +1194,6 @@ impl GridTessellator {
 
         let inset_x = ((cell_w - native_cell_w).max(0.0) * 0.5).floor();
         let inset_y = ((cell_h - native_cell_h).max(0.0) * 0.5).floor();
-
 
         let ndc = |px_x: f32, px_y: f32| -> [f32; 2] {
             [(px_x / vp_w) * 2.0 - 1.0, (px_y / vp_h) * 2.0 - 1.0]
@@ -446,6 +1316,32 @@ impl GridTessellator {
             let row_px_y = row_idx as f32 * cell_h + pad_y;
             let origin_y = (row_px_y + inset_y).round();
             let mut background_run: Option<(f32, f32, [f32; 4])> = None;
+            self.ligature_suppressed_cells.clear();
+            self.ligature_suppressed_cells.resize(row.len(), false);
+            let mut shaped_vertices = Vec::new();
+            if let Some(context) = ligature_context.as_deref_mut() {
+                plan_ligatures_for_row(
+                    row,
+                    row_idx,
+                    cursor
+                        .map(|(col, row)| (row == row_idx).then_some(col))
+                        .flatten(),
+                    selection,
+                    context,
+                    atlas,
+                    &mut self.missing_shaped_glyphs,
+                    &mut self.ligature_suppressed_cells,
+                    &mut shaped_vertices,
+                    cell_w,
+                    baseline,
+                    origin_y,
+                    inset_x,
+                    pad_x,
+                    &ndc,
+                    &push_quad,
+                    &color_to_f32,
+                );
+            }
 
             for (col_idx, cell) in row.iter().enumerate() {
                 if cell.c == '\0' {
@@ -564,7 +1460,7 @@ impl GridTessellator {
                 }
 
                 let c = cell.c;
-                if c != ' ' {
+                if c != ' ' && !self.ligature_suppressed_cells[col_idx] {
                     if c.is_ascii() {
                         if let Some(glyph) =
                             glyph_for(atlas, &mut self.missing_glyphs, c, cell.is_bold())
@@ -743,10 +1639,13 @@ impl GridTessellator {
             if let Some((start_x, end_x, bg)) = background_run.take() {
                 flush_background_run(row_tess, start_x, end_x, row_px_y, bg);
             }
+            row_tess.fg_vertices.extend(shaped_vertices);
         }
 
         self.vertices.clear();
         self.scrollbar_range = None;
+        self.context_menu_range = None;
+        self.context_menu_fingerprint = context_menu_fingerprint(context_menu);
 
         for (row_idx, row) in self.rows.iter().enumerate() {
             let start = self.vertices.len();
@@ -755,33 +1654,7 @@ impl GridTessellator {
             self.row_ranges[row_idx].generation = row.generation;
         }
 
-        if let Some((thumb_y, thumb_height, thumb_width, thumb_x, thumb_opacity, track_opacity)) =
-            scrollbar
-        {
-            let scrollbar_start = self.vertices.len();
-            if track_opacity > 0.0 {
-                let track_x = thumb_x;
-                let tl = ndc(track_x, 4.0);
-                let br = ndc(track_x + thumb_width, vp_h - 4.0);
-                let uv_tl = [-30.0, 0.0];
-                let uv_br = [-29.0, 1.0];
-                let bg = [0.5, 0.5, 0.5, track_opacity];
-                push_quad(&mut self.vertices, tl, br, uv_tl, uv_br, bg, bg);
-            }
-
-            if thumb_opacity > 0.0 {
-                let tl = ndc(thumb_x, thumb_y);
-                let br = ndc(thumb_x + thumb_width, thumb_y + thumb_height);
-                let uv_tl = [-31.0, 0.0];
-                let uv_br = [-30.0, 1.0];
-                let bg = [0.8, 0.8, 0.8, thumb_opacity * 0.6];
-                push_quad(&mut self.vertices, tl, br, uv_tl, uv_br, bg, bg);
-            }
-            let scrollbar_count = self.vertices.len() - scrollbar_start;
-            if scrollbar_count > 0 {
-                self.scrollbar_range = Some(VertexRange::new(scrollbar_start, scrollbar_count));
-            }
-        }
+        self.append_scrollbar_overlay(vp_w, vp_h, scrollbar);
 
         for (row_idx, row) in self.rows.iter().enumerate() {
             let start = self.vertices.len();
@@ -789,6 +1662,17 @@ impl GridTessellator {
             self.row_ranges[row_idx].fg = VertexRange::new(start, row.fg_vertices.len());
             self.row_ranges[row_idx].generation = row.generation;
         }
+
+        self.append_context_menu_overlay(
+            atlas,
+            baseline,
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+            context_menu,
+            context_menu_transparent,
+        );
 
         tracing::trace!(
             vertices = self.vertices.len(),
@@ -985,6 +1869,7 @@ mod tests {
             atlas_height: 1,
             glyphs,
             glyphs_bold: HashMap::new(),
+            shaped_glyphs: HashMap::new(),
             descriptor: GlyphAtlasDescriptor::dummy(),
             atlas_cell_width: 1,
             atlas_cell_height: 1,
@@ -1026,26 +1911,27 @@ mod tests {
         atlas: &GlyphAtlas,
         grid: &[Vec<Cell>],
     ) {
-        let dirty_rows = vec![true; grid.len()];
-        tessellate_test_grid_with_dirty(tessellator, atlas, grid, &dirty_rows, None);
+        let dirty_generations = vec![1; grid.len()];
+        tessellate_test_grid_with_dirty(tessellator, atlas, grid, &dirty_generations, None);
     }
 
     fn tessellate_test_grid_with_dirty(
         tessellator: &mut GridTessellator,
         atlas: &GlyphAtlas,
         grid: &[Vec<Cell>],
-        dirty_rows: &[bool],
+        dirty_generations: &[u64],
         scrollbar: Option<(f32, f32, f32, f32, f32, f32)>,
     ) {
         tessellate_test_grid_with_cursor(
             tessellator,
             atlas,
             grid,
-            dirty_rows,
+            dirty_generations,
             Some((1, 1)),
             true,
             scrollbar,
             None,
+            0,
         );
     }
 
@@ -1053,16 +1939,17 @@ mod tests {
         tessellator: &mut GridTessellator,
         atlas: &GlyphAtlas,
         grid: &[Vec<Cell>],
-        dirty_rows: &[bool],
+        dirty_generations: &[u64],
         cursor: Option<(usize, usize)>,
         cursor_visible: bool,
         scrollbar: Option<(f32, f32, f32, f32, f32, f32)>,
         scroll_event: Option<ScrollEvent>,
+        scroll_id: u64,
     ) {
         let refs: Vec<&[Cell]> = grid.iter().map(Vec::as_slice).collect();
         tessellator.tessellate(
             &refs,
-            dirty_rows,
+            dirty_generations,
             atlas,
             10.0,
             20.0,
@@ -1081,7 +1968,11 @@ mod tests {
             4.0,
             4.0,
             scrollbar,
+            None,
+            false,
             scroll_event,
+            scroll_id,
+            None,
         );
     }
 
@@ -1164,7 +2055,7 @@ mod tests {
             &mut tessellator,
             &atlas,
             &grid,
-            &[true, true, true],
+            &[1, 1, 1],
             Some((20.0, 80.0, 5.0, 1180.0, 1.0, 0.5)),
         );
 
@@ -1216,11 +2107,12 @@ mod tests {
             &mut tessellator,
             &atlas,
             &grid,
-            &[true],
+            &[1],
             None,
             false,
             None,
             None,
+            0,
         );
 
         assert_eq!(tessellator.rows[0].bg_vertices.len(), 6);
@@ -1250,11 +2142,12 @@ mod tests {
             &mut tessellator,
             &atlas,
             &grid,
-            &[true],
+            &[1],
             None,
             false,
             None,
             None,
+            0,
         );
 
         assert_eq!(tessellator.rows[0].bg_vertices.len(), 18);
@@ -1266,20 +2159,14 @@ mod tests {
         let grid = test_grid(8, 3);
         let mut tessellator = GridTessellator::new(8 * 3);
 
-        tessellate_test_grid_with_dirty(&mut tessellator, &atlas, &grid, &[true, true, true], None);
+        tessellate_test_grid_with_dirty(&mut tessellator, &atlas, &grid, &[1, 1, 1], None);
         let first_generations: Vec<u64> = tessellator
             .row_ranges
             .iter()
             .map(|ranges| ranges.generation)
             .collect();
 
-        tessellate_test_grid_with_dirty(
-            &mut tessellator,
-            &atlas,
-            &grid,
-            &[false, true, false],
-            None,
-        );
+        tessellate_test_grid_with_dirty(&mut tessellator, &atlas, &grid, &[0, 2, 0], None);
         let second_generations: Vec<u64> = tessellator
             .row_ranges
             .iter()
@@ -1292,6 +2179,72 @@ mod tests {
     }
 
     #[test]
+    fn geometry_change_rebuilds_rows_even_when_dirty_generations_are_unchanged() {
+        let atlas = test_atlas();
+        let grid = test_grid(8, 3);
+        let refs: Vec<&[Cell]> = grid.iter().map(Vec::as_slice).collect();
+        let mut tessellator = GridTessellator::new(8 * 3);
+
+        tessellator.tessellate(
+            &refs,
+            &[1, 1, 1],
+            &atlas,
+            10.0,
+            20.0,
+            10.0,
+            20.0,
+            15.0,
+            1200.0,
+            800.0,
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            None,
+            forge_core::config_registry::CursorStyle::Block,
+            false,
+            None,
+            [0.2, 0.2, 0.2, 1.0],
+            4.0,
+            4.0,
+            None,
+            None,
+            false,
+            None,
+            0,
+            None,
+        );
+
+        tessellator.tessellate(
+            &refs,
+            &[1, 1, 1],
+            &atlas,
+            10.0,
+            20.0,
+            10.0,
+            20.0,
+            15.0,
+            900.0,
+            800.0,
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            None,
+            forge_core::config_registry::CursorStyle::Block,
+            false,
+            None,
+            [0.2, 0.2, 0.2, 1.0],
+            4.0,
+            4.0,
+            None,
+            None,
+            false,
+            None,
+            0,
+            None,
+        );
+
+        assert_eq!(tessellator.rebuilt_rows, vec![0, 1, 2]);
+    }
+
+    #[test]
     fn cursor_blink_rebuilds_only_cursor_row_when_cells_are_clean() {
         let atlas = test_atlas();
         let grid = test_grid(8, 3);
@@ -1301,21 +2254,23 @@ mod tests {
             &mut tessellator,
             &atlas,
             &grid,
-            &[true, true, true],
+            &[1, 1, 1],
             Some((1, 1)),
             true,
             None,
             None,
+            0,
         );
         tessellate_test_grid_with_cursor(
             &mut tessellator,
             &atlas,
             &grid,
-            &[false, false, false],
+            &[0, 0, 0],
             Some((1, 1)),
             false,
             None,
             None,
+            0,
         );
 
         assert_eq!(tessellator.rebuilt_rows, vec![1]);
@@ -1331,21 +2286,23 @@ mod tests {
             &mut tessellator,
             &atlas,
             &grid,
-            &[true, true, true, true],
+            &[1, 1, 1, 1],
             Some((1, 1)),
             true,
             None,
             None,
+            0,
         );
         tessellate_test_grid_with_cursor(
             &mut tessellator,
             &atlas,
             &grid,
-            &[false, false, false, false],
+            &[0, 0, 0, 0],
             Some((1, 2)),
             true,
             None,
             None,
+            0,
         );
 
         assert_eq!(tessellator.rebuilt_rows, vec![1, 2]);
@@ -1363,11 +2320,12 @@ mod tests {
             &mut tessellator,
             &atlas,
             &grid,
-            &[true, true, true, true],
+            &[1, 1, 1, 1],
             None,
             true,
             None,
             None,
+            0,
         );
         let initial_generations: Vec<u64> = tessellator
             .row_ranges
@@ -1379,7 +2337,7 @@ mod tests {
             &mut tessellator,
             &atlas,
             &scrolled_grid,
-            &[true, true, true, true],
+            &[1, 1, 1, 1],
             None,
             true,
             None,
@@ -1390,6 +2348,7 @@ mod tests {
                 lines: 1,
                 full_viewport: true,
             }),
+            0,
         );
 
         assert_eq!(tessellator.rebuilt_rows, vec![3]);
@@ -1419,11 +2378,12 @@ mod tests {
             &mut tessellator,
             &atlas,
             &grid,
-            &[true, true, true, true],
+            &[1, 1, 1, 1],
             None,
             true,
             None,
             None,
+            0,
         );
         let initial_generations: Vec<u64> = tessellator
             .row_ranges
@@ -1435,7 +2395,7 @@ mod tests {
             &mut tessellator,
             &atlas,
             &scrolled_grid,
-            &[true, true, true, true],
+            &[1, 1, 1, 1],
             None,
             true,
             None,
@@ -1446,6 +2406,7 @@ mod tests {
                 lines: 1,
                 full_viewport: true,
             }),
+            0,
         );
 
         assert_eq!(tessellator.rebuilt_rows, vec![0]);
@@ -1472,7 +2433,7 @@ mod tests {
 
         tessellator.tessellate(
             &refs,
-            &[true, true, true, true],
+            &[1, 1, 1, 1],
             &atlas,
             10.0,
             20.0,
@@ -1496,6 +2457,8 @@ mod tests {
             4.0,
             4.0,
             None,
+            None,
+            false,
             Some(ScrollEvent {
                 direction: ScrollDirection::Up,
                 top: 0,
@@ -1503,6 +2466,8 @@ mod tests {
                 lines: 1,
                 full_viewport: true,
             }),
+            0,
+            None,
         );
 
         assert_eq!(tessellator.rebuilt_rows, vec![0, 1, 2, 3]);
@@ -1530,12 +2495,12 @@ mod tests {
             flags: 0,
         }]];
         let refs: Vec<&[Cell]> = grid.iter().map(Vec::as_slice).collect();
-        let dirty_rows = vec![true];
+        let dirty_generations = vec![1];
         let mut tessellator = GridTessellator::new(1);
 
         tessellator.tessellate(
             &refs,
-            &dirty_rows,
+            &dirty_generations,
             &atlas,
             10.5,
             21.5,
@@ -1554,6 +2519,10 @@ mod tests {
             4.25,
             3.75,
             None,
+            None,
+            false,
+            None,
+            0,
             None,
         );
 
@@ -1608,7 +2577,7 @@ mod tests {
 
         tessellator.tessellate(
             &refs,
-            &[true],
+            &[1],
             &atlas,
             10.0,
             20.0,
@@ -1627,6 +2596,10 @@ mod tests {
             0.0,
             0.0,
             None,
+            None,
+            false,
+            None,
+            0,
             None,
         );
 
@@ -1663,7 +2636,7 @@ mod tests {
 
         tessellator.tessellate(
             &refs,
-            &[true],
+            &[1],
             &atlas,
             10.0,
             20.0,
@@ -1682,6 +2655,10 @@ mod tests {
             0.0,
             0.0,
             None,
+            None,
+            false,
+            None,
+            0,
             None,
         );
 

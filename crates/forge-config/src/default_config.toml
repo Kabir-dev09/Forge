@@ -1,0 +1,136 @@
+[font]
+family = "monospace"
+size = 14.0
+nerd_fonts = true
+
+[font.ligatures]
+enabled = false
+mode = "cursor-aware"
+features = ["liga", "clig", "calt"]
+max_token_len = 64
+cache_entries = 4096
+
+[window]
+width = 800
+height = 600
+opacity = 1.0
+title = "Forge"
+decorations = true
+padding_balance = "center"
+gap = 0
+pane_outline_width = 1.0
+
+[window.padding]
+top = 4
+bottom = 4
+left = 4
+right = 4
+
+[window.pane_padding]
+top = 0
+bottom = 0
+left = 0
+right = 0
+
+[blur]
+enabled = false
+method = "auto"
+radius = 0
+
+[cursor]
+style = "block"
+blink = true
+blink_rate_ms = 530
+
+[scrollback]
+lines = 10000
+smooth_scroll = true
+scroll_multiplier = 3.0
+
+[shell]
+# program defaults to $SHELL when omitted.
+args = []
+
+[shell.env]
+
+[behavior]
+copy_on_select = false
+disable_default_keybindings = false
+hide_mouse_when_typing = false
+
+[panes]
+mode = "tiling"
+
+[render]
+braille_style = "dots"
+context_menu_transparent = false
+
+[confirm_close]
+background_mode = "opaque_panel"
+panel_color = "#0b1020"
+selected_color = "#facc15"
+
+[colors]
+background = "#1a1b26"
+foreground = "#c0caf5"
+cursor_color = "#c0caf5"
+selection_bg = "#414868c8"
+pane_outline_active = "#89b4fa"
+pane_outline_inactive = "#6c7086"
+
+[colors.normal]
+black = "#414868"
+red = "#f7768e"
+green = "#9ece6a"
+yellow = "#e0af68"
+blue = "#7aa2f7"
+magenta = "#bb9af7"
+cyan = "#7dcfff"
+white = "#c0caf5"
+
+[colors.bright]
+black = "#414868"
+red = "#f7768e"
+green = "#9ece6a"
+yellow = "#e0af68"
+blue = "#7aa2f7"
+magenta = "#bb9af7"
+cyan = "#7dcfff"
+white = "#c0caf5"
+
+[status_bar]
+enabled = true
+position = "bottom"
+placement = "inside"
+background = "transparent"
+foreground = "#cdd6f4"
+
+[[status_bar.left]]
+[status_bar.left.tabs]
+format = " {index}{zoom} "
+zoom_indicator = "()"
+
+[status_bar.left.tabs.active]
+fg = "#1e1e2e"
+bg = "#89b4fa"
+
+[status_bar.left.tabs.inactive]
+fg = "#a6adc8"
+
+[[status_bar.left]]
+text = " + "
+action = "NewTab"
+
+[keybindings]
+copy = "ctrl+shift+c"
+paste = "ctrl+shift+v"
+toggle_fullscreen = "f11"
+split_vertical = "ctrl+shift+backslash"
+split_horizontal = "ctrl+shift+minus"
+toggle_pane_zoom = "ctrl+shift+z"
+toggle_sidebar = "ctrl+shift+b"
+close_pane = "ctrl+shift+q"
+new_tab = "ctrl+shift+t"
+close_tab = "ctrl+shift+w"
+next_tab = "ctrl+pagedown"
+previous_tab = "ctrl+pageup"
