@@ -1,9 +1,0 @@
-rust (cargo/rustc)
-c-compiler (gcc/clang)
-cmake
-pkg-config
-shaderc
-vulkan-headers
-wayland-protocols
-wayland-client (development headers)
-xkbcommon (development headers)

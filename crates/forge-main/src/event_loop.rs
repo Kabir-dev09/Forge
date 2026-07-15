@@ -3230,34 +3230,41 @@ pub fn run_event_loop(
                             {
                                 let col = ((ptr_x - metrics.pad_x) / metrics.effective_cell_w)
                                     .max(0.0) as usize;
+                                let mut action_to_execute = None;
                                 for region in &app_data.statusbar.click_regions {
                                     if col >= region.start_col && col < region.end_col {
-                                        if region.action.starts_with("SwitchTab") {
-                                            if let Ok(idx) =
-                                                region.action["SwitchTab".len()..].parse::<usize>()
-                                            {
-                                                if idx > 0 {
-                                                    let target = idx - 1;
-                                                    if target < app_data.tab_manager.tabs.len() {
-                                                        if app_data.tab_manager.active_tab_index
-                                                            != target
-                                                        {
-                                                            app_data.tab_manager.active_tab_index =
-                                                                target;
-                                                            app_data.pane_io.visible_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
-                                                            app_data.force_immediate_render = true;
-                                                            app_data.wayland_state.force_redraw =
-                                                                true;
-                                                        }
+                                        action_to_execute = Some(region.action.clone());
+                                        break;
+                                    }
+                                }
+
+                                if let Some(action) = action_to_execute {
+                                    if action.starts_with("SwitchTab") {
+                                        if let Ok(idx) =
+                                            action["SwitchTab".len()..].parse::<usize>()
+                                        {
+                                            if idx > 0 {
+                                                let target = idx - 1;
+                                                if target < app_data.tab_manager.tabs.len() {
+                                                    if app_data.tab_manager.active_tab_index
+                                                        != target
+                                                    {
+                                                        app_data.tab_manager.active_tab_index =
+                                                            target;
+                                                        sync_scrolling_active_tab(&mut app_data);
+                                                        app_data.pane_io.visible_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
+                                                        app_data.force_immediate_render = true;
+                                                        app_data.wayland_state.force_redraw =
+                                                            true;
                                                     }
                                                 }
                                             }
-                                        } else if region.action == "NewTab" {
-                                            app_data
-                                                .wayland_state
-                                                .pending_tab_actions
-                                                .push(forge_core::bindings::Action::NewTab);
                                         }
+                                    } else if action == "NewTab" {
+                                        app_data
+                                            .wayland_state
+                                            .pending_tab_actions
+                                            .push(forge_core::bindings::Action::NewTab);
                                     }
                                 }
                                 continue;
