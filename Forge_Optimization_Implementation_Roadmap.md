@@ -196,7 +196,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 ## Phase 3: Data Structure Improvements
 
-### 3.1 Ring-Buffer Scrollback
+### 3.1 Ring-Buffer Scrollback (COMPLETED)
 
 **Objective:** Remove expensive front-removal behavior from scrollback.
 
@@ -221,7 +221,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 **Benefit:** Better sustained output performance and scalability.
 
-### 3.2 Primary Grid Ring Or Row Rotation
+### 3.2 Primary Grid Ring Or Row Rotation (COMPLETED)
 
 **Objective:** Avoid row movement during normal scrolling.
 
@@ -275,7 +275,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 ## Phase 4: Tessellation Structure
 
-### 4.1 Table-Driven Box Drawing Metadata
+### 4.1 Table-Driven Box Drawing Metadata (COMPLETED)
 
 **Objective:** Replace bulky box-drawing match with compact metadata lookup.
 

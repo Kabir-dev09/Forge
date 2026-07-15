@@ -603,17 +603,20 @@ impl ScreenBuffer {
         } else {
             // Partial-region scroll (less common, e.g. scrolling regions).
             let default = self.default_cell();
-            for _ in 0..n {
-                self.grid.remove(top);
-                self.grid.insert(
-                    bottom,
-                    Row {
-                        cells: vec![default; self.cols].into_boxed_slice(),
-                        len: 0,
-                        wrapped: false,
-                        reflowable: false,
-                    },
-                );
+            self.grid.make_contiguous();
+            let slice = self.grid.as_mut_slices().0;
+            slice[top..=bottom].rotate_left(n);
+
+            for r in &mut slice[bottom + 1 - n..=bottom] {
+                let old_len = r.len.min(self.cols);
+                if old_len < self.cols && r.cells[self.cols.saturating_sub(1)] != default {
+                    r.cells.fill(default);
+                } else {
+                    r.cells[..old_len].fill(default);
+                }
+                r.len = 0;
+                r.wrapped = false;
+                r.reflowable = false;
             }
         }
 
@@ -656,8 +659,8 @@ impl ScreenBuffer {
         let can_reuse_scroll =
             self.scroll_reuse_is_safe_before_scroll(top, bottom, ScrollDirection::Down);
 
-        for _ in 0..n {
-            if top == 0 && bottom == self.rows - 1 {
+        if top == 0 && bottom == self.rows - 1 {
+            for _ in 0..n {
                 if let Some(mut r) = self.grid.pop_back() {
                     let default = self.default_cell();
                     let old_len = r.len.min(self.cols);
@@ -678,17 +681,23 @@ impl ScreenBuffer {
                         reflowable: false,
                     });
                 }
-            } else {
-                self.grid.remove(bottom);
-                self.grid.insert(
-                    top,
-                    Row {
-                        cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
-                        len: 0,
-                        wrapped: false,
-                        reflowable: false,
-                    },
-                );
+            }
+        } else {
+            let default = self.default_cell();
+            self.grid.make_contiguous();
+            let slice = self.grid.as_mut_slices().0;
+            slice[top..=bottom].rotate_right(n);
+
+            for r in &mut slice[top..top + n] {
+                let old_len = r.len.min(self.cols);
+                if old_len < self.cols && r.cells[self.cols.saturating_sub(1)] != default {
+                    r.cells.fill(default);
+                } else {
+                    r.cells[..old_len].fill(default);
+                }
+                r.len = 0;
+                r.wrapped = false;
+                r.reflowable = false;
             }
         }
         if can_reuse_scroll {
@@ -716,9 +725,6 @@ impl ScreenBuffer {
         }
     }
 
-    // TODO(PERF-04): insert_lines/delete_lines use O(n) VecDeque shifts.
-    // We should use a more efficient rotation or split_off/extend approach
-    // for VecDeque instead of inserting elements one by one.
     pub fn insert_lines(&mut self, n: usize) {
         let top = self.cursor.row.max(self.margin_top);
         let bottom = self.margin_bottom;
@@ -728,18 +734,24 @@ impl ScreenBuffer {
         self.pending_scroll = None;
         self.scroll_id = self.scroll_id.wrapping_add(1);
         let count = n.min(bottom - top + 1);
-        for _ in 0..count {
-            self.grid.remove(bottom);
-            self.grid.insert(
-                top,
-                Row {
-                    cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
-                    len: 0,
-                    wrapped: false,
-                    reflowable: false,
-                },
-            );
+
+        let default = self.default_cell();
+        self.grid.make_contiguous();
+        let slice = self.grid.as_mut_slices().0;
+        slice[top..=bottom].rotate_right(count);
+
+        for r in &mut slice[top..top + count] {
+            let old_len = r.len.min(self.cols);
+            if old_len < self.cols && r.cells[self.cols.saturating_sub(1)] != default {
+                r.cells.fill(default);
+            } else {
+                r.cells[..old_len].fill(default);
+            }
+            r.len = 0;
+            r.wrapped = false;
+            r.reflowable = false;
         }
+
         for r in top..=bottom {
             self.dirty_generations[r] = self.dirty_generations[r].wrapping_add(1);
         }
@@ -754,18 +766,24 @@ impl ScreenBuffer {
         self.pending_scroll = None;
         self.scroll_id = self.scroll_id.wrapping_add(1);
         let count = n.min(bottom - top + 1);
-        for _ in 0..count {
-            self.grid.remove(top);
-            self.grid.insert(
-                bottom,
-                Row {
-                    cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
-                    len: 0,
-                    wrapped: false,
-                    reflowable: false,
-                },
-            );
+
+        let default = self.default_cell();
+        self.grid.make_contiguous();
+        let slice = self.grid.as_mut_slices().0;
+        slice[top..=bottom].rotate_left(count);
+
+        for r in &mut slice[bottom + 1 - count..=bottom] {
+            let old_len = r.len.min(self.cols);
+            if old_len < self.cols && r.cells[self.cols.saturating_sub(1)] != default {
+                r.cells.fill(default);
+            } else {
+                r.cells[..old_len].fill(default);
+            }
+            r.len = 0;
+            r.wrapped = false;
+            r.reflowable = false;
         }
+
         for r in top..=bottom {
             self.dirty_generations[r] = self.dirty_generations[r].wrapping_add(1);
         }
