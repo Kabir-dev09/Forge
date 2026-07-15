@@ -1477,138 +1477,31 @@ impl GridTessellator {
                             );
                         }
                     } else {
-                        match c {
-                            '\u{2580}'..='\u{259F}' => {
-                                let mut block_tl_x = px_x;
-                                let mut block_tl_y = px_y;
-                                let mut block_br_x = px_x + cell_w;
-                                let mut block_br_y = px_y + cell_h;
-
-                                match c {
-                                    '\u{2580}' => block_br_y = px_y + (cell_h / 2.0), // Upper Half
-                                    '\u{2581}'..='\u{2587}' => {
-                                        // Lower fractions
-                                        let step = (c as u32 - 0x2580) as f32;
-                                        let h = (cell_h * step) / 8.0;
-                                        block_tl_y = px_y + cell_h - h;
-                                    }
-                                    '\u{2588}'..='\u{258F}' => {
-                                        // Left fractions (including Full Block)
-                                        let step = 8.0 - (c as u32 - 0x2588) as f32;
-                                        let w = (cell_w * step) / 8.0;
-                                        block_br_x = px_x + w;
-                                    }
-                                    '\u{2590}' => block_tl_x = px_x + (cell_w / 2.0), // Right Half
-                                    '\u{2594}' => {
-                                        // Upper One Eighth
-                                        let h = cell_h / 8.0;
-                                        block_br_y = px_y + h;
-                                    }
-                                    '\u{2595}' => {
-                                        // Right One Eighth
-                                        let w = cell_w / 8.0;
-                                        block_tl_x = px_x + cell_w - w;
-                                    }
-                                    _ => {} // Fallback to full block
-                                }
-
-                                let g_tl = ndc(block_tl_x, block_tl_y);
-                                let g_br = ndc(block_br_x, block_br_y);
-                                let uv = [-1.0, 0.0];
-                                push_quad(&mut row_tess.fg_vertices, g_tl, g_br, uv, uv, fg, fg);
-                            }
-                            '\u{E0B0}' | '\u{E0B2}' | '\u{E0B4}' | '\u{E0B6}' | '\u{E0B8}'
-                            | '\u{E0BA}' | '\u{E0BC}' | '\u{E0BE}' => {
-                                let mut g_x = px_x;
-                                let mut g_w = cell_w;
-
-                                // Right-pointing shapes bleed right
-                                if c == '\u{E0B0}'
-                                    || c == '\u{E0B4}'
-                                    || c == '\u{E0B8}'
-                                    || c == '\u{E0BC}'
-                                {
-                                    g_w += 1.0;
-                                }
-                                // Left-pointing shapes bleed left
-                                else {
-                                    g_x -= 1.0;
-                                    g_w += 1.0;
-                                }
-
-                                let g_tl = ndc(g_x, px_y);
-                                let g_br = ndc(g_x + g_w, px_y + cell_h);
-                                let proc_id = match c {
-                                    '\u{E0B0}' => -2.0,
-                                    '\u{E0B2}' => -3.0,
-                                    '\u{E0B4}' => -4.0,
-                                    '\u{E0B6}' => -5.0,
-                                    '\u{E0B8}' => -6.0,
-                                    '\u{E0BA}' => -7.0,
-                                    '\u{E0BC}' => -8.0,
-                                    '\u{E0BE}' => -9.0,
-                                    _ => unreachable!(),
-                                };
-                                let uv_tl = [proc_id, 0.0];
-                                let uv_br = [proc_id + 1.0, 1.0];
-                                push_quad(
+                        if !tessellate_procedural_glyph(
+                            c,
+                            px_x,
+                            px_y,
+                            cell_w,
+                            cell_h,
+                            fg,
+                            bg,
+                            &mut row_tess.fg_vertices,
+                            &ndc,
+                            &push_quad,
+                        ) {
+                            if let Some(glyph) =
+                                glyph_for(atlas, &mut self.missing_glyphs, c, cell.is_bold())
+                            {
+                                push_atlas_glyph(
                                     &mut row_tess.fg_vertices,
-                                    g_tl,
-                                    g_br,
-                                    uv_tl,
-                                    uv_br,
+                                    c,
+                                    cell,
+                                    glyph,
+                                    px_x,
+                                    origin_y,
                                     fg,
                                     bg,
                                 );
-                            }
-                            _ => {
-                                if let Some((u, d, l, r, rnd)) = decode_box_drawing(c) {
-                                    let g_tl = ndc(px_x, px_y);
-                                    let g_br = ndc(px_x + cell_w, px_y + cell_h);
-                                    let encoded =
-                                        u | (d << 2) | (l << 4) | (r << 6) | ((rnd as u32) << 8);
-                                    let proc_id = -100.0 - encoded as f32;
-                                    let uv_tl = [proc_id, 0.0];
-                                    let uv_br = [proc_id + 1.0, 1.0];
-                                    push_quad(
-                                        &mut row_tess.fg_vertices,
-                                        g_tl,
-                                        g_br,
-                                        uv_tl,
-                                        uv_br,
-                                        fg,
-                                        bg,
-                                    );
-                                } else if ('\u{2800}'..='\u{28FF}').contains(&c) {
-                                    let pattern = c as u32 - 0x2800;
-                                    let g_tl = ndc(px_x, px_y);
-                                    let g_br = ndc(px_x + cell_w, px_y + cell_h);
-                                    let proc_id = -500.0 - pattern as f32;
-                                    let uv_tl = [proc_id, 0.0];
-                                    let uv_br = [proc_id + 1.0, 1.0];
-                                    push_quad(
-                                        &mut row_tess.fg_vertices,
-                                        g_tl,
-                                        g_br,
-                                        uv_tl,
-                                        uv_br,
-                                        fg,
-                                        bg,
-                                    );
-                                } else if let Some(glyph) =
-                                    glyph_for(atlas, &mut self.missing_glyphs, c, cell.is_bold())
-                                {
-                                    push_atlas_glyph(
-                                        &mut row_tess.fg_vertices,
-                                        c,
-                                        cell,
-                                        glyph,
-                                        px_x,
-                                        origin_y,
-                                        fg,
-                                        bg,
-                                    );
-                                }
                             }
                         }
                     }
@@ -2663,5 +2556,122 @@ mod tests {
         );
 
         assert!(tessellator.missing_glyphs().is_empty());
+    }
+}
+
+#[inline(always)]
+fn tessellate_procedural_glyph(
+    c: char,
+    px_x: f32,
+    px_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    fg: [f32; 4],
+    bg: [f32; 4],
+    vertices: &mut Vec<GlyphVertex>,
+    ndc: &impl Fn(f32, f32) -> [f32; 2],
+    push_quad: &impl Fn(&mut Vec<GlyphVertex>, [f32; 2], [f32; 2], [f32; 2], [f32; 2], [f32; 4], [f32; 4]),
+) -> bool {
+    match c {
+        '\u{2580}'..='\u{259F}' => {
+            let mut block_tl_x = px_x;
+            let mut block_tl_y = px_y;
+            let mut block_br_x = px_x + cell_w;
+            let mut block_br_y = px_y + cell_h;
+
+            match c {
+                '\u{2580}' => block_br_y = px_y + (cell_h / 2.0), // Upper Half
+                '\u{2581}'..='\u{2587}' => {
+                    // Lower fractions
+                    let step = (c as u32 - 0x2580) as f32;
+                    let h = (cell_h * step) / 8.0;
+                    block_tl_y = px_y + cell_h - h;
+                }
+                '\u{2588}'..='\u{258F}' => {
+                    // Left fractions (including Full Block)
+                    let step = 8.0 - (c as u32 - 0x2588) as f32;
+                    let w = (cell_w * step) / 8.0;
+                    block_br_x = px_x + w;
+                }
+                '\u{2590}' => block_tl_x = px_x + (cell_w / 2.0), // Right Half
+                '\u{2594}' => {
+                    // Upper One Eighth
+                    let h = cell_h / 8.0;
+                    block_br_y = px_y + h;
+                }
+                '\u{2595}' => {
+                    // Right One Eighth
+                    let w = cell_w / 8.0;
+                    block_tl_x = px_x + cell_w - w;
+                }
+                _ => {} // Fallback to full block
+            }
+
+            let g_tl = ndc(block_tl_x, block_tl_y);
+            let g_br = ndc(block_br_x, block_br_y);
+            let uv = [-1.0, 0.0];
+            push_quad(vertices, g_tl, g_br, uv, uv, fg, fg);
+            true
+        }
+        '\u{E0B0}' | '\u{E0B2}' | '\u{E0B4}' | '\u{E0B6}' | '\u{E0B8}'
+        | '\u{E0BA}' | '\u{E0BC}' | '\u{E0BE}' => {
+            let mut g_x = px_x;
+            let mut g_w = cell_w;
+
+            // Right-pointing shapes bleed right
+            if c == '\u{E0B0}'
+                || c == '\u{E0B4}'
+                || c == '\u{E0B8}'
+                || c == '\u{E0BC}'
+            {
+                g_w += 1.0;
+            }
+            // Left-pointing shapes bleed left
+            else {
+                g_x -= 1.0;
+                g_w += 1.0;
+            }
+
+            let g_tl = ndc(g_x, px_y);
+            let g_br = ndc(g_x + g_w, px_y + cell_h);
+            let proc_id = match c {
+                '\u{E0B0}' => -2.0,
+                '\u{E0B2}' => -3.0,
+                '\u{E0B4}' => -4.0,
+                '\u{E0B6}' => -5.0,
+                '\u{E0B8}' => -6.0,
+                '\u{E0BA}' => -7.0,
+                '\u{E0BC}' => -8.0,
+                '\u{E0BE}' => -9.0,
+                _ => unreachable!(),
+            };
+            let uv_tl = [proc_id, 0.0];
+            let uv_br = [proc_id + 1.0, 1.0];
+            push_quad(vertices, g_tl, g_br, uv_tl, uv_br, fg, bg);
+            true
+        }
+        _ => {
+            if let Some((u, d, l, r, rnd)) = decode_box_drawing(c) {
+                let g_tl = ndc(px_x, px_y);
+                let g_br = ndc(px_x + cell_w, px_y + cell_h);
+                let encoded = u | (d << 2) | (l << 4) | (r << 6) | ((rnd as u32) << 8);
+                let proc_id = -100.0 - encoded as f32;
+                let uv_tl = [proc_id, 0.0];
+                let uv_br = [proc_id + 1.0, 1.0];
+                push_quad(vertices, g_tl, g_br, uv_tl, uv_br, fg, bg);
+                true
+            } else if ('\u{2800}'..='\u{28FF}').contains(&c) {
+                let pattern = c as u32 - 0x2800;
+                let g_tl = ndc(px_x, px_y);
+                let g_br = ndc(px_x + cell_w, px_y + cell_h);
+                let proc_id = -500.0 - pattern as f32;
+                let uv_tl = [proc_id, 0.0];
+                let uv_br = [proc_id + 1.0, 1.0];
+                push_quad(vertices, g_tl, g_br, uv_tl, uv_br, fg, bg);
+                true
+            } else {
+                false
+            }
+        }
     }
 }

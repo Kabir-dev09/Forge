@@ -300,7 +300,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 **Benefit:** Better maintainability and possible branch reduction.
 
-### 4.2 Split Common ASCII And Procedural Paths
+### 4.2 Split Common ASCII And Procedural Paths (COMPLETED)
 
 **Objective:** Make the common glyph path simpler and keep uncommon procedural rendering isolated.
 
