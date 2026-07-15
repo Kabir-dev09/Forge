@@ -12,3 +12,12 @@
 *.swp
 *.swo
 t
+
+# Temporary files and scripts
+*.py
+*.json
+*.log
+ayg
+forge-installer
+.agents/
+.codex/
