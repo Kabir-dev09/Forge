@@ -70,18 +70,24 @@ impl Scrollback {
 
         if self.len < self.max_len {
             let index = (self.start + self.len) % self.max_len;
-            if index == self.rows.len() {
+            let rows_len = self.rows.len();
+            if index == rows_len {
                 self.rows.push(row);
                 self.len += 1;
                 return None;
             } else {
-                let old = std::mem::replace(&mut self.rows[index], row);
+                let cell_ref = self.rows.get_mut(index)
+                    .unwrap_or_else(|| panic!("Scrollback logic out of sync: index {} >= rows.len() {}, max_len {}", index, rows_len, self.max_len));
+                let old = std::mem::replace(cell_ref, row);
                 self.len += 1;
                 return Some(old);
             }
         }
 
-        let old = std::mem::replace(&mut self.rows[self.start], row);
+        let rows_len = self.rows.len();
+        let cell_ref = self.rows.get_mut(self.start)
+            .unwrap_or_else(|| panic!("Scrollback logic out of sync: start {} >= rows.len() {}, max_len {}", self.start, rows_len, self.max_len));
+        let old = std::mem::replace(cell_ref, row);
         self.start = (self.start + 1) % self.max_len;
         Some(old)
     }
@@ -565,8 +571,14 @@ impl ScreenBuffer {
                     };
 
                     if let Some(mut r) = recycled_row {
-                        // Only clear cells that were actually written to, restoring the invariant
-                        // that cells[len..] == default. This eliminates 160 GB of memory writes during `cat`.
+                        // Clear cells properly to respect BCE (Back Color Erase).
+                        // If the background color hasn't changed, we only need to clear the written text.
+                        let old_len = r.len.min(self.cols);
+                        if old_len < self.cols && r.cells[self.cols.saturating_sub(1)] != default {
+                            r.cells.fill(default);
+                        } else {
+                            r.cells[..old_len].fill(default);
+                        }
                         r.len = 0;
                         r.wrapped = false;
                         r.reflowable = false;
@@ -647,6 +659,13 @@ impl ScreenBuffer {
         for _ in 0..n {
             if top == 0 && bottom == self.rows - 1 {
                 if let Some(mut r) = self.grid.pop_back() {
+                    let default = self.default_cell();
+                    let old_len = r.len.min(self.cols);
+                    if old_len < self.cols && r.cells[self.cols.saturating_sub(1)] != default {
+                        r.cells.fill(default);
+                    } else {
+                        r.cells[..old_len].fill(default);
+                    }
                     r.len = 0;
                     r.wrapped = false;
                     r.reflowable = false;
@@ -2389,24 +2408,18 @@ impl ScreenBuffer {
         // We clone the dirty_rows vec alongside, then immediately clear dirty flags in the live buffer
         // so the VTE thread can start tracking new changes right away.
         let rows = self.rows();
-        let default_cell = self.default_cell();
         let cloned_grid = (0..rows)
             .map(|i| {
                 let visible = self.visible_row(i);
                 let clipped_len = visible.len().min(self.cols);
-                let mut row = visible[..clipped_len].to_vec();
-
-                let len = self.visible_row_len(i).min(clipped_len);
-                if len < row.len() {
-                    row[len..].fill(default_cell);
-                }
-                row
+                visible[..clipped_len].to_vec()
             })
             .collect();
         let dirty_generations = self.dirty_generations.clone();
 
         // Clear dirty flags immediately so the PTY thread starts accumulating fresh dirty state
         // for the next snapshot, without waiting for the renderer to ack.
+        self.mark_all_clean();
 
         let scroll_event = self.pending_scroll.clone();
         let scroll_id = self.scroll_id;

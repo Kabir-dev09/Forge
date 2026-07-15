@@ -227,7 +227,7 @@ impl Pty {
                 Ok(n) if n > 0 => written += n,
                 Ok(_) => return Err(ForgeError::Pty("Write returned 0".to_string())),
                 Err(nix::errno::Errno::EAGAIN) => {
-                    let mut pfd = nix::poll::PollFd::new(std::os::fd::AsFd::as_fd(&self.master_fd), nix::poll::PollFlags::POLLOUT);
+                    let pfd = nix::poll::PollFd::new(std::os::fd::AsFd::as_fd(&self.master_fd), nix::poll::PollFlags::POLLOUT);
                     let _ = nix::poll::poll(&mut [pfd], 1000_u16);
                 }
                 Err(nix::errno::Errno::EIO) => {

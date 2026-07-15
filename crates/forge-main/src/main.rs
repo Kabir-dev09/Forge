@@ -22,9 +22,16 @@ fn main() {
 
     let result = std::panic::catch_unwind(|| run());
 
-    if result.is_err() {
-        tracing::error!("Forge terminated due to a panic. See crash.log for details.");
-        std::process::exit(1);
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!("Forge terminated with error: {}", e);
+            std::process::exit(1);
+        }
+        Err(_) => {
+            tracing::error!("Forge terminated due to a panic. See crash.log for details.");
+            std::process::exit(1);
+        }
     }
 }
 

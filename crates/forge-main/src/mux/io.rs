@@ -59,6 +59,49 @@ pub enum PtyWorkerCommand {
     MarkAllClean(PaneId),
     SetMouseTracking(PaneId, bool),
     SetVisiblePanes(std::collections::HashSet<PaneId>),
+    Write(PaneId, Vec<u8>),
+}
+
+pub struct DynamicPtySource {
+    inner: calloop::generic::Generic<OwnedFd, std::io::Error>,
+    interest: std::rc::Rc<std::cell::Cell<Interest>>,
+}
+
+impl calloop::EventSource for DynamicPtySource {
+    type Event = calloop::Readiness;
+    type Metadata = std::os::unix::io::RawFd;
+    type Ret = std::io::Result<PostAction>;
+    type Error = std::io::Error;
+
+    fn process_events<C>(
+        &mut self,
+        readiness: calloop::Readiness,
+        token: calloop::Token,
+        mut callback: C,
+    ) -> std::result::Result<PostAction, Self::Error>
+    where
+        C: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
+    {
+        self.inner.process_events(readiness, token, |ready, file| {
+             use std::os::unix::io::AsRawFd;
+             let mut fd = file.as_raw_fd();
+             callback(ready, &mut fd)
+        }).map_err(|e| e)
+    }
+
+    fn register(&mut self, poll: &mut calloop::Poll, token_factory: &mut calloop::TokenFactory) -> calloop::Result<()> {
+        self.inner.interest = self.interest.get();
+        self.inner.register(poll, token_factory)
+    }
+
+    fn reregister(&mut self, poll: &mut calloop::Poll, token_factory: &mut calloop::TokenFactory) -> calloop::Result<()> {
+        self.inner.interest = self.interest.get();
+        self.inner.reregister(poll, token_factory)
+    }
+
+    fn unregister(&mut self, poll: &mut calloop::Poll) -> calloop::Result<()> {
+        self.inner.unregister(poll)
+    }
 }
 
 pub struct PaneIoRegistry {
@@ -88,9 +131,10 @@ struct PaneState {
     snapshot: Arc<ArcSwap<RenderSnapshot>>,
     token: RegistrationToken,
     last_snapshot_time: std::time::Instant,
-    // Reusable read buffer: heap-allocated once, reused on every PTY read.
     read_buf: Vec<u8>,
     pending_write: Vec<u8>,
+    interest: std::rc::Rc<std::cell::Cell<Interest>>,
+    fd: RawFd,
 }
 
 fn flush_pending_write(fd: RawFd, pending_write: &mut Vec<u8>) {
@@ -239,6 +283,19 @@ impl PaneIoRegistry {
                             }
                             state.wakeup_signal.wakeup();
                         }
+                        PtyWorkerCommand::Write(pane_id, data) => {
+                            if let Some(pane) = state.panes.get_mut(&pane_id) {
+                                pane.pending_write.extend_from_slice(&data);
+                                flush_pending_write(pane.fd, &mut pane.pending_write);
+                                if !pane.pending_write.is_empty() {
+                                    let current = pane.interest.get();
+                                    if !current.writable {
+                                        pane.interest.set(calloop::Interest::BOTH);
+                                        let _ = state.loop_handle.update(&pane.token);
+                                    }
+                                }
+                            }
+                        }
                         PtyWorkerCommand::SetVisiblePanes(panes) => {
                             state.visible_panes = panes;
                             // Immediately push snapshot for all visible panes so the UI isn't stale
@@ -314,11 +371,9 @@ impl PaneIoRegistry {
     }
 
     pub fn exited_panes(&self) -> Vec<PaneId> {
-        let exited = self.exited_panes.write().unwrap();
-        let panes = exited.clone();
-        if panes.is_empty() {
-            self.has_exited.store(false, Ordering::Release);
-        }
+        let mut exited = self.exited_panes.write().unwrap();
+        let panes = std::mem::take(&mut *exited);
+        self.has_exited.store(false, Ordering::Release);
         panes
     }
 
@@ -345,17 +400,21 @@ impl WorkerState {
         screen_buffer: ScreenBuffer,
         snapshot: Arc<ArcSwap<RenderSnapshot>>,
     ) -> Result<()> {
-        let source = Generic::new(fd, Interest::READ, Mode::Level);
-
+        let raw_fd = std::os::fd::AsRawFd::as_raw_fd(&fd);
+        let interest = std::rc::Rc::new(std::cell::Cell::new(calloop::Interest::READ));
+        let source = DynamicPtySource {
+            inner: calloop::generic::Generic::new(
+                fd,
+                calloop::Interest::READ,
+                calloop::Mode::Level,
+            ),
+            interest: interest.clone(),
+        };
         let token = self
             .loop_handle
             .clone()
             .insert_source(source, move |readiness, src_fd, state| {
-                if !readiness.readable && !readiness.error {
-                    return Ok(PostAction::Continue);
-                }
-
-                state.process_pane_read(pane_id, src_fd.as_raw_fd())
+                state.process_pane_io(pane_id, src_fd.as_raw_fd(), readiness)
             })
             .map_err(|e| ForgeError::Other(format!("Failed to register PTY IO source: {}", e)))?;
 
@@ -369,6 +428,8 @@ impl WorkerState {
                 last_snapshot_time: std::time::Instant::now(),
                 read_buf: vec![0u8; PTY_READ_BUFFER_SIZE],
                 pending_write: Vec::new(),
+                interest,
+                fd: raw_fd,
             },
         );
         Ok(())
@@ -395,35 +456,43 @@ impl WorkerState {
         }
     }
 
-    fn process_pane_read(&mut self, pane_id: PaneId, fd: RawFd) -> std::io::Result<PostAction> {
+    fn process_pane_io(&mut self, pane_id: PaneId, fd: RawFd, readiness: calloop::Readiness) -> std::io::Result<PostAction> {
         let mut bytes_read = 0usize;
         let mut iterations = 0usize;
         let mut processed_output = false;
 
         let mut exited = false;
         let mut drained = false;
+        let mut interest_changed = false;
 
-        // We need to borrow pane.read_buf and pane.{vte_processor, screen_buffer} simultaneously.
-        // The borrow checker can't verify field-level disjointness through a HashMap, so we use
-        // a raw pointer to the already-allocated read_buf. This is safe: the buf lives for the
-        // duration of the pane, and we never resize it during the loop.
         if let Some(pane) = self.panes.get_mut(&pane_id) {
-            flush_pending_write(fd, &mut pane.pending_write);
-            while iterations < MAX_PTY_READ_ITERATIONS_PER_EVENT
-                && bytes_read < MAX_PTY_READ_BYTES_PER_EVENT
-            {
-                iterations += 1;
-
-                let borrowed_fd = unsafe { rustix::fd::BorrowedFd::borrow_raw(fd) };
-                let read_res = rustix::io::read(borrowed_fd, &mut pane.read_buf);
-
-                let len = match read_res {
-                    Ok(0) => {
-                        exited = true;
-                        drained = true;
-                        break;
+            if readiness.writable {
+                flush_pending_write(fd, &mut pane.pending_write);
+                if pane.pending_write.is_empty() {
+                    let current = pane.interest.get();
+                    if current.writable {
+                        pane.interest.set(calloop::Interest::READ);
+                        interest_changed = true;
                     }
-                    Ok(n) => n,
+                }
+            }
+
+            if readiness.readable {
+                while iterations < MAX_PTY_READ_ITERATIONS_PER_EVENT
+                    && bytes_read < MAX_PTY_READ_BYTES_PER_EVENT
+                {
+                    iterations += 1;
+
+                    let borrowed_fd = unsafe { rustix::fd::BorrowedFd::borrow_raw(fd) };
+                    let read_res = rustix::io::read(borrowed_fd, &mut pane.read_buf);
+
+                    let len = match read_res {
+                        Ok(0) => {
+                            exited = true;
+                            drained = true;
+                            break;
+                        }
+                        Ok(n) => n,
                     Err(rustix::io::Errno::AGAIN) => {
                         drained = true;
                         break;
@@ -455,20 +524,6 @@ impl WorkerState {
                 pane.screen_buffer.view_scroll_to_bottom();
             }
         }
-
-        if processed_output {
-            if let Some(pane) = self.panes.get_mut(&pane_id) {
-                let now = std::time::Instant::now();
-                if exited || drained || now.duration_since(pane.last_snapshot_time).as_millis() >= 8
-                {
-                    if self.visible_panes.contains(&pane_id) {
-                        let snapshot = pane.screen_buffer.generate_snapshot();
-                        pane.snapshot.store(std::sync::Arc::new(snapshot));
-                        pane.last_snapshot_time = now;
-                        self.wakeup_signal.wakeup();
-                    }
-                }
-            }
         }
 
         if exited {
@@ -478,12 +533,26 @@ impl WorkerState {
             let mut exited_list = self.exited_panes.write().unwrap();
             if !exited_list.contains(&pane_id) {
                 exited_list.push(pane_id);
+                self.has_exited.store(true, Ordering::Release);
             }
-            drop(exited_list);
-            // FIX 3: signal the main thread's AtomicBool fast path.
-            self.has_exited
-                .store(true, std::sync::atomic::Ordering::Release);
-            self.wakeup_signal.wakeup(); // Wake up main thread to handle exit
+            return Ok(PostAction::Remove);
+        }
+
+        if processed_output {
+            if let Some(pane) = self.panes.get_mut(&pane_id) {
+                if self.visible_panes.contains(&pane_id) {
+                    let snapshot = pane.screen_buffer.generate_snapshot();
+                    pane.snapshot.store(Arc::new(snapshot));
+                    pane.last_snapshot_time = std::time::Instant::now();
+                    self.wakeup_signal.wakeup();
+                }
+            }
+        }
+
+        if interest_changed {
+            if let Some(pane) = self.panes.get(&pane_id) {
+                let _ = self.loop_handle.update(&pane.token);
+            }
         }
 
         Ok(PostAction::Continue)

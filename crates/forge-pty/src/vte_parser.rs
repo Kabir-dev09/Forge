@@ -648,6 +648,30 @@ mod tests {
     }
 
     #[test]
+    fn test_reverse_index() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(80, 24);
+        
+        // Print two lines
+        processor.process(b"Line 1\r\nLine 2", &mut buf);
+        assert_eq!(buf.cursor.row, 1);
+        
+        // Test Reverse Index when NOT at top margin
+        processor.process(b"\x1bM", &mut buf);
+        assert_eq!(buf.cursor.row, 0); // Cursor moves up
+        
+        // Test Reverse Index when AT top margin (should scroll down)
+        // Currently at row 0.
+        processor.process(b"\x1bM", &mut buf);
+        assert_eq!(buf.cursor.row, 0); // Cursor stays at top
+        
+        // The content should have shifted down, so row 0 is empty, row 1 has "Line 1"
+        assert_eq!(buf.visible_row(0)[0].c, ' '); // New blank line at top
+        assert_eq!(buf.visible_row(1)[0].c, 'L'); // "Line 1" moved down to row 1
+        assert_eq!(buf.visible_row(2)[0].c, 'L'); // "Line 2" moved down to row 2
+    }
+
+    #[test]
     fn test_ascii_fast_path_preserves_sgr_state() {
         let mut processor = VteProcessor::new();
         let mut buf = test_screen(20, 5);

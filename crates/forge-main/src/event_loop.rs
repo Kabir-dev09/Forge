@@ -1739,15 +1739,10 @@ pub fn run_event_loop(
             let now = std::time::Instant::now();
             if now >= repeating.next_repeat_time {
                 let active_pane = app_data.tab_manager.active_mux().active_pane;
-                if let Some(pty) = app_data
-                    .tab_manager
-                    .active_mux_mut()
-                    .panes
-                    .get_mut(&active_pane)
-                    .and_then(|p| p.pty.as_mut())
-                {
-                    let _ = pty.write_all(&repeating.bytes);
-                }
+                app_data.pane_io.send_ui_command(crate::mux::io::PtyWorkerCommand::Write(
+                    active_pane,
+                    repeating.bytes.clone(),
+                ));
                 if let Some((rate, _)) = app_data.wayland_state.repeat_info {
                     if rate > 0 {
                         repeating.next_repeat_time =
@@ -1764,15 +1759,10 @@ pub fn run_event_loop(
 
         while let Ok(input) = app_data.key_receiver.try_recv() {
             let active_pane = app_data.tab_manager.active_mux().active_pane;
-            if let Some(pty) = app_data
-                .tab_manager
-                .active_mux_mut()
-                .panes
-                .get_mut(&active_pane)
-                .and_then(|p| p.pty.as_mut())
-            {
-                let _ = pty.write_all(&input);
-            }
+            app_data.pane_io.send_ui_command(crate::mux::io::PtyWorkerCommand::Write(
+                active_pane,
+                input.to_vec(),
+            ));
 
             // Typing trap
             app_data.cursor_visible_phase = true;
@@ -1795,27 +1785,25 @@ pub fn run_event_loop(
                 .snapshot
                 .load()
                 .bracketed_paste;
-            if let Some(pty) = app_data
-                .tab_manager
-                .active_mux_mut()
-                .panes
-                .get_mut(&active_pane)
-                .and_then(|p| p.pty.as_mut())
-            {
-                if bracketed_paste {
-                    let mut wrapped = Vec::with_capacity(bytes.len() + 12);
-                    wrapped.extend_from_slice(b"\x1b[200~");
-                    wrapped.extend_from_slice(&bytes);
-                    wrapped.extend_from_slice(b"\x1b[201~");
-                    let _ = pty.write_all(&wrapped);
-                } else {
-                    let _ = pty.write_all(&bytes);
-                }
-                tracing::info!(
-                    "[PASTE TIMING] Event loop wrote to PTY at {:?}",
-                    std::time::Instant::now()
-                );
+            if bracketed_paste {
+                let mut wrapped = Vec::with_capacity(bytes.len() + 12);
+                wrapped.extend_from_slice(b"\x1b[200~");
+                wrapped.extend_from_slice(&bytes);
+                wrapped.extend_from_slice(b"\x1b[201~");
+                app_data.pane_io.send_ui_command(crate::mux::io::PtyWorkerCommand::Write(
+                    active_pane,
+                    wrapped,
+                ));
+            } else {
+                app_data.pane_io.send_ui_command(crate::mux::io::PtyWorkerCommand::Write(
+                    active_pane,
+                    bytes,
+                ));
             }
+            tracing::info!(
+                "[PASTE TIMING] Event loop wrote to PTY at {:?}",
+                std::time::Instant::now()
+            );
 
             // Typing trap
             app_data.cursor_visible_phase = true;
@@ -2985,15 +2973,12 @@ pub fn run_event_loop(
                                 if mouse_sgr_mode {
                                     let seq = format!("\x1b[<{};{};{}M", btn_code, col_1, row_1);
                                     let active_pane = app_data.tab_manager.active_mux().active_pane;
-                                    if let Some(pty) = app_data
-                                        .tab_manager
-                                        .active_mux_mut()
-                                        .panes
-                                        .get_mut(&active_pane)
-                                        .and_then(|p| p.pty.as_mut())
-                                    {
-                                        let _ = pty.write_all(seq.as_bytes());
-                                    }
+                                    app_data.pane_io.send_ui_command(
+                                        crate::mux::io::PtyWorkerCommand::Write(
+                                            active_pane,
+                                            seq.into_bytes(),
+                                        ),
+                                    );
                                 }
                                 app_data.last_mouse_col = col_1;
                                 app_data.last_mouse_row = row_1;
@@ -3336,15 +3321,12 @@ pub fn run_event_loop(
                         if mouse_sgr_mode {
                             let seq = format!("\x1b[<{};{};{}M", btn_code, col_1, row_1);
                             let active_pane = app_data.tab_manager.active_mux().active_pane;
-                            if let Some(pty) = app_data
-                                .tab_manager
-                                .active_mux_mut()
-                                .panes
-                                .get_mut(&active_pane)
-                                .and_then(|p| p.pty.as_mut())
-                            {
-                                let _ = pty.write_all(seq.as_bytes());
-                            }
+                            app_data.pane_io.send_ui_command(
+                                crate::mux::io::PtyWorkerCommand::Write(
+                                    active_pane,
+                                    seq.into_bytes(),
+                                ),
+                            );
                         }
                     } else {
                         if button == 272 {
@@ -3489,15 +3471,10 @@ pub fn run_event_loop(
                         if mouse_sgr_mode {
                             let seq = format!("\x1b[<{};{};{}m", btn_code, col_1, row_1);
                             let active_pane = app_data.tab_manager.active_mux().active_pane;
-                            if let Some(pty) = app_data
-                                .tab_manager
-                                .active_mux_mut()
-                                .panes
-                                .get_mut(&active_pane)
-                                .and_then(|p| p.pty.as_mut())
-                            {
-                                let _ = pty.write_all(seq.as_bytes());
-                            }
+                            app_data.pane_io.send_ui_command(crate::mux::io::PtyWorkerCommand::Write(
+                                active_pane,
+                                seq.into_bytes(),
+                            ));
                         }
                     } else {
                         if button == 272 {
@@ -3543,15 +3520,12 @@ pub fn run_event_loop(
                         if mouse_sgr_mode {
                             let seq = format!("\x1b[<{};{};{}M", btn_code, col_1, row_1);
                             let active_pane = app_data.tab_manager.active_mux().active_pane;
-                            if let Some(pty) = app_data
-                                .tab_manager
-                                .active_mux_mut()
-                                .panes
-                                .get_mut(&active_pane)
-                                .and_then(|p| p.pty.as_mut())
-                            {
-                                let _ = pty.write_all(seq.as_bytes());
-                            }
+                            app_data.pane_io.send_ui_command(
+                                crate::mux::io::PtyWorkerCommand::Write(
+                                    active_pane,
+                                    seq.into_bytes(),
+                                ),
+                            );
                         }
                     } else {
                         app_data.scroll_accum += amount;
@@ -3570,16 +3544,13 @@ pub fn run_event_loop(
                                 .use_alt_buffer;
                             if use_alt_buffer {
                                 let active_pane = app_data.tab_manager.active_mux().active_pane;
-                                if let Some(pty) = app_data
-                                    .tab_manager
-                                    .active_mux_mut()
-                                    .panes
-                                    .get_mut(&active_pane)
-                                    .and_then(|p| p.pty.as_mut())
-                                {
-                                    for _ in 0..lines {
-                                        let _ = pty.write_all(b"\x1b[B"); // Down arrow
-                                    }
+                                for _ in 0..lines {
+                                    app_data.pane_io.send_ui_command(
+                                        crate::mux::io::PtyWorkerCommand::Write(
+                                            active_pane,
+                                            b"\x1b[B".to_vec(),
+                                        ),
+                                    );
                                 }
                             } else {
                                 let offset_changed = {
@@ -3613,16 +3584,13 @@ pub fn run_event_loop(
                                 .use_alt_buffer;
                             if use_alt_buffer {
                                 let active_pane = app_data.tab_manager.active_mux().active_pane;
-                                if let Some(pty) = app_data
-                                    .tab_manager
-                                    .active_mux_mut()
-                                    .panes
-                                    .get_mut(&active_pane)
-                                    .and_then(|p| p.pty.as_mut())
-                                {
-                                    for _ in 0..lines {
-                                        let _ = pty.write_all(b"\x1b[A"); // Up arrow
-                                    }
+                                for _ in 0..lines {
+                                    app_data.pane_io.send_ui_command(
+                                        crate::mux::io::PtyWorkerCommand::Write(
+                                            active_pane,
+                                            b"\x1b[A".to_vec(),
+                                        ),
+                                    );
                                 }
                             } else {
                                 let offset_changed = {
@@ -4224,7 +4192,7 @@ pub fn run_event_loop(
                                         }, 1.0)
                                     }
                                 }
-                                _ => {
+                                PaneAnimationKind::Close => {
                                     (forge_renderer::renderer::PaneRenderRect {
                                         x: span.rect.x,
                                         y: span.rect.y,
