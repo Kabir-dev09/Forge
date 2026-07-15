@@ -328,7 +328,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 ## Phase 5: Renderer Upload Efficiency
 
-### 5.1 Add Render Diagnostics
+### 5.1 Add Render Diagnostics (COMPLETED)
 
 **Objective:** Track vertex count, upload bytes, and frame timing.
 
@@ -351,7 +351,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 **Benefit:** Enables evidence-based renderer decisions.
 
-### 5.2 Improve Vertex Buffer Growth Strategy
+### 5.2 Improve Vertex Buffer Growth Strategy (COMPLETED)
 
 **Objective:** Make vertex buffer capacity predictable and avoid emergency reallocations.
 
@@ -375,7 +375,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 **Benefit:** Fewer stalls and better resize behavior.
 
-### 5.3 Evaluate Persistent Mapped Vertex Buffer
+### 5.3 Evaluate Persistent Mapped Vertex Buffer (COMPLETED)
 
 **Objective:** Reduce map/unmap overhead if profiling shows it matters.
 
@@ -404,7 +404,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 ## Phase 6: Font And Config Robustness
 
-### 6.1 Font Atlas Cache Discipline
+### 6.1 Font Atlas Cache Discipline (COMPLETED)
 
 **Objective:** Avoid unnecessary full atlas rebuilds and make font metadata explicit.
 
@@ -428,7 +428,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 **Benefit:** More predictable startup and reload performance.
 
-### 6.2 Config Reload Discipline
+### 6.2 Config Reload Discipline (COMPLETED)
 
 **Objective:** Make live reload explicit, debounced, and safer.
 
@@ -457,7 +457,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 ## Phase 7: Error Handling And Recovery
 
-### 7.1 Replace Recoverable Runtime `unwrap()`s
+### 7.1 Replace Recoverable Runtime `unwrap()`s (COMPLETED)
 
 **Objective:** Convert expected failures into typed errors or guarded branches.
 
@@ -482,7 +482,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 **Benefit:** Production-grade reliability.
 
-### 7.2 Improve Wayland/Vulkan Error Context
+### 7.2 Improve Wayland/Vulkan Error Context (COMPLETED)
 
 **Objective:** Make platform/render failures diagnosable.
 
@@ -510,7 +510,7 @@ Work through this list strictly in order. Each item must pass its completion gat
 
 ## Phase 8: Targeted SIMD Policy Implementation
 
-### 8.1 Decide Whether SIMD Is Justified
+### 8.1 Decide Whether SIMD Is Justified (COMPLETED)
 
 **Objective:** Use explicit SIMD only for proven hot kernels.
 
