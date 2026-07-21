@@ -21,7 +21,7 @@ opacity = 0.95
 title = "Forge"
 decorations = true
 center_grid = true
-gap = 0
+gap = 10
 pane_outline_width = 1.0
 
 [window.padding]
