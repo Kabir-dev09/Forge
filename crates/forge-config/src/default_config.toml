@@ -1,7 +1,13 @@
 [font]
-family = "monospace"
+# "builtin" uses Forge's embedded JetBrainsMono Nerd Font and prebuilt atlas.
+# Installed family names (for example "Iosevka") and font file paths are also supported.
+family = "builtin"
 size = 14.0
 nerd_fonts = true
+# Optional style overrides accept the same family name or direct style-file paths.
+# bold_family = "Iosevka"
+# italic_family = "Iosevka"
+# bold_italic_family = "Iosevka"
 
 [font.ligatures]
 enabled = false
@@ -16,7 +22,7 @@ height = 600
 opacity = 1.0
 title = "Forge"
 decorations = true
-padding_balance = "center"
+center_grid = true
 gap = 0
 pane_outline_width = 1.0
 
@@ -35,7 +41,6 @@ right = 0
 [blur]
 enabled = false
 method = "auto"
-radius = 0
 
 [cursor]
 style = "block"
@@ -50,8 +55,7 @@ scroll_multiplier = 3.0
 [shell]
 # program defaults to $SHELL when omitted.
 args = []
-
-[shell.env]
+env = []
 
 [behavior]
 copy_on_select = false
@@ -60,6 +64,13 @@ hide_mouse_when_typing = false
 
 [panes]
 mode = "tiling"
+
+[command_completion_indicator]
+mode = "enabled"
+minimum_duration_ms = 10000
+dismissal = "timeout"
+display_duration_ms = 3000
+transparent = false
 
 [render]
 braille_style = "dots"
@@ -70,58 +81,61 @@ background_mode = "opaque_panel"
 panel_color = "#0b1020"
 selected_color = "#facc15"
 
-[colors]
+[theme]
 background = "#1a1b26"
 foreground = "#c0caf5"
+popup_background = "#1e1e2e"
 cursor_color = "#c0caf5"
 selection_bg = "#414868c8"
 pane_outline_active = "#89b4fa"
 pane_outline_inactive = "#6c7086"
 
-[colors.normal]
-black = "#414868"
-red = "#f7768e"
-green = "#9ece6a"
-yellow = "#e0af68"
-blue = "#7aa2f7"
-magenta = "#bb9af7"
-cyan = "#7dcfff"
-white = "#c0caf5"
+ansi_colors = [
+    "#414868", # 0
+    "#f7768e", # 1
+    "#9ece6a", # 2
+    "#e0af68", # 3
+    "#7aa2f7", # 4
+    "#bb9af7", # 5
+    "#7dcfff", # 6
+    "#c0caf5", # 7
+    "#414868", # 8
+    "#f7768e", # 9
+    "#9ece6a", # 10
+    "#e0af68", # 11
+    "#7aa2f7", # 12
+    "#bb9af7", # 13
+    "#7dcfff", # 14
+    "#c0caf5", # 15
+]
 
-[colors.bright]
-black = "#414868"
-red = "#f7768e"
-green = "#9ece6a"
-yellow = "#e0af68"
-blue = "#7aa2f7"
-magenta = "#bb9af7"
-cyan = "#7dcfff"
-white = "#c0caf5"
-
-[status_bar]
+[statusbar]
 enabled = true
 position = "bottom"
 placement = "inside"
-background = "transparent"
-foreground = "#cdd6f4"
+bg_color = "transparent"
+fg_color = "#cdd6f4"
 
-[[status_bar.left]]
-[status_bar.left.tabs]
+[[statusbar.left]]
+type = "tabs"
 format = " {index}{zoom} "
 zoom_indicator = "()"
+left_edge = ""
+right_edge = ""
 
-[status_bar.left.tabs.active]
+[statusbar.left.active]
 fg = "#1e1e2e"
 bg = "#89b4fa"
 
-[status_bar.left.tabs.inactive]
+[statusbar.left.inactive]
 fg = "#a6adc8"
 
-[[status_bar.left]]
+[[statusbar.left]]
+type = "text"
 text = " + "
 action = "NewTab"
 
-[keybindings]
+[keybinds]
 copy = "ctrl+shift+c"
 paste = "ctrl+shift+v"
 toggle_fullscreen = "f11"

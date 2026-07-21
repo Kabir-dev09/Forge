@@ -97,6 +97,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
             }
 
             wl_keyboard::Event::Key {
+                serial,
                 key,
                 state: key_state,
                 ..
@@ -166,17 +167,15 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                         if let Some(action) = action {
                             match action {
                                 forge_core::bindings::Action::Copy => {
-                                    tracing::info!("Intercepted Copy via keybind");
+                                    state.pending_copy_serial = Some(serial);
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::Copy);
                                 }
                                 forge_core::bindings::Action::Paste => {
-                                    tracing::info!(
-                                        "[PASTE TIMING] Intercepted Paste at {:?}",
-                                        std::time::Instant::now()
-                                    );
-                                    if let Some(clip) = &state.clipboard {
-                                        clip.request_paste();
-                                        state.needs_flush = true;
-                                    }
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::Paste);
                                 }
                                 forge_core::bindings::Action::ToggleFullscreen => {
                                     tracing::info!("ToggleFullscreen requested");
@@ -214,6 +213,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                     state
                                         .pending_tab_actions
                                         .push(forge_core::bindings::Action::TogglePaneZoom);
+                                }
+                                forge_core::bindings::Action::TogglePaneFloating => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::TogglePaneFloating);
                                 }
                                 forge_core::bindings::Action::ToggleSidebar => {
                                     state
@@ -411,7 +415,12 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                 }
             }
 
+            wl_keyboard::Event::Enter { .. } => {
+                state.is_activated = true;
+            }
+
             wl_keyboard::Event::Leave { .. } => {
+                state.is_activated = false;
                 state.repeating_key = None;
             }
             _ => {}
@@ -514,6 +523,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 state: btn_state,
                 ..
             } => {
+                state.pointer_button_serial = serial;
                 if let Some(tx) = &state.pointer_sender {
                     let evt = match btn_state {
                         wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed) => {

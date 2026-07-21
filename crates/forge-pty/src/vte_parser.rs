@@ -8,6 +8,13 @@ pub struct TerminalPerformer<'a> {
     charsets: &'a mut CharsetState,
     parser_is_ground: &'a mut bool,
     responses: Vec<u8>,
+    command_events: &'a mut Vec<CommandLifecycleEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandLifecycleEvent {
+    Started { command: Option<String> },
+    Finished { exit_code: i32 },
 }
 
 impl<'a> Perform for TerminalPerformer<'a> {
@@ -89,22 +96,32 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     match params[1] {
                         b"A" => {
                             self.buffer.is_command_running = false;
+                            self.buffer.current_command = None;
                         }
                         b"C" => {
                             self.buffer.is_command_running = true;
+                            self.buffer.last_exit_code = None;
                             self.buffer.current_command = params.get(2).and_then(|value| {
                                 std::str::from_utf8(value).ok().map(str::to_string)
+                            });
+                            self.command_events.push(CommandLifecycleEvent::Started {
+                                command: self.buffer.current_command.clone(),
                             });
                         }
                         b"D" => {
                             self.buffer.is_command_running = false;
+                            self.buffer.current_command = None;
+                            let mut exit_code = 0;
                             if params.len() > 2 {
                                 if let Ok(code_str) = std::str::from_utf8(params[2]) {
                                     if let Ok(code) = code_str.parse::<i32>() {
                                         self.buffer.last_exit_code = Some(code);
+                                        exit_code = code;
                                     }
                                 }
                             }
+                            self.command_events
+                                .push(CommandLifecycleEvent::Finished { exit_code });
                         }
                         _ => {}
                     }
@@ -194,6 +211,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 if intermediates == [b'!'] {
                     // DECSTR soft reset: cursor shape returns to the terminal profile default.
                     self.buffer.clear_cursor_style_override();
+                    self.buffer.set_cursor_visible(true);
                 } else {
                     tracing::trace!(
                         "Unhandled CSI private 'p' with intermediates: {:?}",
@@ -269,6 +287,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
             (_, b'c') => {
                 // RIS reset: clear temporary app cursor shape so rendering falls back to config.
                 self.buffer.clear_cursor_style_override();
+                self.buffer.set_cursor_visible(true);
             }
             (_, b'M') => {
                 // reverse index (scroll down)
@@ -458,6 +477,8 @@ fn handle_mode(params: &Params, intermediates: &[u8], action: char, buffer: &mut
                     "Application cursor keys: {}",
                     buffer.application_cursor_keys
                 );
+            } else if param == [25] {
+                buffer.set_cursor_visible(action == 'h');
             } else if param == [1000] || param == [1002] {
                 buffer.mouse_tracking_enabled = action == 'h';
                 tracing::trace!("Mouse tracking: {}", buffer.mouse_tracking_enabled);
@@ -483,6 +504,7 @@ pub struct VteProcessor {
     ascii_fast_path_enabled: bool,
     parser_is_ground: bool,
     charsets: CharsetState,
+    command_events: Vec<CommandLifecycleEvent>,
 }
 
 impl VteProcessor {
@@ -492,7 +514,12 @@ impl VteProcessor {
             ascii_fast_path_enabled: true,
             parser_is_ground: true,
             charsets: CharsetState::new(),
+            command_events: Vec::new(),
         }
+    }
+
+    pub fn take_command_events(&mut self) -> Vec<CommandLifecycleEvent> {
+        std::mem::take(&mut self.command_events)
     }
 }
 
@@ -592,6 +619,7 @@ impl VteProcessor {
             charsets: &mut self.charsets,
             parser_is_ground: &mut self.parser_is_ground,
             responses: Vec::new(),
+            command_events: &mut self.command_events,
         };
         for &byte in data {
             if starts_escape_sequence(byte) {
@@ -909,6 +937,36 @@ mod tests {
     }
 
     #[test]
+    fn dectcem_hides_and_restores_cursor_in_snapshots() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(10, 10);
+
+        assert!(buf.generate_snapshot().cursor.is_some());
+        processor.process(b"\x1b[?25l", &mut buf);
+        assert!(!buf.cursor_visible);
+        assert!(buf.generate_snapshot().cursor.is_none());
+
+        processor.process(b"\x1b[?25h", &mut buf);
+        assert!(buf.cursor_visible);
+        assert!(buf.generate_snapshot().cursor.is_some());
+    }
+
+    #[test]
+    fn dectcem_dirties_only_when_visibility_changes() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(10, 10);
+        buf.mark_all_clean();
+        let clean_generation = buf.dirty_generations[0];
+
+        processor.process(b"\x1b[?25l", &mut buf);
+        let hidden_generation = buf.dirty_generations[0];
+        assert!(hidden_generation > clean_generation);
+
+        processor.process(b"\x1b[?25l", &mut buf);
+        assert_eq!(buf.dirty_generations[0], hidden_generation);
+    }
+
+    #[test]
     fn alternate_screen_exit_clears_temporary_cursor_style_override() {
         let mut processor = VteProcessor::new();
         let mut buf = test_screen(10, 10);
@@ -931,6 +989,7 @@ mod tests {
         let mut buf = test_screen(10, 10);
 
         processor.process(b"\x1b[6 q", &mut buf);
+        processor.process(b"\x1b[?25l", &mut buf);
         assert_eq!(
             buf.cursor_style_override,
             Some(forge_core::config_registry::CursorStyle::Beam)
@@ -938,8 +997,10 @@ mod tests {
 
         processor.process(b"\x1b[!p", &mut buf);
         assert_eq!(buf.cursor_style_override, None);
+        assert!(buf.cursor_visible);
 
         processor.process(b"\x1b[4 q", &mut buf);
+        processor.process(b"\x1b[?25l", &mut buf);
         assert_eq!(
             buf.cursor_style_override,
             Some(forge_core::config_registry::CursorStyle::Underline)
@@ -948,5 +1009,63 @@ mod tests {
         processor.process(b"\x1bc", &mut buf);
         assert_eq!(buf.cursor_style_override, None);
         assert_eq!(buf.cursor_blink_override, None);
+        assert!(buf.cursor_visible);
+    }
+
+    #[test]
+    fn osc_133_command_completion_clears_current_command() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(10, 10);
+
+        processor.process(b"\x1b]133;C;ls\x07", &mut buf);
+        assert!(buf.is_command_running);
+        assert_eq!(buf.current_command.as_deref(), Some("ls"));
+        assert_eq!(
+            processor.take_command_events(),
+            vec![CommandLifecycleEvent::Started {
+                command: Some("ls".to_string())
+            }]
+        );
+
+        processor.process(b"\x1b]133;D;0\x07", &mut buf);
+        assert!(!buf.is_command_running);
+        assert_eq!(buf.current_command, None);
+        assert_eq!(buf.last_exit_code, Some(0));
+        assert_eq!(
+            processor.take_command_events(),
+            vec![CommandLifecycleEvent::Finished { exit_code: 0 }]
+        );
+    }
+
+    #[test]
+    fn osc_133_prompt_clears_stale_current_command() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(10, 10);
+
+        processor.process(b"\x1b]133;C;ls\x07", &mut buf);
+        processor.process(b"\x1b]133;A\x07", &mut buf);
+
+        assert!(!buf.is_command_running);
+        assert_eq!(buf.current_command, None);
+    }
+
+    #[test]
+    fn osc_133_start_and_finish_in_same_chunk_emit_both_events() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(10, 10);
+
+        processor.process(b"\x1b]133;C;true\x07\x1b]133;D;0\x07", &mut buf);
+
+        assert_eq!(
+            processor.take_command_events(),
+            vec![
+                CommandLifecycleEvent::Started {
+                    command: Some("true".to_string())
+                },
+                CommandLifecycleEvent::Finished { exit_code: 0 }
+            ]
+        );
+        assert!(!buf.is_command_running);
+        assert_eq!(buf.current_command, None);
     }
 }

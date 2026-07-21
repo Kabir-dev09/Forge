@@ -553,6 +553,47 @@ impl MuxState {
         Ok(new_pane_id)
     }
 
+    pub fn commit_split_active_with_existing(
+        &mut self,
+        axis: SplitAxis,
+        pane_id: PaneId,
+    ) -> Result<PaneId, SplitPaneError> {
+        let root = self.split_root_for_active(axis, pane_id)?;
+        self.root = root;
+        self.active_pane = pane_id;
+        self.next_pane_id = std::cmp::max(self.next_pane_id, pane_id.get().saturating_add(1));
+        self.layout_generation = self.layout_generation.wrapping_add(1);
+        Ok(pane_id)
+    }
+
+    pub fn dock_floating_pane(&mut self, pane_id: PaneId, axis: SplitAxis) -> Result<(), SplitPaneError> {
+        if !self.floating_panes.contains(&pane_id) {
+            return Ok(());
+        }
+        self.floating_panes.retain(|&id| id != pane_id);
+        
+        let target_pane = if self.root.contains_pane(self.active_pane) {
+            self.active_pane
+        } else {
+            self.root.first_pane()
+        };
+
+        if !self.panes.contains_key(&target_pane) {
+            self.root = LayoutNode::leaf(pane_id);
+            self.active_pane = pane_id;
+            self.layout_generation = self.layout_generation.wrapping_add(1);
+            return Ok(());
+        }
+
+        let previous_active = self.active_pane;
+        self.active_pane = target_pane;
+        let res = self.commit_split_active_with_existing(axis, pane_id);
+        if res.is_err() {
+            self.active_pane = previous_active;
+        }
+        res.map(|_| ())
+    }
+
     pub fn insert_detached_pane(&mut self, pane: Pane) -> PaneId {
         let pane_id = pane.id;
         self.panes.insert(pane_id, pane);

@@ -65,9 +65,9 @@ fn run() -> forge_core::Result<()> {
 
     // --- Fast-path startup ---
     let t_fast_path = std::time::Instant::now();
-    let cache = {
-        let _span = tracing::debug_span!("startup.read_cache").entered();
-        forge_core::cache::read_startup_cache()
+    let early_config = {
+        let _span = tracing::debug_span!("startup.read_early_config").entered();
+        forge_core::config_registry::EarlyStartupConfig::load(&config_path)
     };
 
     // --- Wayland Connection ---
@@ -77,16 +77,10 @@ fn run() -> forge_core::Result<()> {
     };
 
     // --- Window Creation ---
-    let initial_size = cache
-        .as_ref()
-        .map(|c| forge_core::geometry::Size {
-            width: c.window_width,
-            height: c.window_height,
-        })
-        .unwrap_or(forge_core::geometry::Size {
-            width: 800,
-            height: 600,
-        });
+    let initial_size = forge_core::geometry::Size {
+        width: early_config.window.width,
+        height: early_config.window.height,
+    };
 
     let window = {
         let _span = tracing::debug_span!(
@@ -118,17 +112,10 @@ fn run() -> forge_core::Result<()> {
     }
 
     // --- SHM First Frame ---
-    let (bg_r, bg_g, bg_b) = cache
-        .as_ref()
-        .map(|c| {
-            (
-                c.background_color.r,
-                c.background_color.g,
-                c.background_color.b,
-            )
-        })
-        .unwrap_or((26, 27, 38));
-    let bg_a = cache.as_ref().map(|c| c.opacity).unwrap_or(255);
+    let bg_color = crate::statusbar::parse_hex_color(&early_config.theme.background)
+        .unwrap_or(forge_core::color::Color { r: 26, g: 27, b: 38, a: 255 });
+    let (bg_r, bg_g, bg_b) = (bg_color.r, bg_color.g, bg_color.b);
+    let bg_a = (early_config.window.opacity * 255.0) as u8;
 
     let window_size = wayland_state
         .window
@@ -220,9 +207,9 @@ fn run() -> forge_core::Result<()> {
     };
 
     let t_vulkan = std::time::Instant::now();
-    let cell_w = cache.as_ref().map(|c| c.cell_width).unwrap_or(10);
-    let cell_h = cache.as_ref().map(|c| c.cell_height).unwrap_or(20);
-    let baseline = cache.as_ref().map(|c| c.baseline).unwrap_or(16);
+    let cell_w = 10;
+    let cell_h = 20;
+    let baseline = 16;
 
     let mut renderer = {
         let _span = tracing::debug_span!(
@@ -254,7 +241,7 @@ fn run() -> forge_core::Result<()> {
         window_size.width as f64,
         window_size.height as f64,
         &config.window.padding,
-        config.window.padding_balance,
+        config.window.center_grid,
         &config.statusbar,
         0,
         cell_w as f64,
@@ -295,11 +282,11 @@ fn run() -> forge_core::Result<()> {
     let mut screen_buffer = forge_pty::ScreenBuffer::new(
         cols,
         rows,
-        config.scrollback.lines,
-        config.theme.foreground,
-        config.theme.background,
+        config.scrollback.lines.unwrap_or(100_000),
+        config.theme.parsed_foreground,
+        config.theme.parsed_background,
     );
-    screen_buffer.palette = config.theme.ansi_colors;
+    screen_buffer.palette = config.theme.parsed_ansi_colors;
     let vte_processor = forge_pty::VteProcessor::new();
 
     let (key_tx, key_rx) = std::sync::mpsc::sync_channel(1024);
@@ -310,17 +297,8 @@ fn run() -> forge_core::Result<()> {
 
     let (paste_tx, paste_rx) = std::sync::mpsc::sync_channel(1024);
 
-    if let Some(wl_seat) = wayland_state.globals.wl_seat.as_ref() {
-        if let Some(data_device_manager) = wayland_state.globals.data_device_manager.clone() {
-            let mut clip = crate::wayland::clipboard::ClipboardManager::new(data_device_manager);
-            clip.init_device(wl_seat, &event_queue.handle());
-            clip.paste_sender = Some(paste_tx);
-            wayland_state.clipboard = Some(clip);
-        } else {
-            tracing::warn!(
-                "Wayland data device manager is unavailable; clipboard integration disabled."
-            );
-        }
+    if let Some(clipboard) = wayland_state.clipboard.as_mut() {
+        clipboard.paste_sender = Some(paste_tx);
     }
 
     // Once the Vulkan first frame is submitted, drop the SHM buffer.
@@ -377,107 +355,19 @@ fn run() -> forge_core::Result<()> {
     let font_config = config.font.clone();
     std::thread::spawn(move || {
         let font_start = std::time::Instant::now();
-        let Some(font_files) = crate::font_paths::resolve_font_files(&font_config) else {
-            tracing::warn!("No usable font file found. Keeping startup dummy font atlas.");
-            return;
-        };
-
-        let font_size = font_config.size;
-        match std::fs::read(&font_files.regular)
-            .map_err(|e| forge_core::ForgeError::Other(e.to_string()))
-            .and_then(|font_bytes| {
-                forge_renderer::font::rasterizer::FontRasterizer::from_bytes(&font_bytes, font_size)
-            }) {
-            Ok(font_rasterizer) => {
-                let bold_rasterizer = font_files.bold.as_ref().and_then(|bold_path| {
-                    std::fs::read(bold_path)
-                        .map_err(|e| {
-                            tracing::warn!(
-                                "Failed to read bold font {}: {}",
-                                bold_path.display(),
-                                e
-                            );
-                            e
-                        })
-                        .ok()
-                        .and_then(|bold_bytes| {
-                            match forge_renderer::font::rasterizer::FontRasterizer::from_bytes(
-                                &bold_bytes,
-                                font_size,
-                            ) {
-                                Ok(rasterizer) => Some(rasterizer),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to load bold font {}: {}",
-                                        bold_path.display(),
-                                        e
-                                    );
-                                    None
-                                }
-                            }
-                        })
-                });
-                let fallback_rasterizers: Vec<_> = font_files
-                    .fallbacks
-                    .iter()
-                    .filter_map(|fallback_path| {
-                        std::fs::read(fallback_path)
-                            .map_err(|e| {
-                                tracing::warn!(
-                                    "Failed to read fallback font {}: {}",
-                                    fallback_path.display(),
-                                    e
-                                );
-                                e
-                            })
-                            .ok()
-                            .and_then(|font_bytes| {
-                                match forge_renderer::font::rasterizer::FontRasterizer::from_bytes(
-                                    &font_bytes,
-                                    font_size,
-                                ) {
-                                    Ok(rasterizer) => Some(rasterizer),
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to load fallback font {}: {}",
-                                            fallback_path.display(),
-                                            e
-                                        );
-                                        None
-                                    }
-                                }
-                            })
-                    })
-                    .collect();
-
-                match forge_renderer::font::atlas::GlyphAtlas::build(
-                    &font_rasterizer,
-                    bold_rasterizer.as_ref(),
-                    font_size,
-                    false,
-                ) {
-                    Ok(full_atlas) => {
-                        tracing::info!(
-                            "Background full font rasterization took: {:?}",
-                            font_start.elapsed()
-                        );
-                        let _ = font_tx.send((
-                            font_rasterizer,
-                            bold_rasterizer,
-                            fallback_rasterizers,
-                            font_size,
-                            full_atlas,
-                        ));
-                        loop_sig_font.wakeup();
-                    }
-                    Err(e) => tracing::warn!("Failed to build font atlas: {}", e),
-                }
+        match crate::font_paths::load_font_data(&font_config) {
+            Ok(font_data) => {
+                tracing::info!(
+                    "Font data prepared in {:?} (family={})",
+                    font_start.elapsed(),
+                    font_config.family
+                );
+                let _ = font_tx.send(font_data);
+                loop_sig_font.wakeup();
             }
-            Err(e) => tracing::warn!(
-                "Failed to load regular font {}: {}. Keeping startup dummy font atlas.",
-                font_files.regular.display(),
-                e
-            ),
+            Err(error) => {
+                tracing::warn!(%error, "Failed to prepare font data; keeping startup dummy atlas")
+            }
         }
     });
 

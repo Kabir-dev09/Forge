@@ -1,21 +1,42 @@
-use super::rasterizer::FontRasterizer;
+use super::rasterizer::{font_identity, FontRasterizer};
 use forge_core::Result;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 const ATLAS_COLUMNS: u32 = 128;
 const DYNAMIC_GLYPH_SLOTS: u32 = 1024;
+const ATLAS_CACHE_MAGIC: &[u8; 8] = b"FORGEFA1";
+const ATLAS_CACHE_VERSION: u32 = 2;
+const MAX_CACHED_ATLAS_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontStyle {
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
+}
+
+impl FontStyle {
+    pub const fn from_flags(is_bold: bool, is_italic: bool) -> Self {
+        match (is_bold, is_italic) {
+            (false, false) => Self::Regular,
+            (true, false) => Self::Bold,
+            (false, true) => Self::Italic,
+            (true, true) => Self::BoldItalic,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
     pub c: char,
-    pub is_bold: bool,
+    pub style: FontStyle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ShapedGlyphKey {
     pub glyph_id: u16,
-    pub is_bold: bool,
+    pub style: FontStyle,
     pub font_hash: u64,
 }
 
@@ -41,7 +62,7 @@ pub enum ShapedGlyphInsertResult {
     Inserted(Option<DynamicGlyphUpdate>),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GlyphMetrics {
     pub u0: f32,
     pub v0: f32, // Top-left UV
@@ -57,6 +78,8 @@ pub struct GlyphMetrics {
 pub struct GlyphAtlasDescriptor {
     pub regular_font_hash: u64,
     pub bold_font_hash: Option<u64>,
+    pub italic_font_hash: Option<u64>,
+    pub bold_italic_font_hash: Option<u64>,
     pub px_size_bits: u32,
     pub fast_mode: bool,
 }
@@ -66,6 +89,8 @@ impl GlyphAtlasDescriptor {
         Self {
             regular_font_hash: 0,
             bold_font_hash: None,
+            italic_font_hash: None,
+            bold_italic_font_hash: None,
             px_size_bits: 0,
             fast_mode: true,
         }
@@ -74,12 +99,34 @@ impl GlyphAtlasDescriptor {
     pub fn new(
         rasterizer: &FontRasterizer,
         bold_rasterizer: Option<&FontRasterizer>,
+        italic_rasterizer: Option<&FontRasterizer>,
+        bold_italic_rasterizer: Option<&FontRasterizer>,
         px_size: f32,
         fast_mode: bool,
     ) -> Self {
         Self {
-            regular_font_hash: font_hash(&rasterizer.bytes),
-            bold_font_hash: bold_rasterizer.map(|rasterizer| font_hash(&rasterizer.bytes)),
+            regular_font_hash: rasterizer.identity(),
+            bold_font_hash: bold_rasterizer.map(FontRasterizer::identity),
+            italic_font_hash: italic_rasterizer.map(FontRasterizer::identity),
+            bold_italic_font_hash: bold_italic_rasterizer.map(FontRasterizer::identity),
+            px_size_bits: px_size.to_bits(),
+            fast_mode,
+        }
+    }
+
+    pub fn from_font_bytes(
+        regular: &[u8],
+        bold: Option<&[u8]>,
+        italic: Option<&[u8]>,
+        bold_italic: Option<&[u8]>,
+        px_size: f32,
+        fast_mode: bool,
+    ) -> Self {
+        Self {
+            regular_font_hash: font_identity(regular),
+            bold_font_hash: bold.map(font_identity),
+            italic_font_hash: italic.map(font_identity),
+            bold_italic_font_hash: bold_italic.map(font_identity),
             px_size_bits: px_size.to_bits(),
             fast_mode,
         }
@@ -92,8 +139,13 @@ pub struct GlyphAtlas {
     pub atlas_height: u32,
     pub glyphs: HashMap<char, GlyphMetrics>,
     pub glyphs_bold: HashMap<char, GlyphMetrics>,
+    pub glyphs_italic: HashMap<char, GlyphMetrics>,
+    pub glyphs_bold_italic: HashMap<char, GlyphMetrics>,
     pub shaped_glyphs: HashMap<ShapedGlyphKey, GlyphMetrics>,
     pub descriptor: GlyphAtlasDescriptor,
+    pub font_cell_width: u32,
+    pub font_cell_height: u32,
+    pub font_baseline: u32,
     pub(crate) atlas_cell_width: u32,
     pub(crate) atlas_cell_height: u32,
     pub(crate) next_dynamic_slot: u32,
@@ -101,6 +153,142 @@ pub struct GlyphAtlas {
 }
 
 impl GlyphAtlas {
+    pub fn descriptor_for(
+        rasterizer: &FontRasterizer,
+        bold_rasterizer: Option<&FontRasterizer>,
+        italic_rasterizer: Option<&FontRasterizer>,
+        bold_italic_rasterizer: Option<&FontRasterizer>,
+        px_size: f32,
+        fast_mode: bool,
+    ) -> GlyphAtlasDescriptor {
+        GlyphAtlasDescriptor::new(
+            rasterizer,
+            bold_rasterizer,
+            italic_rasterizer,
+            bold_italic_rasterizer,
+            px_size,
+            fast_mode,
+        )
+    }
+
+    pub fn from_cache_bytes(bytes: &[u8], expected: &GlyphAtlasDescriptor) -> Result<Self> {
+        if bytes.len() > MAX_CACHED_ATLAS_BYTES {
+            return Err(forge_core::ForgeError::Other(
+                "font atlas cache is too large".into(),
+            ));
+        }
+        let mut reader = CacheReader::new(bytes);
+        if reader.take(ATLAS_CACHE_MAGIC.len())? != ATLAS_CACHE_MAGIC {
+            return Err(forge_core::ForgeError::Other(
+                "invalid font atlas cache magic".into(),
+            ));
+        }
+        if reader.u32()? != ATLAS_CACHE_VERSION {
+            return Err(forge_core::ForgeError::Other(
+                "unsupported font atlas cache version".into(),
+            ));
+        }
+        let descriptor = GlyphAtlasDescriptor {
+            regular_font_hash: reader.u64()?,
+            bold_font_hash: reader.optional_u64()?,
+            italic_font_hash: reader.optional_u64()?,
+            bold_italic_font_hash: reader.optional_u64()?,
+            px_size_bits: reader.u32()?,
+            fast_mode: reader.u8()? != 0,
+        };
+        if &descriptor != expected {
+            return Err(forge_core::ForgeError::Other(
+                "font atlas cache does not match configured fonts".into(),
+            ));
+        }
+        let atlas_width = reader.u32()?;
+        let atlas_height = reader.u32()?;
+        let atlas_cell_width = reader.u32()?;
+        let atlas_cell_height = reader.u32()?;
+        let font_cell_width = reader.u32()?;
+        let font_cell_height = reader.u32()?;
+        let font_baseline = reader.u32()?;
+        let next_dynamic_slot = reader.u32()?;
+        let total_slots = reader.u32()?;
+        let glyphs = reader.glyph_map()?;
+        let glyphs_bold = reader.glyph_map()?;
+        let glyphs_italic = reader.glyph_map()?;
+        let glyphs_bold_italic = reader.glyph_map()?;
+        let pixel_len = reader.u64()? as usize;
+        let expected_pixels = (atlas_width as usize)
+            .checked_mul(atlas_height as usize)
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| {
+                forge_core::ForgeError::Other("font atlas dimensions overflow".into())
+            })?;
+        if pixel_len != expected_pixels || pixel_len > MAX_CACHED_ATLAS_BYTES {
+            return Err(forge_core::ForgeError::Other(
+                "invalid font atlas pixel length".into(),
+            ));
+        }
+        let pixels = reader.take(pixel_len)?.to_vec();
+        if !reader.is_empty() || next_dynamic_slot > total_slots {
+            return Err(forge_core::ForgeError::Other(
+                "invalid trailing font atlas data".into(),
+            ));
+        }
+        Ok(Self {
+            pixels,
+            atlas_width,
+            atlas_height,
+            glyphs,
+            glyphs_bold,
+            glyphs_italic,
+            glyphs_bold_italic,
+            shaped_glyphs: HashMap::new(),
+            descriptor,
+            font_cell_width,
+            font_cell_height,
+            font_baseline,
+            atlas_cell_width,
+            atlas_cell_height,
+            next_dynamic_slot,
+            total_slots,
+        })
+    }
+
+    pub fn to_cache_bytes(&self) -> Vec<u8> {
+        let map_bytes = (self.glyphs.len()
+            + self.glyphs_bold.len()
+            + self.glyphs_italic.len()
+            + self.glyphs_bold_italic.len())
+            * 40;
+        let mut out = Vec::with_capacity(128 + map_bytes + self.pixels.len());
+        out.extend_from_slice(ATLAS_CACHE_MAGIC);
+        push_u32(&mut out, ATLAS_CACHE_VERSION);
+        push_u64(&mut out, self.descriptor.regular_font_hash);
+        push_optional_u64(&mut out, self.descriptor.bold_font_hash);
+        push_optional_u64(&mut out, self.descriptor.italic_font_hash);
+        push_optional_u64(&mut out, self.descriptor.bold_italic_font_hash);
+        push_u32(&mut out, self.descriptor.px_size_bits);
+        out.push(u8::from(self.descriptor.fast_mode));
+        for value in [
+            self.atlas_width,
+            self.atlas_height,
+            self.atlas_cell_width,
+            self.atlas_cell_height,
+            self.font_cell_width,
+            self.font_cell_height,
+            self.font_baseline,
+            self.next_dynamic_slot,
+            self.total_slots,
+        ] {
+            push_u32(&mut out, value);
+        }
+        push_glyph_map(&mut out, &self.glyphs);
+        push_glyph_map(&mut out, &self.glyphs_bold);
+        push_glyph_map(&mut out, &self.glyphs_italic);
+        push_glyph_map(&mut out, &self.glyphs_bold_italic);
+        push_u64(&mut out, self.pixels.len() as u64);
+        out.extend_from_slice(&self.pixels);
+        out
+    }
+
     pub fn dummy_for_bench() -> Self {
         let mut glyphs = HashMap::new();
         for c in 0x20_u8..=0x7e {
@@ -124,8 +312,13 @@ impl GlyphAtlas {
             atlas_height: 1,
             glyphs,
             glyphs_bold: HashMap::new(),
+            glyphs_italic: HashMap::new(),
+            glyphs_bold_italic: HashMap::new(),
             shaped_glyphs: HashMap::new(),
             descriptor: GlyphAtlasDescriptor::dummy(),
+            font_cell_width: 8,
+            font_cell_height: 16,
+            font_baseline: 14,
             atlas_cell_width: 8,
             atlas_cell_height: 16,
             next_dynamic_slot: 0,
@@ -134,10 +327,105 @@ impl GlyphAtlas {
     }
 }
 
-pub(crate) fn font_hash(bytes: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_optional_u64(out: &mut Vec<u8>, value: Option<u64>) {
+    out.push(u8::from(value.is_some()));
+    push_u64(out, value.unwrap_or(0));
+}
+
+fn push_glyph_map(out: &mut Vec<u8>, map: &HashMap<char, GlyphMetrics>) {
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_unstable_by_key(|(character, _)| **character as u32);
+    push_u32(out, entries.len() as u32);
+    for (character, metrics) in entries {
+        push_u32(out, *character as u32);
+        for value in [metrics.u0, metrics.v0, metrics.u1, metrics.v1] {
+            push_u32(out, value.to_bits());
+        }
+        push_u32(out, metrics.width);
+        push_u32(out, metrics.height);
+        push_u32(out, metrics.bearing_y as u32);
+        push_u32(out, metrics.bearing_x as u32);
+    }
+}
+
+struct CacheReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> CacheReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8]> {
+        let end = self.offset.checked_add(len).ok_or_else(|| {
+            forge_core::ForgeError::Other("font atlas cache offset overflow".into())
+        })?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or_else(|| forge_core::ForgeError::Other("truncated font atlas cache".into()))?;
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn optional_u64(&mut self) -> Result<Option<u64>> {
+        let present = self.u8()? != 0;
+        let value = self.u64()?;
+        Ok(present.then_some(value))
+    }
+
+    fn glyph_map(&mut self) -> Result<HashMap<char, GlyphMetrics>> {
+        let count = self.u32()? as usize;
+        if count > 1_000_000 {
+            return Err(forge_core::ForgeError::Other(
+                "font atlas glyph count is invalid".into(),
+            ));
+        }
+        let mut map = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let character = char::from_u32(self.u32()?).ok_or_else(|| {
+                forge_core::ForgeError::Other("font atlas contains an invalid character".into())
+            })?;
+            let metrics = GlyphMetrics {
+                u0: f32::from_bits(self.u32()?),
+                v0: f32::from_bits(self.u32()?),
+                u1: f32::from_bits(self.u32()?),
+                v1: f32::from_bits(self.u32()?),
+                width: self.u32()?,
+                height: self.u32()?,
+                bearing_y: self.u32()? as i32,
+                bearing_x: self.u32()? as i32,
+            };
+            map.insert(character, metrics);
+        }
+        Ok(map)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
 }
 
 fn push_char_range(chars: &mut Vec<char>, start: u32, end: u32) {
@@ -176,11 +464,20 @@ impl GlyphAtlas {
     pub fn build(
         rasterizer: &FontRasterizer,
         bold_rasterizer: Option<&FontRasterizer>,
+        italic_rasterizer: Option<&FontRasterizer>,
+        bold_italic_rasterizer: Option<&FontRasterizer>,
         px_size: f32,
         fast_mode: bool,
     ) -> Result<Self> {
         let build_start = std::time::Instant::now();
-        let descriptor = GlyphAtlasDescriptor::new(rasterizer, bold_rasterizer, px_size, fast_mode);
+        let descriptor = GlyphAtlasDescriptor::new(
+            rasterizer,
+            bold_rasterizer,
+            italic_rasterizer,
+            bold_italic_rasterizer,
+            px_size,
+            fast_mode,
+        );
         // Fast mode stays ASCII-only for immediate startup. Full mode keeps a
         // compact common set and relies on procedural drawing/dynamic insertion
         // for box, block, braille, PUA, emoji, and less common scripts.
@@ -189,7 +486,10 @@ impl GlyphAtlas {
         // Fixed column layout keeps glyph UVs stable and leaves a bounded
         // dynamic area for glyphs discovered after startup.
         let cols = ATLAS_COLUMNS;
-        let font_count = if bold_rasterizer.is_some() { 2 } else { 1 };
+        let font_count = 1
+            + u32::from(bold_rasterizer.is_some())
+            + u32::from(italic_rasterizer.is_some())
+            + u32::from(bold_italic_rasterizer.is_some());
         let static_glyphs = chars.len() as u32 * font_count;
         let total_slots = static_glyphs + DYNAMIC_GLYPH_SLOTS;
         let rows = total_slots.div_ceil(cols);
@@ -205,6 +505,8 @@ impl GlyphAtlas {
         let mut pixels = vec![0u8; (atlas_width * atlas_height * 4) as usize];
         let mut glyphs = HashMap::new();
         let mut glyphs_bold = HashMap::new();
+        let mut glyphs_italic = HashMap::new();
+        let mut glyphs_bold_italic = HashMap::new();
 
         let mut current_idx = 0;
 
@@ -261,6 +563,12 @@ impl GlyphAtlas {
         if let Some(b_rast) = bold_rasterizer {
             rasterize_set(b_rast, &mut glyphs_bold);
         }
+        if let Some(i_rast) = italic_rasterizer {
+            rasterize_set(i_rast, &mut glyphs_italic);
+        }
+        if let Some(bi_rast) = bold_italic_rasterizer {
+            rasterize_set(bi_rast, &mut glyphs_bold_italic);
+        }
 
         tracing::debug!(
             "[PROFILER] GlyphAtlas::build took: {:?} (glyphs={}, bold_glyphs={}, fast_mode={})",
@@ -276,8 +584,13 @@ impl GlyphAtlas {
             atlas_height,
             glyphs,
             glyphs_bold,
+            glyphs_italic,
+            glyphs_bold_italic,
             shaped_glyphs: HashMap::new(),
             descriptor,
+            font_cell_width: rasterizer.cell_width,
+            font_cell_height: rasterizer.cell_height,
+            font_baseline: rasterizer.baseline,
             atlas_cell_width: atlas_cell_w,
             atlas_cell_height: atlas_cell_h,
             next_dynamic_slot: static_glyphs,
@@ -290,6 +603,8 @@ impl GlyphAtlas {
         key: ShapedGlyphKey,
         rasterizer: &FontRasterizer,
         bold_rasterizer: Option<&FontRasterizer>,
+        italic_rasterizer: Option<&FontRasterizer>,
+        bold_italic_rasterizer: Option<&FontRasterizer>,
         px_size: f32,
     ) -> ShapedGlyphInsertResult {
         if self.shaped_glyphs.contains_key(&key) {
@@ -300,14 +615,26 @@ impl GlyphAtlas {
             return ShapedGlyphInsertResult::AtlasFull;
         }
 
-        let regular_hash = font_hash(&rasterizer.bytes);
-        let bold_hash = bold_rasterizer.map(|rasterizer| font_hash(&rasterizer.bytes));
-        let active_rasterizer = if key.is_bold && bold_hash == Some(key.font_hash) {
-            bold_rasterizer.unwrap_or(rasterizer)
-        } else if !key.is_bold && regular_hash == key.font_hash {
-            rasterizer
-        } else {
-            return ShapedGlyphInsertResult::Missing;
+        let active_rasterizer = match key.style {
+            FontStyle::Regular if rasterizer.identity() == key.font_hash => rasterizer,
+            FontStyle::Bold
+                if bold_rasterizer.is_some_and(|r| r.identity() == key.font_hash) =>
+            {
+                bold_rasterizer.unwrap()
+            }
+            FontStyle::Italic
+                if italic_rasterizer.is_some_and(|r| r.identity() == key.font_hash) =>
+            {
+                italic_rasterizer.unwrap()
+            }
+            FontStyle::BoldItalic
+                if bold_italic_rasterizer.is_some_and(|r| r.identity() == key.font_hash) =>
+            {
+                bold_italic_rasterizer.unwrap()
+            }
+            _ => {
+                return ShapedGlyphInsertResult::Missing;
+            }
         };
 
         let slot = self.next_dynamic_slot;
@@ -368,10 +695,12 @@ impl GlyphAtlas {
         key: GlyphKey,
         rasterizer: &FontRasterizer,
         bold_rasterizer: Option<&FontRasterizer>,
+        italic_rasterizer: Option<&FontRasterizer>,
+        bold_italic_rasterizer: Option<&FontRasterizer>,
         fallback_rasterizers: &[FontRasterizer],
         px_size: f32,
     ) -> DynamicGlyphInsertResult {
-        if self.get_exact(key.c, key.is_bold).is_some() {
+        if self.get_exact(key.c, key.style).is_some() {
             return DynamicGlyphInsertResult::AlreadyPresent;
         }
 
@@ -379,10 +708,14 @@ impl GlyphAtlas {
             return DynamicGlyphInsertResult::AtlasFull;
         }
 
-        let active_rasterizer = if key.is_bold
-            && bold_rasterizer.is_some_and(|rasterizer| rasterizer.has_glyph(key.c))
-        {
-            bold_rasterizer.unwrap()
+        let styled = match key.style {
+            FontStyle::Regular => None,
+            FontStyle::Bold => bold_rasterizer,
+            FontStyle::Italic => italic_rasterizer,
+            FontStyle::BoldItalic => bold_italic_rasterizer,
+        };
+        let active_rasterizer = if styled.is_some_and(|r| r.has_glyph(key.c)) {
+            styled.unwrap()
         } else if rasterizer.has_glyph(key.c) {
             rasterizer
         } else if let Some(fallback) = fallback_rasterizers
@@ -415,10 +748,19 @@ impl GlyphAtlas {
             bearing_x: metrics.xmin,
         };
 
-        if key.is_bold && !self.glyphs_bold.is_empty() {
-            self.glyphs_bold.insert(key.c, glyph_metrics);
-        } else {
-            self.glyphs.insert(key.c, glyph_metrics);
+        match key.style {
+            FontStyle::Bold if !self.glyphs_bold.is_empty() => {
+                self.glyphs_bold.insert(key.c, glyph_metrics);
+            }
+            FontStyle::Italic if !self.glyphs_italic.is_empty() => {
+                self.glyphs_italic.insert(key.c, glyph_metrics);
+            }
+            FontStyle::BoldItalic if !self.glyphs_bold_italic.is_empty() => {
+                self.glyphs_bold_italic.insert(key.c, glyph_metrics);
+            }
+            _ => {
+                self.glyphs.insert(key.c, glyph_metrics);
+            }
         }
 
         if blit_w == 0 || blit_h == 0 {
@@ -447,21 +789,22 @@ impl GlyphAtlas {
         }))
     }
 
-    pub fn get_exact(&self, c: char, is_bold: bool) -> Option<&GlyphMetrics> {
-        if is_bold && !self.glyphs_bold.is_empty() {
-            if let Some(m) = self.glyphs_bold.get(&c) {
-                return Some(m);
-            }
-        }
-        self.glyphs.get(&c)
+    pub fn get_exact(&self, c: char, style: FontStyle) -> Option<&GlyphMetrics> {
+        let styled = match style {
+            FontStyle::Regular => None,
+            FontStyle::Bold => self.glyphs_bold.get(&c),
+            FontStyle::Italic => self.glyphs_italic.get(&c),
+            FontStyle::BoldItalic => self.glyphs_bold_italic.get(&c),
+        };
+        styled.or_else(|| self.glyphs.get(&c))
     }
 
     pub fn fallback(&self) -> Option<&GlyphMetrics> {
         self.glyphs.get(&'?')
     }
 
-    pub fn get(&self, c: char, is_bold: bool) -> Option<&GlyphMetrics> {
-        self.get_exact(c, is_bold).or_else(|| self.fallback())
+    pub fn get(&self, c: char, style: FontStyle) -> Option<&GlyphMetrics> {
+        self.get_exact(c, style).or_else(|| self.fallback())
     }
 }
 
@@ -513,19 +856,20 @@ mod tests {
     #[test]
     fn dynamic_glyph_insert_adds_metrics_and_update_region() {
         let rasterizer = test_rasterizer();
-        let mut atlas = GlyphAtlas::build(&rasterizer, None, 16.0, true).unwrap();
+        let mut atlas = GlyphAtlas::build(&rasterizer, None, None, None, 16.0, true).unwrap();
         let key = GlyphKey {
             c: 'Ω',
-            is_bold: false,
+            style: FontStyle::Regular,
         };
 
-        assert!(atlas.get_exact(key.c, key.is_bold).is_none());
-        let update = match atlas.insert_dynamic_glyph(key, &rasterizer, None, &[], 16.0) {
+        assert!(atlas.get_exact(key.c, key.style).is_none());
+        let update = match atlas.insert_dynamic_glyph(key, &rasterizer, None, None, None, &[], 16.0)
+        {
             DynamicGlyphInsertResult::Inserted(Some(update)) => update,
             _ => panic!("visible glyph should produce an atlas update"),
         };
 
-        assert!(atlas.get_exact(key.c, key.is_bold).is_some());
+        assert!(atlas.get_exact(key.c, key.style).is_some());
         assert!(update.width > 0);
         assert!(update.height > 0);
         assert_eq!(
@@ -537,15 +881,15 @@ mod tests {
     #[test]
     fn shaped_glyph_insert_uses_glyph_id_key() {
         let rasterizer = test_rasterizer();
-        let mut atlas = GlyphAtlas::build(&rasterizer, None, 16.0, true).unwrap();
+        let mut atlas = GlyphAtlas::build(&rasterizer, None, None, None, 16.0, true).unwrap();
         let key = ShapedGlyphKey {
-            glyph_id: rasterizer.font.lookup_glyph_index('A'),
-            is_bold: false,
-            font_hash: font_hash(&rasterizer.bytes),
+            glyph_id: rasterizer.glyph_index('A'),
+            style: FontStyle::Regular,
+            font_hash: rasterizer.identity(),
         };
 
         assert!(atlas.get_shaped(key).is_none());
-        let update = match atlas.insert_shaped_glyph(key, &rasterizer, None, 16.0) {
+        let update = match atlas.insert_shaped_glyph(key, &rasterizer, None, None, None, 16.0) {
             ShapedGlyphInsertResult::Inserted(Some(update)) => update,
             _ => panic!("visible shaped glyph should produce an atlas update"),
         };
@@ -558,15 +902,15 @@ mod tests {
     #[test]
     fn dynamic_glyph_insert_is_idempotent_for_existing_glyph() {
         let rasterizer = test_rasterizer();
-        let mut atlas = GlyphAtlas::build(&rasterizer, None, 16.0, true).unwrap();
+        let mut atlas = GlyphAtlas::build(&rasterizer, None, None, None, 16.0, true).unwrap();
         let key = GlyphKey {
             c: 'A',
-            is_bold: false,
+            style: FontStyle::Regular,
         };
 
-        assert!(atlas.get_exact(key.c, key.is_bold).is_some());
+        assert!(atlas.get_exact(key.c, key.style).is_some());
         assert!(matches!(
-            atlas.insert_dynamic_glyph(key, &rasterizer, None, &[], 16.0),
+            atlas.insert_dynamic_glyph(key, &rasterizer, None, None, None, &[], 16.0),
             DynamicGlyphInsertResult::AlreadyPresent
         ));
     }
@@ -574,7 +918,7 @@ mod tests {
     #[test]
     fn dynamic_glyph_insert_reports_full_atlas() {
         let rasterizer = test_rasterizer();
-        let mut atlas = GlyphAtlas::build(&rasterizer, None, 16.0, true).unwrap();
+        let mut atlas = GlyphAtlas::build(&rasterizer, None, None, None, 16.0, true).unwrap();
         atlas.next_dynamic_slot = atlas.total_slots;
 
         assert_eq!(atlas.dynamic_slots_remaining(), 0);
@@ -582,9 +926,11 @@ mod tests {
             atlas.insert_dynamic_glyph(
                 GlyphKey {
                     c: 'Ω',
-                    is_bold: false,
+                    style: FontStyle::Regular,
                 },
                 &rasterizer,
+                None,
+                None,
                 None,
                 &[],
                 16.0,
@@ -600,14 +946,16 @@ mod tests {
         let Some(fallback) = optional_star_fallback_rasterizer() else {
             return;
         };
-        let mut atlas = GlyphAtlas::build(&rasterizer, None, 16.0, true).unwrap();
+        let mut atlas = GlyphAtlas::build(&rasterizer, None, None, None, 16.0, true).unwrap();
 
         let result = atlas.insert_dynamic_glyph(
             GlyphKey {
                 c: '★',
-                is_bold: false,
+                style: FontStyle::Regular,
             },
             &rasterizer,
+            None,
+            None,
             None,
             &[fallback],
             16.0,
@@ -617,27 +965,70 @@ mod tests {
             result,
             DynamicGlyphInsertResult::Inserted(Some(_))
         ));
-        assert!(atlas.get_exact('★', false).is_some());
+        assert!(atlas.get_exact('★', FontStyle::Regular).is_some());
     }
 
     #[test]
     fn dynamic_glyph_insert_reports_missing_when_no_font_has_glyph() {
         let rasterizer = test_rasterizer();
-        let mut atlas = GlyphAtlas::build(&rasterizer, None, 16.0, true).unwrap();
+        let mut atlas = GlyphAtlas::build(&rasterizer, None, None, None, 16.0, true).unwrap();
 
         assert!(matches!(
             atlas.insert_dynamic_glyph(
                 GlyphKey {
                     c: '★',
-                    is_bold: false,
+                    style: FontStyle::Regular,
                 },
                 &rasterizer,
+                None,
+                None,
                 None,
                 &[],
                 16.0,
             ),
             DynamicGlyphInsertResult::Missing
         ));
-        assert!(atlas.get_exact('★', false).is_none());
+        assert!(atlas.get_exact('★', FontStyle::Regular).is_none());
+    }
+
+    #[test]
+    fn cache_round_trip_preserves_all_style_maps_and_pixels() {
+        let regular = test_rasterizer();
+        let italic = FontRasterizer::from_bytes(super::super::builtin::italic(), 16.0).unwrap();
+        let atlas = GlyphAtlas::build(&regular, None, Some(&italic), None, 16.0, true).unwrap();
+        let bytes = atlas.to_cache_bytes();
+        let restored = GlyphAtlas::from_cache_bytes(&bytes, &atlas.descriptor).unwrap();
+
+        assert_eq!(restored.pixels, atlas.pixels);
+        assert_eq!(restored.glyphs, atlas.glyphs);
+        assert_eq!(restored.glyphs_italic, atlas.glyphs_italic);
+        assert_eq!(restored.atlas_width, atlas.atlas_width);
+        assert_eq!(restored.next_dynamic_slot, atlas.next_dynamic_slot);
+    }
+
+    #[test]
+    fn cache_rejects_a_different_font_size() {
+        let regular = test_rasterizer();
+        let atlas = GlyphAtlas::build(&regular, None, None, None, 16.0, true).unwrap();
+        let mut other = atlas.descriptor.clone();
+        other.px_size_bits = 15.0_f32.to_bits();
+
+        assert!(GlyphAtlas::from_cache_bytes(&atlas.to_cache_bytes(), &other).is_err());
+    }
+
+    #[test]
+    fn italic_style_uses_real_italic_atlas_metrics() {
+        let regular = test_rasterizer();
+        let italic = FontRasterizer::from_bytes(super::super::builtin::italic(), 16.0).unwrap();
+        let atlas = GlyphAtlas::build(&regular, None, Some(&italic), None, 16.0, true).unwrap();
+
+        assert_ne!(
+            atlas.descriptor.regular_font_hash,
+            atlas.descriptor.italic_font_hash.unwrap()
+        );
+        assert_eq!(
+            atlas.get_exact('A', FontStyle::Italic),
+            atlas.glyphs_italic.get(&'A')
+        );
     }
 }

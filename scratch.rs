@@ -64,17 +64,6 @@ pub struct EarlyStartupConfig {
     pub theme: EarlyThemeConfig,
 }
 
-impl EarlyStartupConfig {
-    pub fn load(path: &std::path::Path) -> Self {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(config) = toml::from_str::<Self>(&content) {
-                return config;
-            }
-        }
-        Self::default()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
@@ -82,7 +71,6 @@ pub struct FontConfig {
     pub size: f32,
     pub bold_family: Option<String>,
     pub italic_family: Option<String>,
-    pub bold_italic_family: Option<String>,
     pub ligatures: LigatureConfig,
     pub nerd_fonts: bool,
 }
@@ -157,11 +145,10 @@ impl LigatureConfig {
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
-            family: "builtin".to_string(),
+            family: "monospace".to_string(),
             size: 14.0,
             bold_family: None,
             italic_family: None,
-            bold_italic_family: None,
             ligatures: LigatureConfig::default(),
             nerd_fonts: true,
         }
@@ -199,14 +186,12 @@ pub enum PaneManagerMode {
 #[serde(default)]
 pub struct PanesConfig {
     pub mode: PaneManagerMode,
-    pub scroll_animation_duration_ms: u64,
 }
 
 impl Default for PanesConfig {
     fn default() -> Self {
         Self {
             mode: PaneManagerMode::Tiling,
-            scroll_animation_duration_ms: 120,
         }
     }
 }
@@ -409,23 +394,16 @@ impl Default for AnsiColorsMap {
 pub struct ThemeConfig {
     pub background: String,
     pub foreground: String,
-    pub popup_background: String,
     pub cursor_color: String,
     pub selection_bg: String,
     pub pane_outline_active: String,
     pub pane_outline_inactive: String,
     pub ansi: AnsiColorsMap,
-    /// Compact palette form accepted by existing Forge TOML configurations.
-    /// When present, entries map directly to ANSI palette slots 0 through 15.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ansi_colors: Option<Box<[String; 16]>>,
 
     #[serde(skip)]
     pub parsed_background: Color,
     #[serde(skip)]
     pub parsed_foreground: Color,
-    #[serde(skip)]
-    pub parsed_popup_background: Color,
     #[serde(skip)]
     pub parsed_cursor_color: Color,
     #[serde(skip)]
@@ -443,16 +421,13 @@ impl Default for ThemeConfig {
         let mut t = Self {
             background: "#1a1b26".to_string(),
             foreground: "#c0caf5".to_string(),
-            popup_background: "#1e1e2e".to_string(),
             cursor_color: "#c0caf5".to_string(),
             selection_bg: "#414868c8".to_string(), // approx 200 alpha
             pane_outline_active: "#89b4fa".to_string(),
             pane_outline_inactive: "#6c7086".to_string(),
             ansi: AnsiColorsMap::default(),
-            ansi_colors: None,
             parsed_background: Color::TRANSPARENT,
             parsed_foreground: Color::TRANSPARENT,
-            parsed_popup_background: Color::TRANSPARENT,
             parsed_cursor_color: Color::TRANSPARENT,
             parsed_selection_bg: Color::TRANSPARENT,
             parsed_pane_outline_active: Color::TRANSPARENT,
@@ -463,7 +438,6 @@ impl Default for ThemeConfig {
         // For default, we just populate them directly.
         t.parsed_background = parse_hex_color(&t.background).unwrap();
         t.parsed_foreground = parse_hex_color(&t.foreground).unwrap();
-        t.parsed_popup_background = parse_hex_color(&t.popup_background).unwrap();
         t.parsed_cursor_color = parse_hex_color(&t.cursor_color).unwrap();
         t.parsed_selection_bg = parse_hex_color(&t.selection_bg).unwrap();
         t.parsed_pane_outline_active = parse_hex_color(&t.pane_outline_active).unwrap();
@@ -546,7 +520,7 @@ pub struct ConfirmCloseConfig {
     pub background_mode: ConfirmCloseBackgroundMode,
     pub panel_color: String,
     pub selected_color: String,
-
+    
     #[serde(skip)]
     pub parsed_panel_color: Color,
     #[serde(skip)]
@@ -565,45 +539,6 @@ impl Default for ConfirmCloseConfig {
         t.parsed_panel_color = parse_hex_color(&t.panel_color).unwrap();
         t.parsed_selected_color = parse_hex_color(&t.selected_color).unwrap();
         t
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandCompletionIndicatorMode {
-    #[default]
-    Enabled,
-    Disabled,
-    DisabledOnZoom,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandCompletionIndicatorDismissal {
-    #[default]
-    Timeout,
-    OnInteraction,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CommandCompletionIndicatorConfig {
-    pub mode: CommandCompletionIndicatorMode,
-    pub minimum_duration_ms: u64,
-    pub dismissal: CommandCompletionIndicatorDismissal,
-    pub display_duration_ms: u64,
-    pub transparent: bool,
-}
-
-impl Default for CommandCompletionIndicatorConfig {
-    fn default() -> Self {
-        Self {
-            mode: CommandCompletionIndicatorMode::Enabled,
-            minimum_duration_ms: 10_000,
-            dismissal: CommandCompletionIndicatorDismissal::Timeout,
-            display_duration_ms: 3_000,
-            transparent: false,
-        }
     }
 }
 
@@ -729,10 +664,9 @@ pub struct ForgeConfig {
     pub panes: PanesConfig,
     pub render: RenderConfig,
     pub confirm_close: ConfirmCloseConfig,
-    pub command_completion_indicator: CommandCompletionIndicatorConfig,
     pub statusbar: StatusbarConfig,
-
-    #[serde(rename = "keybinds", alias = "keybindings")]
+    
+    #[serde(rename = "keybindings")]
     pub raw_keybindings: HashMap<String, String>,
 
     #[serde(skip)]
@@ -754,13 +688,65 @@ impl Default for ForgeConfig {
             panes: PanesConfig::default(),
             render: RenderConfig::default(),
             confirm_close: ConfirmCloseConfig::default(),
-            command_completion_indicator: CommandCompletionIndicatorConfig::default(),
             statusbar: StatusbarConfig::default(),
             raw_keybindings: HashMap::new(),
             keybindings: HashMap::new(),
         };
 
-        install_default_keybindings(&mut config.keybindings);
+        if !config.behavior.disable_default_keybindings {
+            let defaults = vec![
+                ("Ctrl+Shift+C", "Copy"),
+                ("Ctrl+Shift+V", "Paste"),
+                ("f11", "ToggleFullscreen"),
+                ("ctrl+enter", "ToggleFullscreen"),
+                ("ctrl+plus", "ZoomIn"),
+                ("ctrl+=", "ZoomIn"),
+                ("ctrl+shift+=", "ZoomIn"),
+                ("ctrl+shift+plus", "ZoomIn"),
+                ("ctrl+minus", "ZoomOut"),
+                ("ctrl+kp_add", "ZoomIn"),
+                ("ctrl+kp_subtract", "ZoomOut"),
+                ("ctrl+0", "ZoomReset"),
+                ("ctrl+kp_0", "ZoomReset"),
+                ("ctrl+shift+backslash", "SplitVertical"),
+                ("Ctrl+Shift+minus", "SplitHorizontal"),
+                ("Ctrl+Shift+Z", "TogglePaneZoom"),
+                ("Ctrl+Shift+B", "ToggleSidebar"),
+                ("Ctrl+Shift+Q", "ClosePane"),
+                ("Ctrl+Shift+F", "SpawnFloatingPane"),
+                ("Alt+Left", "FocusPaneLeft"),
+                ("Alt+Right", "FocusPaneRight"),
+                ("Alt+Up", "FocusPaneUp"),
+                ("Alt+Down", "FocusPaneDown"),
+                ("Alt+h", "FocusPaneLeft"),
+                ("Alt+j", "FocusPaneDown"),
+                ("Alt+k", "FocusPaneUp"),
+                ("Alt+l", "FocusPaneRight"),
+                ("Ctrl+Shift+T", "NewTab"),
+                ("Ctrl+Shift+W", "CloseTab"),
+                ("Ctrl+PageDown", "NextTab"),
+                ("Ctrl+PageUp", "PreviousTab"),
+                ("Alt+1", "SwitchTab1"),
+                ("Alt+2", "SwitchTab2"),
+                ("Alt+3", "SwitchTab3"),
+                ("Alt+4", "SwitchTab4"),
+                ("Alt+5", "SwitchTab5"),
+                ("Alt+6", "SwitchTab6"),
+                ("Alt+7", "SwitchTab7"),
+                ("Alt+8", "SwitchTab8"),
+                ("Alt+9", "SwitchTab9"),
+                ("Ctrl+Shift+PageUp", "MoveTabLeft"),
+                ("Ctrl+Shift+PageDown", "MoveTabRight"),
+            ];
+
+            for (key, action) in defaults {
+                if let Some(keystroke) = KeyStroke::parse(key) {
+                    if let Some(a) = parse_action(action) {
+                        config.keybindings.insert(keystroke, a);
+                    }
+                }
+            }
+        }
 
         config
     }
@@ -800,7 +786,6 @@ pub fn parse_action(value: &str) -> Option<Action> {
         "toggle_sidebar" | "togglesidebar" => Some(Action::ToggleSidebar),
         "close_pane" | "closepane" => Some(Action::ClosePane),
         "spawn_floating_pane" | "spawnfloatingpane" => Some(Action::SpawnFloatingPane),
-        "toggle_pane_floating" | "togglepanefloating" => Some(Action::TogglePaneFloating),
         "focus_pane_left" | "focuspaneleft" => Some(Action::FocusPaneLeft),
         "focus_pane_right" | "focuspaneright" => Some(Action::FocusPaneRight),
         "focus_pane_up" | "focuspaneup" => Some(Action::FocusPaneUp),
@@ -824,60 +809,6 @@ pub fn parse_action(value: &str) -> Option<Action> {
     }
 }
 
-fn install_default_keybindings(keybindings: &mut HashMap<KeyStroke, Action>) {
-    const DEFAULTS: &[(&str, &str)] = &[
-        ("Ctrl+Shift+C", "Copy"),
-        ("Ctrl+Shift+V", "Paste"),
-        ("f11", "ToggleFullscreen"),
-        ("ctrl+enter", "ToggleFullscreen"),
-        ("ctrl+plus", "ZoomIn"),
-        ("ctrl+=", "ZoomIn"),
-        ("ctrl+shift+=", "ZoomIn"),
-        ("ctrl+shift+plus", "ZoomIn"),
-        ("ctrl+minus", "ZoomOut"),
-        ("ctrl+kp_add", "ZoomIn"),
-        ("ctrl+kp_subtract", "ZoomOut"),
-        ("ctrl+0", "ZoomReset"),
-        ("ctrl+kp_0", "ZoomReset"),
-        ("ctrl+shift+backslash", "SplitVertical"),
-        ("Ctrl+Shift+minus", "SplitHorizontal"),
-        ("Ctrl+Shift+Z", "TogglePaneZoom"),
-        ("Ctrl+Shift+B", "ToggleSidebar"),
-        ("Ctrl+Shift+Q", "ClosePane"),
-        ("Ctrl+Shift+F", "SpawnFloatingPane"),
-        ("Ctrl+Shift+D", "TogglePaneFloating"),
-        ("Alt+Left", "FocusPaneLeft"),
-        ("Alt+Right", "FocusPaneRight"),
-        ("Alt+Up", "FocusPaneUp"),
-        ("Alt+Down", "FocusPaneDown"),
-        ("Alt+h", "FocusPaneLeft"),
-        ("Alt+j", "FocusPaneDown"),
-        ("Alt+k", "FocusPaneUp"),
-        ("Alt+l", "FocusPaneRight"),
-        ("Ctrl+Shift+T", "NewTab"),
-        ("Ctrl+Shift+W", "CloseTab"),
-        ("Ctrl+PageDown", "NextTab"),
-        ("Ctrl+PageUp", "PreviousTab"),
-        ("Alt+1", "SwitchTab1"),
-        ("Alt+2", "SwitchTab2"),
-        ("Alt+3", "SwitchTab3"),
-        ("Alt+4", "SwitchTab4"),
-        ("Alt+5", "SwitchTab5"),
-        ("Alt+6", "SwitchTab6"),
-        ("Alt+7", "SwitchTab7"),
-        ("Alt+8", "SwitchTab8"),
-        ("Alt+9", "SwitchTab9"),
-        ("Ctrl+Shift+PageUp", "MoveTabLeft"),
-        ("Ctrl+Shift+PageDown", "MoveTabRight"),
-    ];
-
-    for &(key, action) in DEFAULTS {
-        if let (Some(keystroke), Some(action)) = (KeyStroke::parse(key), parse_action(action)) {
-            keybindings.insert(keystroke, action);
-        }
-    }
-}
-
 impl ForgeConfig {
     pub fn validate(&mut self) -> Vec<ConfigError> {
         let mut errors = Vec::new();
@@ -892,10 +823,6 @@ impl ForgeConfig {
             self.scrollback.lines = Some(lines.max(100)); // allow unbounded if None, but min 100
         }
         self.scrollback.scroll_multiplier = self.scrollback.scroll_multiplier.clamp(0.5, 10.0);
-        self.command_completion_indicator.display_duration_ms = self
-            .command_completion_indicator
-            .display_duration_ms
-            .clamp(250, 60_000);
         self.window.padding.top = self.window.padding.top.clamp(0, 100);
         self.window.padding.bottom = self.window.padding.bottom.clamp(0, 100);
         self.window.padding.left = self.window.padding.left.clamp(0, 100);
@@ -917,40 +844,29 @@ impl ForgeConfig {
         let default_theme = ThemeConfig::default();
         self.theme.parsed_background = parse_c(&self.theme.background, "theme.background", default_theme.parsed_background);
         self.theme.parsed_foreground = parse_c(&self.theme.foreground, "theme.foreground", default_theme.parsed_foreground);
-        self.theme.parsed_popup_background = parse_c(&self.theme.popup_background, "theme.popup_background", default_theme.parsed_popup_background);
         self.theme.parsed_cursor_color = parse_c(&self.theme.cursor_color, "theme.cursor_color", default_theme.parsed_cursor_color);
         self.theme.parsed_selection_bg = parse_c(&self.theme.selection_bg, "theme.selection_bg", default_theme.parsed_selection_bg);
         self.theme.parsed_pane_outline_active = parse_c(&self.theme.pane_outline_active, "theme.pane_outline_active", default_theme.parsed_pane_outline_active);
         self.theme.parsed_pane_outline_inactive = parse_c(&self.theme.pane_outline_inactive, "theme.pane_outline_inactive", default_theme.parsed_pane_outline_inactive);
 
-        if let Some(ansi_colors) = self.theme.ansi_colors.take() {
-            self.theme.parsed_ansi_colors = std::array::from_fn(|index| {
-                parse_c(
-                    &ansi_colors[index],
-                    &format!("theme.ansi_colors[{index}]"),
-                    default_theme.parsed_ansi_colors[index],
-                )
-            });
-        } else {
-            self.theme.parsed_ansi_colors = [
-                parse_c(&self.theme.ansi.black, "theme.ansi.black", default_theme.parsed_ansi_colors[0]),
-                parse_c(&self.theme.ansi.red, "theme.ansi.red", default_theme.parsed_ansi_colors[1]),
-                parse_c(&self.theme.ansi.green, "theme.ansi.green", default_theme.parsed_ansi_colors[2]),
-                parse_c(&self.theme.ansi.yellow, "theme.ansi.yellow", default_theme.parsed_ansi_colors[3]),
-                parse_c(&self.theme.ansi.blue, "theme.ansi.blue", default_theme.parsed_ansi_colors[4]),
-                parse_c(&self.theme.ansi.magenta, "theme.ansi.magenta", default_theme.parsed_ansi_colors[5]),
-                parse_c(&self.theme.ansi.cyan, "theme.ansi.cyan", default_theme.parsed_ansi_colors[6]),
-                parse_c(&self.theme.ansi.white, "theme.ansi.white", default_theme.parsed_ansi_colors[7]),
-                parse_c(&self.theme.ansi.bright_black, "theme.ansi.bright_black", default_theme.parsed_ansi_colors[8]),
-                parse_c(&self.theme.ansi.bright_red, "theme.ansi.bright_red", default_theme.parsed_ansi_colors[9]),
-                parse_c(&self.theme.ansi.bright_green, "theme.ansi.bright_green", default_theme.parsed_ansi_colors[10]),
-                parse_c(&self.theme.ansi.bright_yellow, "theme.ansi.bright_yellow", default_theme.parsed_ansi_colors[11]),
-                parse_c(&self.theme.ansi.bright_blue, "theme.ansi.bright_blue", default_theme.parsed_ansi_colors[12]),
-                parse_c(&self.theme.ansi.bright_magenta, "theme.ansi.bright_magenta", default_theme.parsed_ansi_colors[13]),
-                parse_c(&self.theme.ansi.bright_cyan, "theme.ansi.bright_cyan", default_theme.parsed_ansi_colors[14]),
-                parse_c(&self.theme.ansi.bright_white, "theme.ansi.bright_white", default_theme.parsed_ansi_colors[15]),
-            ];
-        }
+        self.theme.parsed_ansi_colors = [
+            parse_c(&self.theme.ansi.black, "theme.ansi.black", default_theme.parsed_ansi_colors[0]),
+            parse_c(&self.theme.ansi.red, "theme.ansi.red", default_theme.parsed_ansi_colors[1]),
+            parse_c(&self.theme.ansi.green, "theme.ansi.green", default_theme.parsed_ansi_colors[2]),
+            parse_c(&self.theme.ansi.yellow, "theme.ansi.yellow", default_theme.parsed_ansi_colors[3]),
+            parse_c(&self.theme.ansi.blue, "theme.ansi.blue", default_theme.parsed_ansi_colors[4]),
+            parse_c(&self.theme.ansi.magenta, "theme.ansi.magenta", default_theme.parsed_ansi_colors[5]),
+            parse_c(&self.theme.ansi.cyan, "theme.ansi.cyan", default_theme.parsed_ansi_colors[6]),
+            parse_c(&self.theme.ansi.white, "theme.ansi.white", default_theme.parsed_ansi_colors[7]),
+            parse_c(&self.theme.ansi.bright_black, "theme.ansi.bright_black", default_theme.parsed_ansi_colors[8]),
+            parse_c(&self.theme.ansi.bright_red, "theme.ansi.bright_red", default_theme.parsed_ansi_colors[9]),
+            parse_c(&self.theme.ansi.bright_green, "theme.ansi.bright_green", default_theme.parsed_ansi_colors[10]),
+            parse_c(&self.theme.ansi.bright_yellow, "theme.ansi.bright_yellow", default_theme.parsed_ansi_colors[11]),
+            parse_c(&self.theme.ansi.bright_blue, "theme.ansi.bright_blue", default_theme.parsed_ansi_colors[12]),
+            parse_c(&self.theme.ansi.bright_magenta, "theme.ansi.bright_magenta", default_theme.parsed_ansi_colors[13]),
+            parse_c(&self.theme.ansi.bright_cyan, "theme.ansi.bright_cyan", default_theme.parsed_ansi_colors[14]),
+            parse_c(&self.theme.ansi.bright_white, "theme.ansi.bright_white", default_theme.parsed_ansi_colors[15]),
+        ];
 
         let default_confirm = ConfirmCloseConfig::default();
         self.confirm_close.parsed_panel_color = parse_c(&self.confirm_close.panel_color, "confirm_close.panel_color", default_confirm.parsed_panel_color);
@@ -966,195 +882,29 @@ impl ForgeConfig {
         }
 
         // Validate Keybindings
-        self.keybindings.clear();
-        if !self.behavior.disable_default_keybindings {
-            install_default_keybindings(&mut self.keybindings);
+        if self.behavior.disable_default_keybindings {
+            self.keybindings.clear();
+        } else {
+            // we already have default keybindings populated.
         }
 
-        for (action_name, key) in &self.raw_keybindings {
+        for (key, action_str) in &self.raw_keybindings {
             let ks = KeyStroke::parse(key);
-            let act = parse_action(action_name);
+            let act = parse_action(action_str);
 
             match (ks, act) {
                 (Some(k), Some(a)) => {
-                    self.keybindings.retain(|_, existing| existing != &a);
                     self.keybindings.insert(k, a);
                 }
                 (None, _) => {
-                    errors.push(ConfigError::InvalidKeybinding { key: key.clone(), action: action_name.clone(), reason: "Invalid key format".to_string() });
+                    errors.push(ConfigError::InvalidKeybinding { key: key.clone(), action: action_str.clone(), reason: "Invalid key format".to_string() });
                 }
                 (_, None) => {
-                    errors.push(ConfigError::InvalidKeybinding { key: key.clone(), action: action_name.clone(), reason: "Unknown action".to_string() });
+                    errors.push(ConfigError::InvalidKeybinding { key: key.clone(), action: action_str.clone(), reason: "Unknown action".to_string() });
                 }
             }
         }
 
         errors
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bindings::modifiers;
-
-    #[test]
-    fn default_ctrl_shift_d_docks_floating_pane() {
-        let config = ForgeConfig::default();
-        let key = KeyStroke {
-            modifiers: modifiers::CTRL | modifiers::SHIFT,
-            keysym: KeyStroke::normalized_keysym('D' as u32),
-        };
-
-        assert_eq!(
-            config.keybindings.get(&key),
-            Some(&Action::TogglePaneFloating)
-        );
-    }
-
-    #[test]
-    fn default_ctrl_shift_q_remains_close_pane() {
-        let config = ForgeConfig::default();
-        let key = KeyStroke {
-            modifiers: modifiers::CTRL | modifiers::SHIFT,
-            keysym: KeyStroke::normalized_keysym('Q' as u32),
-        };
-
-        assert_eq!(config.keybindings.get(&key), Some(&Action::ClosePane));
-    }
-
-    #[test]
-    fn toml_keybinds_action_to_key_syntax_compiles_copy_binding() {
-        let mut config: ForgeConfig = toml::from_str(
-            r#"
-            [keybinds]
-            copy = "ctrl+shift+c"
-            "#,
-        )
-        .expect("keybind config should deserialize");
-
-        assert!(config.validate().is_empty());
-        let copy = KeyStroke::parse("ctrl+shift+c").unwrap();
-        assert_eq!(config.keybindings.get(&copy), Some(&Action::Copy));
-    }
-
-    #[test]
-    fn keybindings_alias_and_custom_binding_replace_default_action_key() {
-        let mut config: ForgeConfig = toml::from_str(
-            r#"
-            [keybindings]
-            copy = "alt+c"
-            "#,
-        )
-        .expect("legacy keybindings section should deserialize");
-
-        assert!(config.validate().is_empty());
-        let custom = KeyStroke::parse("alt+c").unwrap();
-        let default = KeyStroke::parse("ctrl+shift+c").unwrap();
-        assert_eq!(config.keybindings.get(&custom), Some(&Action::Copy));
-        assert_eq!(config.keybindings.get(&default), None);
-    }
-
-    #[test]
-    fn validation_rebuilds_defaults_after_toml_deserialization() {
-        let mut config: ForgeConfig = toml::from_str("").expect("empty config should deserialize");
-
-        assert!(config.validate().is_empty());
-        let copy = KeyStroke::parse("ctrl+shift+c").unwrap();
-        let paste = KeyStroke::parse("ctrl+shift+v").unwrap();
-        assert_eq!(config.keybindings.get(&copy), Some(&Action::Copy));
-        assert_eq!(config.keybindings.get(&paste), Some(&Action::Paste));
-    }
-
-    #[test]
-    fn command_completion_indicator_defaults_to_enabled_ten_seconds() {
-        let config = ForgeConfig::default();
-
-        assert_eq!(
-            config.command_completion_indicator.mode,
-            CommandCompletionIndicatorMode::Enabled
-        );
-        assert_eq!(
-            config.command_completion_indicator.minimum_duration_ms,
-            10_000
-        );
-        assert_eq!(
-            config.command_completion_indicator.dismissal,
-            CommandCompletionIndicatorDismissal::Timeout
-        );
-        assert_eq!(config.command_completion_indicator.display_duration_ms, 3_000);
-        assert!(!config.command_completion_indicator.transparent);
-        assert_eq!(config.theme.popup_background, "#1e1e2e");
-        assert_eq!(
-            config.theme.parsed_popup_background,
-            Color {
-                r: 30,
-                g: 30,
-                b: 46,
-                a: 255,
-            }
-        );
-    }
-
-    #[test]
-    fn command_completion_indicator_toml_parses_disabled_on_zoom() {
-        let mut config: ForgeConfig = toml::from_str(
-            r##"
-            [command_completion_indicator]
-            mode = "disabled_on_zoom"
-            minimum_duration_ms = 2500
-            dismissal = "on_interaction"
-            display_duration_ms = 3500
-            transparent = true
-
-            [theme]
-            popup_background = "#1e1e2e80"
-            "##,
-        )
-        .expect("config should parse");
-        let errors = config.validate();
-
-        assert!(errors.is_empty());
-        assert_eq!(
-            config.command_completion_indicator.mode,
-            CommandCompletionIndicatorMode::DisabledOnZoom
-        );
-        assert_eq!(config.command_completion_indicator.minimum_duration_ms, 2500);
-        assert_eq!(
-            config.command_completion_indicator.dismissal,
-            CommandCompletionIndicatorDismissal::OnInteraction
-        );
-        assert_eq!(config.command_completion_indicator.display_duration_ms, 3500);
-        assert!(config.command_completion_indicator.transparent);
-        assert_eq!(
-            config.theme.parsed_popup_background,
-            Color {
-                r: 30,
-                g: 30,
-                b: 46,
-                a: 128,
-            }
-        );
-    }
-
-    #[test]
-    fn popup_background_rejects_invalid_color() {
-        let mut invalid: ForgeConfig = toml::from_str(
-            r#"
-            [theme]
-            popup_background = "not-a-color"
-            "#,
-        )
-        .expect("config should parse");
-        let errors = invalid.validate();
-        assert!(errors.iter().any(|error| matches!(
-            error,
-            ConfigError::InvalidColor { path, .. }
-                if path == "theme.popup_background"
-        )));
-        assert_eq!(
-            invalid.theme.parsed_popup_background,
-            ThemeConfig::default().parsed_popup_background
-        );
     }
 }

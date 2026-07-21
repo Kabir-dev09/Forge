@@ -39,9 +39,14 @@ impl std::error::Error for ConfigLoadError {}
 
 pub fn parse_config_file(path: &Path) -> Result<ForgeConfig, ConfigLoadError> {
     let merged = load_merged_toml(path)?;
-    let mut config = ForgeConfig::default();
-    crate::extractor::extract_config(&merged, &mut config);
-    config.validate();
+    let mut config: ForgeConfig = merged.try_into().map_err(|source| ConfigLoadError::Toml {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let errors = config.validate();
+    for err in errors {
+        tracing::warn!("Config validation error in {}: {}", path.display(), err);
+    }
     Ok(config)
 }
 
@@ -158,11 +163,11 @@ mod tests {
     #[test]
     fn loads_one_imported_file() {
         let dir = temp_dir("one");
-        write(&dir, "theme.toml", "[colors]\nbackground = \"#111111\"\n");
+        write(&dir, "theme.toml", "[theme]\nbackground = \"#111111\"\n");
         write(&dir, "config.toml", "imports = [\"theme.toml\"]\n");
 
         let config = parse_config_file(&dir.join("config.toml")).unwrap();
-        assert_eq!(config.theme.background.r, 17);
+        assert_eq!(config.theme.parsed_background.r, 17);
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -187,11 +192,11 @@ mod tests {
     #[test]
     fn later_imports_override_earlier_imports() {
         let dir = temp_dir("override_import");
-        write(&dir, "theme.toml", "[colors]\nforeground = \"#111111\"\n");
+        write(&dir, "theme.toml", "[theme]\nforeground = \"#111111\"\n");
         write(
             &dir,
             "theme-overrides.toml",
-            "[colors]\nforeground = \"#222222\"\n",
+            "[theme]\nforeground = \"#222222\"\n",
         );
         write(
             &dir,
@@ -200,7 +205,7 @@ mod tests {
         );
 
         let config = parse_config_file(&dir.join("config.toml")).unwrap();
-        assert_eq!(config.theme.foreground.r, 34);
+        assert_eq!(config.theme.parsed_foreground.r, 34);
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -248,7 +253,7 @@ mod tests {
         write(
             &dir,
             "colors/catppuccin.toml",
-            "[colors]\nbackground = \"#010203\"\n",
+            "[theme]\nbackground = \"#010203\"\n",
         );
         write(
             &dir,
@@ -258,9 +263,9 @@ mod tests {
         write(&dir, "config.toml", "imports = [\"theme.toml\"]\n");
 
         let config = parse_config_file(&dir.join("config.toml")).unwrap();
-        assert_eq!(config.theme.background.r, 1);
-        assert_eq!(config.theme.background.g, 2);
-        assert_eq!(config.theme.background.b, 3);
+        assert_eq!(config.theme.parsed_background.r, 1);
+        assert_eq!(config.theme.parsed_background.g, 2);
+        assert_eq!(config.theme.parsed_background.b, 3);
 
         std::fs::remove_dir_all(dir).ok();
     }

@@ -10,4 +10,5 @@ serde = { workspace = true }
 bytemuck = { workspace = true }
 anyhow = { workspace = true }
 memmap2 = { workspace = true }
+toml.workspace = true
 

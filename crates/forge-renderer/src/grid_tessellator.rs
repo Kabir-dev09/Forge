@@ -1,7 +1,7 @@
-use super::font::atlas::{GlyphAtlas, GlyphKey, GlyphMetrics, ShapedGlyphKey};
+use super::font::atlas::{FontStyle, GlyphAtlas, GlyphKey, GlyphMetrics, ShapedGlyphKey};
 use super::font::ligature::{row_has_ligature_candidate, tokenize_ligature_candidates};
 use super::font::rasterizer::FontRasterizer;
-use super::font::shaper::{font_identity, ShapedGlyph, ShaperCache, ShaperCacheEntry, TextRunKey};
+use super::font::shaper::{ShapedGlyph, ShaperCache, ShaperCacheEntry, TextRunKey};
 use super::pipeline::GlyphVertex;
 use forge_core::cell::Cell;
 use forge_core::config_registry::LigatureConfig;
@@ -93,6 +93,17 @@ pub struct ContextMenuRenderData<'a> {
     pub hovered_item: Option<usize>,
     pub items: &'a [ContextMenuRenderItem<'a>],
     pub submenu: Option<ContextMenuPanelRenderData<'a>>,
+    pub background_color: [f32; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StatusbarHoverRenderData {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub opacity: f32,
+    pub color: [f32; 4],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -143,6 +154,8 @@ pub struct LigatureRenderContext<'a> {
     pub shaper: &'a mut ShaperCache,
     pub rasterizer: &'a FontRasterizer,
     pub bold_rasterizer: Option<&'a FontRasterizer>,
+    pub italic_rasterizer: Option<&'a FontRasterizer>,
+    pub bold_italic_rasterizer: Option<&'a FontRasterizer>,
     pub px_size: f32,
 }
 
@@ -163,6 +176,7 @@ struct RenderGeometryKey {
     cursor_color: [u32; 4],
     selection_bg: [u32; 4],
     cursor_style: u8,
+    foreground_suppression: Option<[u32; 4]>,
 }
 
 impl RenderGeometryKey {
@@ -182,6 +196,7 @@ impl RenderGeometryKey {
         cursor_style: forge_core::config_registry::CursorStyle,
         pad_x: f32,
         pad_y: f32,
+        foreground_suppression: Option<PixelRect>,
     ) -> Self {
         Self {
             rows: grid.len(),
@@ -203,8 +218,25 @@ impl RenderGeometryKey {
                 forge_core::config_registry::CursorStyle::Underline => 1,
                 forge_core::config_registry::CursorStyle::Beam => 2,
             },
+            foreground_suppression: foreground_suppression.map(|rect| {
+                [
+                    rect.x.to_bits(),
+                    rect.y.to_bits(),
+                    rect.width.to_bits(),
+                    rect.height.to_bits(),
+                ]
+            }),
         }
     }
+}
+
+fn rects_intersect(a: PixelRect, b: PixelRect) -> bool {
+    a.has_positive_area()
+        && b.has_positive_area()
+        && a.x < b.x + b.width
+        && a.x + a.width > b.x
+        && a.y < b.y + b.height
+        && a.y + a.height > b.y
 }
 
 fn reserve_capacity<T>(values: &mut Vec<T>, required: usize) {
@@ -239,13 +271,13 @@ fn glyph_for<'a>(
     atlas: &'a GlyphAtlas,
     missing_glyphs: &mut HashSet<GlyphKey>,
     c: char,
-    is_bold: bool,
+    style: FontStyle,
 ) -> Option<&'a GlyphMetrics> {
-    if let Some(glyph) = atlas.get_exact(c, is_bold) {
+    if let Some(glyph) = atlas.get_exact(c, style) {
         return Some(glyph);
     }
 
-    missing_glyphs.insert(GlyphKey { c, is_bold });
+    missing_glyphs.insert(GlyphKey { c, style });
     atlas.fallback()
 }
 
@@ -287,12 +319,18 @@ fn plan_ligatures_for_row<Nd, Push, ColorFn>(
         if !token.text.is_ascii() {
             continue;
         }
-        let active_rasterizer = if token.style.is_bold() {
-            context.bold_rasterizer.unwrap_or(context.rasterizer)
-        } else {
-            context.rasterizer
+        let font_style = FontStyle::from_flags(token.style.is_bold(), token.style.is_italic());
+        let active_rasterizer = match font_style {
+            FontStyle::Regular => context.rasterizer,
+            FontStyle::Bold => context.bold_rasterizer.unwrap_or(context.rasterizer),
+            FontStyle::Italic => context.italic_rasterizer.unwrap_or(context.rasterizer),
+            FontStyle::BoldItalic => context
+                .bold_italic_rasterizer
+                .or(context.italic_rasterizer)
+                .or(context.bold_rasterizer)
+                .unwrap_or(context.rasterizer),
         };
-        let font_hash = font_identity(&active_rasterizer.bytes);
+        let font_hash = active_rasterizer.identity();
         let key = TextRunKey {
             text: token.text.clone(),
             font_hash,
@@ -305,6 +343,8 @@ fn plan_ligatures_for_row<Nd, Push, ColorFn>(
             key,
             context.rasterizer,
             context.bold_rasterizer,
+            context.italic_rasterizer,
+            context.bold_italic_rasterizer,
             context.px_size,
         ) else {
             continue;
@@ -330,12 +370,11 @@ fn plan_ligatures_for_row<Nd, Push, ColorFn>(
                 continue;
             }
 
-            let is_bold = token.style.is_bold();
             let shaped_keys: Vec<_> = cluster_glyphs
                 .iter()
                 .map(|glyph| ShapedGlyphKey {
                     glyph_id: glyph.glyph_id,
-                    is_bold,
+                    style: font_style,
                     font_hash,
                 })
                 .collect();
@@ -403,6 +442,10 @@ fn context_menu_fingerprint(menu: Option<ContextMenuRenderData<'_>>) -> u64 {
     };
 
     let mut hash = 0xcbf29ce484222325_u64;
+    for channel in menu.background_color {
+        hash ^= channel.to_bits() as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
     hash_context_menu_panel(
         &mut hash,
         ContextMenuPanelRenderData {
@@ -599,6 +642,70 @@ fn push_antialiased_rounded_pixel_quad(
     ]);
 }
 
+fn push_antialiased_circle_pixel_quad(
+    vertices: &mut Vec<GlyphVertex>,
+    vp_w: f32,
+    vp_h: f32,
+    x: f32,
+    y: f32,
+    diameter: f32,
+    padding: f32,
+    color: [f32; 4],
+) {
+    if diameter <= 0.0 {
+        return;
+    }
+
+    let padding = padding.max(0.0);
+    let quad_x = x - padding;
+    let quad_y = y - padding;
+    let quad_size = diameter + padding * 2.0;
+    let tl = ndc(vp_w, vp_h, quad_x, quad_y);
+    let tr = ndc(vp_w, vp_h, quad_x + quad_size, quad_y);
+    let br = ndc(vp_w, vp_h, quad_x + quad_size, quad_y + quad_size);
+    let bl = ndc(vp_w, vp_h, quad_x, quad_y + quad_size);
+    let uv = [-42.0, diameter * 0.5];
+
+    vertices.extend_from_slice(&[
+        GlyphVertex {
+            position: tl,
+            tex_coord: uv,
+            fg_color: [-padding, -padding, diameter, diameter],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: bl,
+            tex_coord: uv,
+            fg_color: [-padding, diameter + padding, diameter, diameter],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: br,
+            tex_coord: uv,
+            fg_color: [diameter + padding, diameter + padding, diameter, diameter],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: tl,
+            tex_coord: uv,
+            fg_color: [-padding, -padding, diameter, diameter],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: br,
+            tex_coord: uv,
+            fg_color: [diameter + padding, diameter + padding, diameter, diameter],
+            bg_color: color,
+        },
+        GlyphVertex {
+            position: tr,
+            tex_coord: uv,
+            fg_color: [diameter + padding, -padding, diameter, diameter],
+            bg_color: color,
+        },
+    ]);
+}
+
 fn tessellate_context_menu(
     vertices: &mut Vec<GlyphVertex>,
     atlas: &GlyphAtlas,
@@ -627,6 +734,7 @@ fn tessellate_context_menu(
             hovered_item: menu.hovered_item,
             items: menu.items,
         },
+        menu.background_color,
         baseline,
         cell_w,
         cell_h,
@@ -641,6 +749,7 @@ fn tessellate_context_menu(
             atlas,
             missing_glyphs,
             submenu,
+            menu.background_color,
             baseline,
             cell_w,
             cell_h,
@@ -656,6 +765,7 @@ fn tessellate_context_menu_panel(
     atlas: &GlyphAtlas,
     missing_glyphs: &mut HashSet<GlyphKey>,
     menu: ContextMenuPanelRenderData<'_>,
+    background_color: [f32; 4],
     baseline: f32,
     cell_w: f32,
     cell_h: f32,
@@ -667,14 +777,7 @@ fn tessellate_context_menu_panel(
         return;
     }
 
-    let bg_color = forge_core::color::Color {
-        r: 30,
-        g: 30,
-        b: 46,
-        a: 255,
-    }
-    .to_srgb_linear();
-    let mut background = [bg_color.r, bg_color.g, bg_color.b, bg_color.a];
+    let mut background = background_color;
     if transparent {
         background[3] = 0.0;
     }
@@ -698,7 +801,12 @@ fn tessellate_context_menu_panel(
     let text = [txt.r, txt.g, txt.b, txt.a];
 
     let hover = border_color;
-    let hover_text = [bg_color.r, bg_color.g, bg_color.b, bg_color.a];
+    let hover_text = [
+        background_color[0],
+        background_color[1],
+        background_color[2],
+        1.0,
+    ];
 
     let max_len = menu
         .items
@@ -794,7 +902,12 @@ fn tessellate_context_menu_panel(
                 }
 
                 if c != ' ' {
-                    if let Some(glyph) = glyph_for(atlas, missing_glyphs, c, is_hovered) {
+                    if let Some(glyph) = glyph_for(
+                        atlas,
+                        missing_glyphs,
+                        c,
+                        FontStyle::from_flags(is_hovered, false),
+                    ) {
                         let glyph_x = (cell_x + glyph.bearing_x as f32).round();
                         let glyph_y = (cell_y + baseline - glyph.bearing_y as f32).round();
                         push_quad_vertices(
@@ -817,6 +930,7 @@ fn tessellate_context_menu_panel(
         }
     }
 }
+
 
 impl RowTessellation {
     fn translate_y(&mut self, delta_ndc_y: f32) {
@@ -892,6 +1006,158 @@ impl GridTessellator {
             [-1.0, 0.0],
         );
         Some(VertexRange::new(start, self.vertices.len() - start))
+    }
+
+    pub fn append_rounded_rect(
+        &mut self,
+        vp_w: f32,
+        vp_h: f32,
+        rect: PixelRect,
+        radius: f32,
+        color: [f32; 4],
+    ) -> Option<VertexRange> {
+        if !rect.has_positive_area() {
+            return None;
+        }
+
+        let start = self.vertices.len();
+        push_antialiased_rounded_pixel_quad(
+            &mut self.vertices,
+            vp_w,
+            vp_h,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            radius,
+            color,
+        );
+        Some(VertexRange::new(start, self.vertices.len() - start))
+    }
+
+    pub fn append_circle(
+        &mut self,
+        vp_w: f32,
+        vp_h: f32,
+        x: f32,
+        y: f32,
+        diameter: f32,
+        padding: f32,
+        color: [f32; 4],
+    ) -> Option<VertexRange> {
+        if diameter <= 0.0 {
+            return None;
+        }
+
+        let start = self.vertices.len();
+        push_antialiased_circle_pixel_quad(
+            &mut self.vertices,
+            vp_w,
+            vp_h,
+            x,
+            y,
+            diameter,
+            padding,
+            color,
+        );
+        Some(VertexRange::new(start, self.vertices.len() - start))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_overlay_text(
+        &mut self,
+        atlas: &GlyphAtlas,
+        vp_w: f32,
+        vp_h: f32,
+        x: f32,
+        y: f32,
+        cell_w: f32,
+        cell_h: f32,
+        text: &str,
+        color: [f32; 4],
+    ) {
+        if text.is_empty() || cell_w <= 0.0 || cell_h <= 0.0 {
+            return;
+        }
+
+        let mut top = f32::MAX;
+        let mut bottom = f32::MIN;
+        for c in text.chars().filter(|c| *c != ' ') {
+            if let Some(glyph) = glyph_for(
+                atlas,
+                &mut self.missing_glyphs,
+                c,
+                FontStyle::Regular,
+            ) {
+                let glyph_top = -(glyph.bearing_y as f32);
+                let glyph_bottom = glyph.height as f32 - glyph.bearing_y as f32;
+                top = top.min(glyph_top);
+                bottom = bottom.max(glyph_bottom);
+            }
+        }
+        if top == f32::MAX {
+            return;
+        }
+
+        let text_h = (bottom - top).max(1.0);
+        let baseline = ((cell_h - text_h) * 0.5 - top).round();
+
+        for (col, c) in text.chars().enumerate() {
+            if c == ' ' {
+                continue;
+            }
+            if let Some(glyph) = glyph_for(
+                atlas,
+                &mut self.missing_glyphs,
+                c,
+                FontStyle::Regular,
+            ) {
+                let cell_x = x + col as f32 * cell_w;
+                let glyph_x = (cell_x + glyph.bearing_x as f32).round();
+                let glyph_y = (y + baseline - glyph.bearing_y as f32).round();
+                push_quad_vertices(
+                    &mut self.vertices,
+                    ndc(vp_w, vp_h, glyph_x, glyph_y),
+                    ndc(
+                        vp_w,
+                        vp_h,
+                        glyph_x + glyph.width as f32,
+                        glyph_y + glyph.height as f32,
+                    ),
+                    [glyph.u0, glyph.v0],
+                    [glyph.u1, glyph.v1],
+                    color,
+                    color,
+                );
+            }
+        }
+    }
+
+    pub fn append_statusbar_hover_overlay(
+        &mut self,
+        vp_w: f32,
+        vp_h: f32,
+        hover: Option<StatusbarHoverRenderData>,
+    ) {
+        let Some(hover) = hover else { return };
+        if hover.opacity <= 0.0 {
+            return;
+        }
+
+        let mut final_color = hover.color;
+        final_color[3] *= hover.opacity;
+
+        push_pixel_quad(
+            &mut self.vertices,
+            vp_w,
+            vp_h,
+            hover.x,
+            hover.y,
+            hover.width,
+            hover.height,
+            final_color,
+            [-1.0, 0.0],
+        );
     }
 
     pub fn append_scrollbar_overlay(
@@ -1060,6 +1326,7 @@ impl GridTessellator {
         context_menu_transparent: bool,
         scroll_event: Option<ScrollEvent>,
         scroll_id: u64,
+        foreground_suppression: Option<PixelRect>,
         mut ligature_context: Option<&mut LigatureRenderContext<'_>>,
     ) {
         let _span = tracing::trace_span!(
@@ -1113,6 +1380,7 @@ impl GridTessellator {
             cursor_style,
             pad_x,
             pad_y,
+            foreground_suppression,
         );
         if self.last_geometry != Some(geometry) {
             self.actual_dirty.fill(true);
@@ -1256,7 +1524,7 @@ impl GridTessellator {
 
         let push_atlas_glyph = |verts: &mut Vec<GlyphVertex>,
                                 c: char,
-                                cell: &Cell,
+                                _cell: &Cell,
                                 glyph: &super::font::atlas::GlyphMetrics,
                                 px_x: f32,
                                 origin_y: f32,
@@ -1267,11 +1535,6 @@ impl GridTessellator {
             let g_y = (origin_y + baseline - glyph.bearing_y as f32).round();
             let mut g_w = glyph.width as f32;
             let g_h = glyph.height as f32;
-
-            if cell.is_italic() {
-                g_x += (native_cell_h * 0.2).round();
-                g_w += (native_cell_w * 0.2).round();
-            }
 
             // Glyph Inflation for Powerline / connecting symbols
             if ('\u{E0B0}'..='\u{E0D4}').contains(&c) {
@@ -1314,33 +1577,41 @@ impl GridTessellator {
             row_tess.prepare_for_row(row.len());
             row_tess.generation = row_tess.generation.wrapping_add(1);
             let row_px_y = row_idx as f32 * cell_h + pad_y;
+            let row_has_foreground_suppression = foreground_suppression.is_some_and(|rect| {
+                rects_intersect(
+                    rect,
+                    PixelRect::new(pad_x, row_px_y, row.len() as f32 * cell_w, cell_h),
+                )
+            });
             let origin_y = (row_px_y + inset_y).round();
             let mut background_run: Option<(f32, f32, [f32; 4])> = None;
             self.ligature_suppressed_cells.clear();
             self.ligature_suppressed_cells.resize(row.len(), false);
             let mut shaped_vertices = Vec::new();
-            if let Some(context) = ligature_context.as_deref_mut() {
-                plan_ligatures_for_row(
-                    row,
-                    row_idx,
-                    cursor
-                        .map(|(col, row)| (row == row_idx).then_some(col))
-                        .flatten(),
-                    selection,
-                    context,
-                    atlas,
-                    &mut self.missing_shaped_glyphs,
-                    &mut self.ligature_suppressed_cells,
-                    &mut shaped_vertices,
-                    cell_w,
-                    baseline,
-                    origin_y,
-                    inset_x,
-                    pad_x,
-                    &ndc,
-                    &push_quad,
-                    &color_to_f32,
-                );
+            if !row_has_foreground_suppression {
+                if let Some(context) = ligature_context.as_deref_mut() {
+                    plan_ligatures_for_row(
+                        row,
+                        row_idx,
+                        cursor
+                            .map(|(col, row)| (row == row_idx).then_some(col))
+                            .flatten(),
+                        selection,
+                        context,
+                        atlas,
+                        &mut self.missing_shaped_glyphs,
+                        &mut self.ligature_suppressed_cells,
+                        &mut shaped_vertices,
+                        cell_w,
+                        baseline,
+                        origin_y,
+                        inset_x,
+                        pad_x,
+                        &ndc,
+                        &push_quad,
+                        &color_to_f32,
+                    );
+                }
             }
 
             for (col_idx, cell) in row.iter().enumerate() {
@@ -1353,6 +1624,9 @@ impl GridTessellator {
 
                 let px_x = col_idx as f32 * cell_w + pad_x;
                 let px_y = row_px_y;
+                let suppress_foreground = foreground_suppression.is_some_and(|rect| {
+                    rects_intersect(rect, PixelRect::new(px_x, px_y, cell_w, cell_h))
+                });
 
                 let mut fg = color_to_f32(cell.fg);
                 let mut bg = color_to_f32(cell.bg);
@@ -1391,7 +1665,12 @@ impl GridTessellator {
                     let c = cell.c;
                     if c != ' ' {
                         if let Some(glyph) =
-                            glyph_for(atlas, &mut self.missing_glyphs, c, cell.is_bold())
+                            glyph_for(
+                                atlas,
+                                &mut self.missing_glyphs,
+                                c,
+                                FontStyle::from_flags(cell.is_bold(), cell.is_italic()),
+                            )
                         {
                             let actual_w = glyph.width as f32;
                             if actual_w > cell_w {
@@ -1428,7 +1707,9 @@ impl GridTessellator {
                     flush_background_run(row_tess, start_x, end_x, row_px_y, bg);
                 }
 
-                if is_cursor && cursor_style == forge_core::config_registry::CursorStyle::Underline
+                if !suppress_foreground
+                    && is_cursor
+                    && cursor_style == forge_core::config_registry::CursorStyle::Underline
                 {
                     let tl = ndc(px_x, px_y + cell_h - 2.0);
                     let br = ndc(px_x + cell_w, px_y + cell_h);
@@ -1444,7 +1725,10 @@ impl GridTessellator {
                     );
                 }
 
-                if is_cursor && cursor_style == forge_core::config_registry::CursorStyle::Beam {
+                if !suppress_foreground
+                    && is_cursor
+                    && cursor_style == forge_core::config_registry::CursorStyle::Beam
+                {
                     let tl = ndc(px_x, px_y);
                     let br = ndc(px_x + 1.0, px_y + cell_h);
                     let uv = [-1.0, 0.0];
@@ -1460,10 +1744,18 @@ impl GridTessellator {
                 }
 
                 let c = cell.c;
-                if c != ' ' && !self.ligature_suppressed_cells[col_idx] {
+                if !suppress_foreground
+                    && c != ' '
+                    && !self.ligature_suppressed_cells[col_idx]
+                {
                     if c.is_ascii() {
                         if let Some(glyph) =
-                            glyph_for(atlas, &mut self.missing_glyphs, c, cell.is_bold())
+                            glyph_for(
+                                atlas,
+                                &mut self.missing_glyphs,
+                                c,
+                                FontStyle::from_flags(cell.is_bold(), cell.is_italic()),
+                            )
                         {
                             push_atlas_glyph(
                                 &mut row_tess.fg_vertices,
@@ -1490,7 +1782,12 @@ impl GridTessellator {
                             &push_quad,
                         ) {
                             if let Some(glyph) =
-                                glyph_for(atlas, &mut self.missing_glyphs, c, cell.is_bold())
+                                glyph_for(
+                                    atlas,
+                                    &mut self.missing_glyphs,
+                                    c,
+                                    FontStyle::from_flags(cell.is_bold(), cell.is_italic()),
+                                )
                             {
                                 push_atlas_glyph(
                                     &mut row_tess.fg_vertices,
@@ -1507,7 +1804,7 @@ impl GridTessellator {
                     }
                 }
 
-                if cell.is_underline() {
+                if !suppress_foreground && cell.is_underline() {
                     let thickness = 1.0;
                     let mut y = (origin_y + baseline + 2.0).round();
                     if y + thickness > px_y + cell_h {
@@ -1519,7 +1816,7 @@ impl GridTessellator {
                     push_quad(&mut row_tess.fg_vertices, u_tl, u_br, u_uv, u_uv, fg, fg);
                 }
 
-                if cell.is_strikethrough() {
+                if !suppress_foreground && cell.is_strikethrough() {
                     let thickness = 1.0;
                     let y = (origin_y + baseline - (native_cell_h * 0.3)).round();
                     let s_tl = ndc(px_x, y);
@@ -1762,8 +2059,13 @@ mod tests {
             atlas_height: 1,
             glyphs,
             glyphs_bold: HashMap::new(),
+            glyphs_italic: HashMap::new(),
+            glyphs_bold_italic: HashMap::new(),
             shaped_glyphs: HashMap::new(),
             descriptor: GlyphAtlasDescriptor::dummy(),
+            font_cell_width: 8,
+            font_cell_height: 16,
+            font_baseline: 14,
             atlas_cell_width: 1,
             atlas_cell_height: 1,
             next_dynamic_slot: 1,
@@ -1865,6 +2167,7 @@ mod tests {
             false,
             scroll_event,
             scroll_id,
+            None,
             None,
         );
     }
@@ -2104,6 +2407,7 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
 
         tessellator.tessellate(
@@ -2131,6 +2435,7 @@ mod tests {
             false,
             None,
             0,
+            None,
             None,
         );
 
@@ -2361,6 +2666,7 @@ mod tests {
             }),
             0,
             None,
+            None,
         );
 
         assert_eq!(tessellator.rebuilt_rows, vec![0, 1, 2, 3]);
@@ -2416,6 +2722,7 @@ mod tests {
             false,
             None,
             0,
+            None,
             None,
         );
 
@@ -2494,11 +2801,12 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
 
         assert!(tessellator.missing_glyphs().contains(&GlyphKey {
             c: 'Ω',
-            is_bold: false,
+            style: FontStyle::Regular,
         }));
         assert!(!tessellator.rows[0].fg_vertices.is_empty());
     }
@@ -2552,6 +2860,7 @@ mod tests {
             false,
             None,
             0,
+            None,
             None,
         );
 

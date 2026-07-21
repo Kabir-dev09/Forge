@@ -2,25 +2,24 @@ use forge_renderer::grid_tessellator::{ContextMenuRenderData, ContextMenuRenderI
 
 const SPLIT_ITEM_INDEX: usize = 2;
 
-const ITEMS: [ContextMenuItem; 4] = [
-    ContextMenuItem {
-        label: "Copy",
-        action: ContextMenuAction::Copy,
+const EMPTY_ITEM: ContextMenuItem = ContextMenuItem {
+    label: "",
+    action: ContextMenuAction::Copy,
+    right_label: None,
+};
+
+const EMPTY_RENDER_ITEM: ContextMenuRenderItem<'static> = ContextMenuRenderItem {
+    label: "",
+    right_label: None,
+};
+
+const SPLIT_RENDER_ITEMS: [ContextMenuRenderItem<'static>; 2] = [
+    ContextMenuRenderItem {
+        label: "Horizontal",
         right_label: None,
     },
-    ContextMenuItem {
-        label: "Paste",
-        action: ContextMenuAction::Paste,
-        right_label: None,
-    },
-    ContextMenuItem {
-        label: "Split",
-        action: ContextMenuAction::Split,
-        right_label: Some(">"),
-    },
-    ContextMenuItem {
-        label: "Zoom Pane",
-        action: ContextMenuAction::ZoomPane,
+    ContextMenuRenderItem {
+        label: "Vertical",
         right_label: None,
     },
 ];
@@ -46,6 +45,7 @@ pub enum ContextMenuAction {
     SplitHorizontal,
     SplitVertical,
     ZoomPane,
+    TogglePaneFloating,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,14 +63,45 @@ pub struct ContextMenuState {
     hovered_split_item: Option<usize>,
     split_submenu_open: bool,
     target_pane: Option<crate::mux::PaneId>,
+    items: [ContextMenuItem; 5],
+    render_items: [ContextMenuRenderItem<'static>; 5],
+    num_items: usize,
 }
 
 impl ContextMenuState {
     pub fn open(x: f64, y: f64) -> Self {
-        Self::open_for_pane(x, y, None)
+        Self::open_for_pane(x, y, None, true, false)
     }
 
-    pub fn open_for_pane(x: f64, y: f64, target_pane: Option<crate::mux::PaneId>) -> Self {
+    pub fn open_for_pane(
+        x: f64,
+        y: f64,
+        target_pane: Option<crate::mux::PaneId>,
+        can_zoom: bool,
+        is_floating: bool,
+    ) -> Self {
+        let mut items = [EMPTY_ITEM; 5];
+        let mut render_items = [EMPTY_RENDER_ITEM; 5];
+        let mut num_items = 0;
+
+        let mut add_item = |label: &'static str, action: ContextMenuAction, right_label: Option<&'static str>| {
+            items[num_items] = ContextMenuItem { label, action, right_label };
+            render_items[num_items] = ContextMenuRenderItem { label, right_label };
+            num_items += 1;
+        };
+
+        add_item("Copy", ContextMenuAction::Copy, None);
+        add_item("Paste", ContextMenuAction::Paste, None);
+        add_item("Split", ContextMenuAction::Split, Some(">"));
+
+        if can_zoom {
+            add_item("Zoom Pane", ContextMenuAction::ZoomPane, None);
+        }
+
+        if is_floating {
+            add_item("Dock Pane", ContextMenuAction::TogglePaneFloating, None);
+        }
+
         Self {
             x,
             y,
@@ -78,6 +109,9 @@ impl ContextMenuState {
             hovered_split_item: None,
             split_submenu_open: false,
             target_pane,
+            items,
+            render_items,
+            num_items,
         }
     }
 
@@ -135,7 +169,7 @@ impl ContextMenuState {
         }
 
         self.hit_test(x, y, window_width, window_height, cell_w, cell_h)
-            .map(|index| ITEMS[index].action)
+            .map(|index| self.items[index].action)
     }
 
     pub fn open_split_submenu(&mut self) {
@@ -143,43 +177,15 @@ impl ContextMenuState {
         self.hovered_item = Some(SPLIT_ITEM_INDEX);
     }
 
-    pub fn render_data(
-        &self,
+    pub fn render_data<'a>(
+        &'a self,
         window_width: f64,
         window_height: f64,
         cell_w: f32,
         cell_h: f32,
-    ) -> ContextMenuRenderData<'static> {
+        background_color: [f32; 4],
+    ) -> ContextMenuRenderData<'a> {
         let (x, y) = self.origin(window_width, window_height, cell_w as f64, cell_h as f64);
-        static RENDER_ITEMS: [ContextMenuRenderItem<'static>; 4] = [
-            ContextMenuRenderItem {
-                label: "Copy",
-                right_label: None,
-            },
-            ContextMenuRenderItem {
-                label: "Paste",
-                right_label: None,
-            },
-            ContextMenuRenderItem {
-                label: "Split",
-                right_label: Some(">"),
-            },
-            ContextMenuRenderItem {
-                label: "Zoom Pane",
-                right_label: None,
-            },
-        ];
-        static SPLIT_RENDER_ITEMS: [ContextMenuRenderItem<'static>; 2] = [
-            ContextMenuRenderItem {
-                label: "Horizontal",
-                right_label: None,
-            },
-            ContextMenuRenderItem {
-                label: "Vertical",
-                right_label: None,
-            },
-        ];
-
         let submenu = self.split_submenu_open.then(|| {
             let (submenu_x, submenu_y) = self.split_submenu_origin(
                 window_width,
@@ -203,8 +209,9 @@ impl ContextMenuState {
             width: self.width(cell_w as f64) as f32,
             item_height: cell_h,
             hovered_item: self.hovered_item,
-            items: &RENDER_ITEMS,
+            items: &self.render_items[..self.num_items],
             submenu,
+            background_color,
         }
     }
 
@@ -259,7 +266,7 @@ impl ContextMenuState {
 
         // Exclude left/right border clicks? Actually, clicking anywhere on the item row is fine.
         let index = ((relative_y - cell_h) / cell_h).floor() as usize;
-        (index < ITEMS.len()).then_some(index)
+        (index < self.num_items).then_some(index)
     }
 
     fn origin(
@@ -314,11 +321,11 @@ impl ContextMenuState {
     }
 
     fn width(&self, cell_w: f64) -> f64 {
-        Self::items_width(&ITEMS, cell_w)
+        Self::items_width(&self.items[..self.num_items], cell_w)
     }
 
     fn height(&self, cell_h: f64) -> f64 {
-        Self::items_height(&ITEMS, cell_h)
+        Self::items_height(&self.items[..self.num_items], cell_h)
     }
 
     fn items_width(items: &[ContextMenuItem], cell_w: f64) -> f64 {
@@ -416,12 +423,20 @@ mod tests {
     #[test]
     fn menu_does_not_include_config_reload() {
         let menu = ContextMenuState::open(10.0, 20.0);
-        let render = menu.render_data(800.0, 600.0, 10.0, 10.0);
+        let popup_background = [0.1, 0.2, 0.3, 0.9];
+        let render = menu.render_data(
+            800.0,
+            600.0,
+            10.0,
+            10.0,
+            popup_background,
+        );
 
         assert!(render
             .items
             .iter()
             .all(|item| item.label != "Reload Configuration"));
+        assert_eq!(render.background_color, popup_background);
     }
 
     #[test]
@@ -429,7 +444,7 @@ mod tests {
         let mut menu = ContextMenuState::open(10.0, 20.0);
 
         assert!(menu.update_hover(20.0, 55.0, 800.0, 600.0, 10.0, 10.0));
-        let render = menu.render_data(800.0, 600.0, 10.0, 10.0);
+        let render = menu.render_data(800.0, 600.0, 10.0, 10.0, [0.0; 4]);
         let submenu = render.submenu.expect("split submenu should be visible");
 
         assert_eq!(
@@ -461,13 +476,13 @@ mod tests {
         let mut menu = ContextMenuState::open(10.0, 20.0);
 
         assert!(menu.update_hover(20.0, 55.0, 800.0, 600.0, 10.0, 10.0));
-        assert!(menu.render_data(800.0, 600.0, 10.0, 10.0).submenu.is_some());
+        assert!(menu.render_data(800.0, 600.0, 10.0, 10.0, [0.0; 4]).submenu.is_some());
 
         assert!(menu.update_hover(260.0, 55.0, 800.0, 600.0, 10.0, 10.0));
-        assert!(menu.render_data(800.0, 600.0, 10.0, 10.0).submenu.is_some());
+        assert!(menu.render_data(800.0, 600.0, 10.0, 10.0, [0.0; 4]).submenu.is_some());
 
         assert!(menu.update_hover(20.0, 35.0, 800.0, 600.0, 10.0, 10.0));
-        assert!(menu.render_data(800.0, 600.0, 10.0, 10.0).submenu.is_none());
+        assert!(menu.render_data(800.0, 600.0, 10.0, 10.0, [0.0; 4]).submenu.is_none());
     }
 
     #[test]
@@ -484,17 +499,17 @@ mod tests {
     #[test]
     fn clamps_to_window_edges() {
         let menu = ContextMenuState::open(780.0, 590.0);
-        let render = menu.render_data(800.0, 600.0, 10.0, 10.0);
+        let render = menu.render_data(800.0, 600.0, 10.0, 10.0, [0.0; 4]);
 
         assert_eq!(render.x, 670.0);
         assert_eq!(render.y, 540.0);
     }
 
     #[test]
-    fn stores_target_pane_for_menu_actions() {
-        let pane_id = crate::mux::PaneId::new(7);
-        let menu = ContextMenuState::open_for_pane(10.0, 20.0, Some(pane_id));
-
+    fn provides_target_pane() {
+        let pane_id = crate::mux::PaneId::new(42);
+        let menu = ContextMenuState::open_for_pane(10.0, 20.0, Some(pane_id), true, false);
         assert_eq!(menu.target_pane(), Some(pane_id));
+        assert_eq!(menu.target_pane_id(), Some(pane_id));
     }
 }

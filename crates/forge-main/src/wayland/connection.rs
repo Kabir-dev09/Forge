@@ -48,12 +48,14 @@ pub struct WaylandState {
     pub conn: Connection,
     pub running: bool,
     pub is_fullscreen: bool,
+    pub is_activated: bool,
     pub xkb_context: xkb::Context,
     pub xkb_state: Option<xkb::State>,
     pub key_sender: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
     pub pointer_sender: Option<std::sync::mpsc::SyncSender<PointerEvent>>,
     pub pointer: Option<wayland_client::protocol::wl_pointer::WlPointer>,
     pub pointer_serial: u32,
+    pub pointer_button_serial: u32,
     pub cursor_hidden: bool,
     pub is_hovering_edge: bool,
     pub hide_mouse_when_typing: bool,
@@ -71,6 +73,7 @@ pub struct WaylandState {
     pub zoom_reset: bool,
     pub pending_splits: Vec<PendingSplit>,
     pub pending_tab_actions: Vec<forge_core::bindings::Action>,
+    pub pending_copy_serial: Option<u32>,
 }
 
 pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
@@ -140,19 +143,21 @@ pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
         kde_blur_manager,
     };
 
-    let state = WaylandState {
+    let mut state = WaylandState {
         globals,
         window: None,
         shm_buffer: None,
         conn: conn.clone(),
         running: true,
         is_fullscreen: false,
+        is_activated: true,
         xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
         xkb_state: None,
         key_sender: None,
         pointer_sender: None,
         pointer: None,
         pointer_serial: 0,
+        pointer_button_serial: 0,
         cursor_hidden: false,
         is_hovering_edge: false,
         hide_mouse_when_typing: true,
@@ -169,7 +174,19 @@ pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
         zoom_reset: false,
         pending_splits: Vec::new(),
         pending_tab_actions: Vec::new(),
+        pending_copy_serial: None,
     };
+
+    // Register the data device before the window can receive keyboard focus.
+    // Some compositors announce the existing selection only on keyboard enter.
+    if let (Some(seat), Some(manager)) = (
+        state.globals.wl_seat.clone(),
+        state.globals.data_device_manager.clone(),
+    ) {
+        let mut clipboard = crate::wayland::clipboard::ClipboardManager::new(manager);
+        clipboard.init_device(&seat, &qh);
+        state.clipboard = Some(clipboard);
+    }
 
     Ok((state, event_queue))
 }
@@ -294,21 +311,24 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for WaylandState {
                 let mut is_resizing = false;
                 let mut is_activated = false;
 
-                // Parse states
+                // Parse xdg_toplevel.state values from the wire-format array.
+                // Protocol values are 1-based:
+                // Maximized=1, Fullscreen=2, Resizing=3, Activated=4.
                 for state_bytes in states.chunks_exact(4) {
                     if let Ok(state_val) = TryInto::<[u8; 4]>::try_into(state_bytes) {
                         let state = u32::from_ne_bytes(state_val);
                         match state {
-                            2 => is_maximized = true,  // xdg_toplevel::State::Maximized
-                            3 => is_fullscreen = true, // xdg_toplevel::State::Fullscreen
-                            4 => is_resizing = true,   // xdg_toplevel::State::Resizing
-                            5 => is_activated = true,  // xdg_toplevel::State::Activated
+                            1 => is_maximized = true,
+                            2 => is_fullscreen = true,
+                            3 => is_resizing = true,
+                            4 => is_activated = true,
                             _ => {}
                         }
                     }
                 }
 
                 tracing::debug!("XDG toplevel configured, width={}, height={}, maximized={}, fullscreen={}, resizing={}, activated={}", width, height, is_maximized, is_fullscreen, is_resizing, is_activated);
+                state.is_activated = is_activated;
 
                 if width > 0 && height > 0 {
                     if let Some(window) = &mut state.window {

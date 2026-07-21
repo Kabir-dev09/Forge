@@ -3,7 +3,6 @@ use super::rasterizer::FontRasterizer;
 use forge_core::config_registry::LigatureMode;
 use rustybuzz::{shape, Face, Feature, UnicodeBuffer};
 use std::collections::{HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -80,6 +79,8 @@ impl ShaperCache {
         key: TextRunKey,
         rasterizer: &FontRasterizer,
         bold_rasterizer: Option<&FontRasterizer>,
+        italic_rasterizer: Option<&FontRasterizer>,
+        bold_italic_rasterizer: Option<&FontRasterizer>,
         px_size: f32,
     ) -> &ShaperCacheEntry {
         if self.cache.contains_key(&key) {
@@ -90,8 +91,15 @@ impl ShaperCache {
             self.evict_oldest();
         }
 
-        let entry = shape_uncached(&key, rasterizer, bold_rasterizer, px_size)
-            .unwrap_or(ShaperCacheEntry::Negative);
+        let entry = shape_uncached(
+            &key,
+            rasterizer,
+            bold_rasterizer,
+            italic_rasterizer,
+            bold_italic_rasterizer,
+            px_size,
+        )
+        .unwrap_or(ShaperCacheEntry::Negative);
         self.insertion_order.push_back(key.clone());
         self.cache.insert(key.clone(), entry);
         self.cache.get(&key).expect("cache entry just inserted")
@@ -115,22 +123,22 @@ impl ShaperCache {
     }
 }
 
-pub fn font_identity(bytes: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
-}
-
 fn shape_uncached(
     key: &TextRunKey,
     rasterizer: &FontRasterizer,
     bold_rasterizer: Option<&FontRasterizer>,
+    italic_rasterizer: Option<&FontRasterizer>,
+    bold_italic_rasterizer: Option<&FontRasterizer>,
     px_size: f32,
 ) -> Option<ShaperCacheEntry> {
-    let active_rasterizer = if key.style.is_bold() {
-        bold_rasterizer.unwrap_or(rasterizer)
-    } else {
-        rasterizer
+    let active_rasterizer = match (key.style.is_bold(), key.style.is_italic()) {
+        (false, false) => rasterizer,
+        (true, false) => bold_rasterizer.unwrap_or(rasterizer),
+        (false, true) => italic_rasterizer.unwrap_or(rasterizer),
+        (true, true) => bold_italic_rasterizer
+            .or(italic_rasterizer)
+            .or(bold_rasterizer)
+            .unwrap_or(rasterizer),
     };
     let face = Face::from_slice(&active_rasterizer.bytes, 0)?;
     let features = parse_features(&key.features);
@@ -190,18 +198,25 @@ fn shaped_run_is_useful(text: &str, glyphs: &[ShapedGlyph], rasterizer: &FontRas
 
     text.chars()
         .zip(glyphs.iter())
-        .any(|(c, glyph)| rasterizer.font.lookup_glyph_index(c) != glyph.glyph_id)
+        .any(|(c, glyph)| rasterizer.glyph_index(c) != glyph.glyph_id)
 }
 
 impl LigatureStyleKey {
     pub fn is_bold(&self) -> bool {
         self.flags & forge_core::cell::Cell::FLAG_BOLD != 0
     }
+
+    pub fn is_italic(&self) -> bool {
+        self.flags & forge_core::cell::Cell::FLAG_ITALIC != 0
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::font::atlas::{
+        FontStyle, GlyphAtlas, ShapedGlyphInsertResult, ShapedGlyphKey,
+    };
     use crate::font::ligature::LigatureStyleKey;
     use forge_core::cell::Cell;
     use forge_core::color::Color;
@@ -230,7 +245,7 @@ mod tests {
     ) -> TextRunKey {
         TextRunKey {
             text: text.to_string(),
-            font_hash: font_identity(&rasterizer.bytes),
+            font_hash: rasterizer.identity(),
             px_size_bits: 16.0f32.to_bits(),
             style: style(),
             features: features.iter().map(|feature| feature.to_string()).collect(),
@@ -261,12 +276,12 @@ mod tests {
         let mut cache = ShaperCache::new(64);
         let key = key("plain", &["liga", "calt"]);
         assert!(matches!(
-            cache.shape_run(key.clone(), &rasterizer, None, 16.0),
+            cache.shape_run(key.clone(), &rasterizer, None, None, None, 16.0),
             ShaperCacheEntry::Negative
         ));
         assert_eq!(cache.len(), 1);
         assert!(matches!(
-            cache.shape_run(key, &rasterizer, None, 16.0),
+            cache.shape_run(key, &rasterizer, None, None, None, 16.0),
             ShaperCacheEntry::Negative
         ));
         assert_eq!(cache.len(), 1);
@@ -283,7 +298,14 @@ mod tests {
     fn cluster_metadata_is_preserved_for_positive_entries() {
         let rasterizer = rasterizer();
         let mut cache = ShaperCache::new(64);
-        let entry = cache.shape_run(key("!=", &["liga", "calt"]), &rasterizer, None, 16.0);
+        let entry = cache.shape_run(
+            key("!=", &["liga", "calt"]),
+            &rasterizer,
+            None,
+            None,
+            None,
+            16.0,
+        );
         if let ShaperCacheEntry::Positive(run) = entry {
             assert!(!run.glyphs.is_empty());
             assert!(run.glyphs.iter().all(|glyph| glyph.cluster < 2));
@@ -299,9 +321,39 @@ mod tests {
                 key("!=", &["liga", "clig", "calt"]),
                 &rasterizer,
                 None,
+                None,
+                None,
                 16.0
             ),
             ShaperCacheEntry::Positive(_)
+        ));
+    }
+
+    #[test]
+    fn shaped_glyph_identity_is_accepted_by_the_atlas() {
+        let rasterizer = rasterizer();
+        let mut cache = ShaperCache::new(64);
+        let ShaperCacheEntry::Positive(run) = cache.shape_run(
+            key_with_rasterizer("!=", &["liga", "clig", "calt"], &rasterizer),
+            &rasterizer,
+            None,
+            None,
+            None,
+            16.0,
+        ) else {
+            panic!("bundled font should shape the ligature candidate");
+        };
+        let glyph = run.glyphs.first().expect("shaped run should contain a glyph");
+        let key = ShapedGlyphKey {
+            glyph_id: glyph.glyph_id,
+            style: FontStyle::Regular,
+            font_hash: rasterizer.identity(),
+        };
+        let mut atlas = GlyphAtlas::build(&rasterizer, None, None, None, 16.0, true).unwrap();
+
+        assert!(matches!(
+            atlas.insert_shaped_glyph(key, &rasterizer, None, None, None, 16.0),
+            ShapedGlyphInsertResult::Inserted(_)
         ));
     }
 }

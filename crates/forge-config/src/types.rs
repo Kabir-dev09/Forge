@@ -13,6 +13,7 @@ pub struct ConfigChangeSet {
     pub panes: bool,
     pub render: bool,
     pub confirm_close: bool,
+    pub command_completion_indicator: bool,
     pub statusbar: bool,
     pub keybindings: bool,
 }
@@ -31,6 +32,7 @@ impl ConfigChangeSet {
             panes: true,
             render: true,
             confirm_close: true,
+            command_completion_indicator: true,
             statusbar: true,
             keybindings: true,
         }
@@ -49,6 +51,8 @@ impl ConfigChangeSet {
             panes: old.panes != new.panes,
             render: old.render != new.render,
             confirm_close: old.confirm_close != new.confirm_close,
+            command_completion_indicator: old.command_completion_indicator
+                != new.command_completion_indicator,
             statusbar: old.statusbar != new.statusbar,
             keybindings: old.keybindings != new.keybindings,
         }
@@ -66,6 +70,7 @@ impl ConfigChangeSet {
             || self.panes
             || self.render
             || self.confirm_close
+            || self.command_completion_indicator
             || self.statusbar
             || self.keybindings
     }
@@ -104,8 +109,8 @@ mod tests {
         assert!(status_changes.any());
 
         let mut confirm_new = old.clone();
-        confirm_new.confirm_close.panel_color.r =
-            confirm_new.confirm_close.panel_color.r.wrapping_add(1);
+        confirm_new.confirm_close.parsed_panel_color.r =
+            confirm_new.confirm_close.parsed_panel_color.r.wrapping_add(1);
         let confirm_changes = ConfigChangeSet::between(&old, &confirm_new);
         assert!(confirm_changes.confirm_close);
         assert!(confirm_changes.any());
@@ -122,5 +127,17 @@ mod tests {
         assert!(changes.panes);
         assert!(changes.any());
         assert!(!changes.render);
+    }
+
+    #[test]
+    fn detects_command_completion_indicator_changes() {
+        let old = ForgeConfig::default();
+        let mut new = old.clone();
+        new.command_completion_indicator.minimum_duration_ms = 1;
+
+        let changes = ConfigChangeSet::between(&old, &new);
+
+        assert!(changes.command_completion_indicator);
+        assert!(changes.any());
     }
 }

@@ -292,18 +292,18 @@ struct ConfirmModalPalette {
 
 impl ConfirmModalPalette {
     fn from_theme(theme: &ThemeConfig, config: &ConfirmCloseConfig) -> Self {
-        let background = theme.background;
-        let foreground = with_alpha(theme.foreground, 255);
+        let background = theme.parsed_background;
+        let foreground = with_alpha(theme.parsed_foreground, 255);
 
         Self {
-            panel_bg: with_alpha(config.panel_color, 255),
+            panel_bg: with_alpha(config.parsed_panel_color, 255),
             border: with_alpha(
-                mix_color(theme.pane_outline_inactive, foreground, 0.20),
+                mix_color(theme.parsed_pane_outline_inactive, foreground, 0.20),
                 255,
             ),
             text: brighten_color(foreground, 0.35),
             warning: brighten_color(mix_color(foreground, background, 0.45), 0.20),
-            accent: brighten_color(with_alpha(config.selected_color, 255), 0.15),
+            accent: brighten_color(with_alpha(config.parsed_selected_color, 255), 0.15),
         }
     }
 }
@@ -455,6 +455,6 @@ mod tests {
         assert!(grid
             .iter()
             .flat_map(|row| row.iter())
-            .any(|cell| cell.bg == config.panel_color));
+            .any(|cell| cell.bg == config.parsed_panel_color));
     }
 }

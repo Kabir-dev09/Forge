@@ -15,6 +15,10 @@ pub struct StatusBarState {
     pub click_regions: Vec<ClickRegion>,
     pub vars: HashMap<String, String>,
     pub generation: u64,
+    pub hovered_action: Option<String>,
+    pub hovered_region: Option<(usize, usize)>,
+    pub hovered_is_square: bool,
+    pub hover_opacity: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +35,10 @@ impl Default for StatusBarState {
             click_regions: Vec::new(),
             vars: HashMap::new(),
             generation: 1,
+            hovered_action: None,
+            hovered_region: None,
+            hovered_is_square: false,
+            hover_opacity: 0.0,
         }
     }
 }
@@ -38,7 +46,7 @@ impl Default for StatusBarState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_core::config_registry::{StatusbarConfig, StatusbarItem, TabsConfig};
+    use forge_core::config_registry::{StatusbarConfig, StatusbarItem};
 
     fn statusbar_text(state: &StatusBarState) -> String {
         state.cells.iter().map(|cell| cell.c).collect()
@@ -48,14 +56,12 @@ mod tests {
     fn tabs_format_renders_zoom_indicator_only_for_zoomed_tabs() {
         let mut config = StatusbarConfig::default();
         config.left = vec![StatusbarItem::Tabs {
-            tabs: TabsConfig {
-                format: " {index}{zoom} ".to_string(),
-                zoom_indicator: "(Z)".to_string(),
-                left_edge: String::new(),
-                right_edge: String::new(),
-                active: None,
-                inactive: None,
-            },
+            format: " {index}{zoom} ".to_string(),
+            zoom_indicator: "(Z)".to_string(),
+            left_edge: String::new(),
+            right_edge: String::new(),
+            active: None,
+            inactive: None,
         }];
         let tabs = vec![
             StatusbarTab {
@@ -82,14 +88,12 @@ mod tests {
     fn zoom_indicator_keeps_tab_click_region_target() {
         let mut config = StatusbarConfig::default();
         config.left = vec![StatusbarItem::Tabs {
-            tabs: TabsConfig {
-                format: " {index}{zoom} ".to_string(),
-                zoom_indicator: "(Z)".to_string(),
-                left_edge: String::new(),
-                right_edge: String::new(),
-                active: None,
-                inactive: None,
-            },
+            format: " {index}{zoom} ".to_string(),
+            zoom_indicator: "(Z)".to_string(),
+            left_edge: String::new(),
+            right_edge: String::new(),
+            active: None,
+            inactive: None,
         }];
         let tabs = vec![StatusbarTab {
             index: 0,
@@ -111,17 +115,15 @@ mod tests {
         let mut config = StatusbarConfig::default();
         config.bg_color = "transparent".to_string();
         config.left = vec![StatusbarItem::Tabs {
-            tabs: TabsConfig {
-                format: " {index} ".to_string(),
-                zoom_indicator: String::new(),
-                left_edge: "".to_string(),
-                right_edge: "".to_string(),
-                active: Some(forge_core::config_registry::StatusbarStyle {
-                    fg: Some("#111111".to_string()),
-                    bg: Some("#89B4FA".to_string()),
-                }),
-                inactive: None,
-            },
+            format: " {index} ".to_string(),
+            zoom_indicator: String::new(),
+            left_edge: "".to_string(),
+            right_edge: "".to_string(),
+            active: Some(forge_core::config_registry::StatusbarStyle {
+                fg: Some("#111111".to_string()),
+                bg: Some("#89B4FA".to_string()),
+            }),
+            inactive: None,
         }];
         let tabs = vec![StatusbarTab {
             index: 0,
@@ -140,7 +142,7 @@ mod tests {
     }
 }
 
-fn parse_hex_color(hex: &str) -> Option<Color> {
+pub fn parse_hex_color(hex: &str) -> Option<Color> {
     if hex.to_lowercase() == "transparent" {
         return Some(Color::TRANSPARENT);
     }
@@ -189,30 +191,13 @@ impl StatusBarState {
             let mut out = Vec::new();
             for item in items {
                 match item {
-                    StatusbarItem::String(s) => {
-                        let mut resolved = s.clone();
-                        for (k, v) in &self.vars {
-                            resolved = resolved.replace(&format!("{{{}}}", k), v);
-                        }
-                        for ch in resolved.chars() {
-                            out.push((
-                                Cell {
-                                    c: ch,
-                                    fg: fg_color,
-                                    bg: bg_color,
-                                    flags: 0,
-                                },
-                                None,
-                            ));
-                        }
-                    }
-                    StatusbarItem::Tabs { tabs: tabs_cfg } => {
+                    StatusbarItem::Tabs { format, zoom_indicator, left_edge, right_edge, active, inactive } => {
                         for tab in tabs.iter() {
                             let is_active = tab.index == active_tab;
                             let style = if is_active {
-                                &tabs_cfg.active
+                                active
                             } else {
-                                &tabs_cfg.inactive
+                                inactive
                             };
 
                             let mut c_bg = bg_color;
@@ -227,18 +212,17 @@ impl StatusBarState {
                             }
 
                             let zoom = if tab.is_zoomed {
-                                tabs_cfg.zoom_indicator.as_str()
+                                zoom_indicator.as_str()
                             } else {
                                 ""
                             };
                             let index = (tab.index + 1).to_string();
-                            let text = tabs_cfg
-                                .format
+                            let text_val = format
                                 .replace("{index}", &index)
                                 .replace("{title}", &tab.title)
                                 .replace("{zoom}", zoom);
-                            let action = Some(format!("SwitchTab{}", tab.index + 1));
-                            for ch in tabs_cfg.left_edge.chars() {
+                            let action = Some(std::format!("SwitchTab{}", tab.index + 1));
+                            for ch in left_edge.chars() {
                                 out.push((
                                     Cell {
                                         c: ch,
@@ -249,7 +233,7 @@ impl StatusBarState {
                                     action.clone(),
                                 ));
                             }
-                            for ch in text.chars() {
+                            for ch in text_val.chars() {
                                 out.push((
                                     Cell {
                                         c: ch,
@@ -260,7 +244,7 @@ impl StatusBarState {
                                     action.clone(),
                                 ));
                             }
-                            for ch in tabs_cfg.right_edge.chars() {
+                            for ch in right_edge.chars() {
                                 out.push((
                                     Cell {
                                         c: ch,
@@ -273,7 +257,7 @@ impl StatusBarState {
                             }
                         }
                     }
-                    StatusbarItem::Table {
+                    StatusbarItem::Text {
                         text,
                         fg,
                         bg,
@@ -282,7 +266,7 @@ impl StatusBarState {
                     } => {
                         let mut resolved = text.clone();
                         for (k, v) in &self.vars {
-                            resolved = resolved.replace(&format!("{{{}}}", k), v);
+                            resolved = resolved.replace(&std::format!("{{{}}}", k), v);
                         }
                         let c_fg = fg
                             .as_ref()

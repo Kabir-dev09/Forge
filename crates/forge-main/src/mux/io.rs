@@ -12,6 +12,7 @@ use calloop::{
     EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
 };
 use forge_core::{ForgeError, Result};
+use forge_pty::vte_parser::CommandLifecycleEvent;
 use forge_pty::{snapshot::RenderSnapshot, ScreenBuffer, VteProcessor};
 
 use super::PaneId;
@@ -24,6 +25,20 @@ pub const MAX_PTY_READ_BYTES_PER_EVENT: usize = 4 * 1024 * 1024; // 4MB per wake
 pub enum PaneIoStatus {
     Registered,
     Exited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCompletionEvent {
+    pub pane_id: PaneId,
+    pub duration_ms: u64,
+    pub exit_code: i32,
+    pub program_name: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SelectionCopyResult {
+    pub serial: u32,
+    pub text: Option<String>,
 }
 
 pub enum PtyWorkerCommand {
@@ -49,6 +64,11 @@ pub enum PtyWorkerCommand {
     SetScrollOffset(PaneId, usize),
     UpdateSelection(PaneId, Option<forge_core::cell::SelectionRange>),
     ClearSelection(PaneId),
+    CopySelection {
+        pane_id: PaneId,
+        serial: u32,
+        clear_after_copy: bool,
+    },
     UpdateTheme(
         PaneId,
         forge_core::color::Color,
@@ -59,6 +79,7 @@ pub enum PtyWorkerCommand {
     MarkAllClean(PaneId),
     SetMouseTracking(PaneId, bool),
     SetVisiblePanes(std::collections::HashSet<PaneId>),
+    SetCommandCompletionTracking(bool),
     Write(PaneId, Vec<u8>),
 }
 
@@ -82,25 +103,100 @@ impl calloop::EventSource for DynamicPtySource {
     where
         C: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
     {
-        self.inner.process_events(readiness, token, |ready, file| {
-             use std::os::unix::io::AsRawFd;
-             let mut fd = file.as_raw_fd();
-             callback(ready, &mut fd)
-        }).map_err(|e| e)
+        self.inner
+            .process_events(readiness, token, |ready, file| {
+                use std::os::unix::io::AsRawFd;
+                let mut fd = file.as_raw_fd();
+                callback(ready, &mut fd)
+            })
+            .map_err(|e| e)
     }
 
-    fn register(&mut self, poll: &mut calloop::Poll, token_factory: &mut calloop::TokenFactory) -> calloop::Result<()> {
+    fn register(
+        &mut self,
+        poll: &mut calloop::Poll,
+        token_factory: &mut calloop::TokenFactory,
+    ) -> calloop::Result<()> {
         self.inner.interest = self.interest.get();
         self.inner.register(poll, token_factory)
     }
 
-    fn reregister(&mut self, poll: &mut calloop::Poll, token_factory: &mut calloop::TokenFactory) -> calloop::Result<()> {
+    fn reregister(
+        &mut self,
+        poll: &mut calloop::Poll,
+        token_factory: &mut calloop::TokenFactory,
+    ) -> calloop::Result<()> {
         self.inner.interest = self.interest.get();
         self.inner.reregister(poll, token_factory)
     }
 
     fn unregister(&mut self, poll: &mut calloop::Poll) -> calloop::Result<()> {
         self.inner.unregister(poll)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_command_program_name, selected_text};
+
+    #[test]
+    fn command_program_name_extracts_basename() {
+        assert_eq!(
+            normalize_command_program_name("cargo run --release").as_deref(),
+            Some("cargo")
+        );
+        assert_eq!(
+            normalize_command_program_name("./target/release/forge-main").as_deref(),
+            Some("forge-main")
+        );
+        assert_eq!(
+            normalize_command_program_name("/usr/bin/python script.py").as_deref(),
+            Some("python")
+        );
+        assert_eq!(
+            normalize_command_program_name("/home/user/bin/custom-tool --verbose").as_deref(),
+            Some("custom-tool")
+        );
+    }
+
+    #[test]
+    fn command_program_name_skips_env_prefixes_and_common_wrappers() {
+        assert_eq!(
+            normalize_command_program_name("VAR=value cargo run").as_deref(),
+            Some("cargo")
+        );
+        assert_eq!(
+            normalize_command_program_name("env VAR=value cargo run").as_deref(),
+            Some("cargo")
+        );
+        assert_eq!(
+            normalize_command_program_name("sudo cargo run").as_deref(),
+            Some("cargo")
+        );
+    }
+
+    #[test]
+    fn selection_copy_uses_worker_owned_selection_state() {
+        let mut screen = forge_pty::ScreenBuffer::new(
+            8,
+            1,
+            100,
+            forge_core::color::Color::WHITE,
+            forge_core::color::Color::BLACK,
+        );
+        let mut parser = forge_pty::VteProcessor::new();
+        parser.process(b"selected", &mut screen);
+        screen.set_selection(Some(forge_core::cell::SelectionRange {
+            start_row: 0,
+            start_col: 1,
+            end_row: 0,
+            end_col: 4,
+        }));
+
+        assert_eq!(selected_text(&screen).as_deref(), Some("elec"));
+
+        screen.clear_selection();
+        assert_eq!(selected_text(&screen), None);
     }
 }
 
@@ -113,6 +209,10 @@ pub struct PaneIoRegistry {
     // FIX 4: Generation counter — increments on every structural change.
     // The main loop compares u64 instead of allocating+comparing a HashSet.
     pub visible_gen: Arc<AtomicU64>,
+    has_command_events: Arc<AtomicBool>,
+    command_events: Arc<RwLock<Vec<CommandCompletionEvent>>>,
+    command_tracking_enabled: Arc<AtomicBool>,
+    selection_copy_receiver: std::sync::mpsc::Receiver<SelectionCopyResult>,
 }
 
 struct WorkerState {
@@ -123,6 +223,10 @@ struct WorkerState {
     wakeup_signal: calloop::LoopSignal,
     loop_handle: LoopHandle<'static, WorkerState>,
     visible_panes: std::collections::HashSet<PaneId>,
+    command_events: Arc<RwLock<Vec<CommandCompletionEvent>>>,
+    has_command_events: Arc<AtomicBool>,
+    command_tracking_enabled: Arc<AtomicBool>,
+    selection_copy_sender: std::sync::mpsc::Sender<SelectionCopyResult>,
 }
 
 struct PaneState {
@@ -135,6 +239,127 @@ struct PaneState {
     pending_write: Vec<u8>,
     interest: std::rc::Rc<std::cell::Cell<Interest>>,
     fd: RawFd,
+    command_started_at: Option<std::time::Instant>,
+    command_program_name: Option<String>,
+}
+
+fn tokenize_command_prefix(command: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (idx, ch) in command.char_indices() {
+        if escaped {
+            escaped = false;
+            if start.is_none() {
+                start = Some(idx);
+            }
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            if start.is_none() {
+                start = Some(idx);
+            }
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            if start.is_none() {
+                start = Some(idx);
+            }
+            continue;
+        }
+        if ch.is_whitespace() {
+            if let Some(s) = start.take() {
+                tokens.push(&command[s..idx]);
+                if tokens.len() >= 16 {
+                    return tokens;
+                }
+            }
+        } else if start.is_none() {
+            start = Some(idx);
+        }
+    }
+
+    if let Some(s) = start {
+        tokens.push(&command[s..]);
+    }
+    tokens
+}
+
+fn strip_token_quotes(token: &str) -> &str {
+    token
+        .strip_prefix(['\'', '"'])
+        .and_then(|value| value.strip_suffix(['\'', '"']))
+        .unwrap_or(token)
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('_') | Some('a'..='z') | Some('A'..='Z'))
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn basename_token(token: &str) -> Option<String> {
+    let token = strip_token_quotes(token).trim();
+    if token.is_empty() {
+        return None;
+    }
+    let name = token.rsplit('/').next().unwrap_or(token);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+pub(crate) fn normalize_command_program_name(command: &str) -> Option<String> {
+    let tokens = tokenize_command_prefix(command);
+    let mut index = 0;
+
+    while index < tokens.len() && is_env_assignment(strip_token_quotes(tokens[index])) {
+        index += 1;
+    }
+
+    if tokens.get(index).map(|token| strip_token_quotes(token)) == Some("env") {
+        index += 1;
+        while index < tokens.len() {
+            let token = strip_token_quotes(tokens[index]);
+            if is_env_assignment(token) {
+                index += 1;
+            } else if token == "-u" || token == "--unset" {
+                index = (index + 2).min(tokens.len());
+            } else if token.starts_with('-') {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    match tokens.get(index).map(|token| strip_token_quotes(token)) {
+        Some("sudo") | Some("doas") | Some("command") | Some("builtin") => {
+            index += 1;
+            while index < tokens.len() {
+                let token = strip_token_quotes(tokens[index]);
+                if token.starts_with('-') {
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    tokens.get(index).and_then(|token| basename_token(token))
 }
 
 fn flush_pending_write(fd: RawFd, pending_write: &mut Vec<u8>) {
@@ -157,15 +382,29 @@ fn flush_pending_write(fd: RawFd, pending_write: &mut Vec<u8>) {
     }
 }
 
+fn selected_text(screen_buffer: &ScreenBuffer) -> Option<String> {
+    screen_buffer.selection.and_then(|selection| {
+        let text = screen_buffer.get_text_in_range(selection);
+        (!text.is_empty()).then_some(text)
+    })
+}
+
 impl PaneIoRegistry {
-    pub fn new(wakeup_signal: calloop::LoopSignal) -> Result<Self> {
+    pub fn new(wakeup_signal: calloop::LoopSignal, command_tracking_enabled: bool) -> Result<Self> {
         let (sender, receiver) = channel::<PtyWorkerCommand>();
         let has_exited = Arc::new(AtomicBool::new(false));
         let exited_panes = Arc::new(RwLock::new(Vec::new()));
         let visible_gen = Arc::new(AtomicU64::new(0));
+        let has_command_events = Arc::new(AtomicBool::new(false));
+        let command_events = Arc::new(RwLock::new(Vec::new()));
+        let command_tracking_enabled = Arc::new(AtomicBool::new(command_tracking_enabled));
+        let (selection_copy_sender, selection_copy_receiver) = std::sync::mpsc::channel();
 
         let worker_exited_panes = exited_panes.clone();
         let worker_has_exited = has_exited.clone();
+        let worker_command_events = command_events.clone();
+        let worker_has_command_events = has_command_events.clone();
+        let worker_command_tracking_enabled = command_tracking_enabled.clone();
 
         std::thread::Builder::new()
             .name("forge-pty-worker".to_string())
@@ -174,6 +413,10 @@ impl PaneIoRegistry {
                     receiver,
                     worker_exited_panes,
                     worker_has_exited,
+                    worker_command_events,
+                    worker_has_command_events,
+                    worker_command_tracking_enabled,
+                    selection_copy_sender,
                     wakeup_signal,
                 ) {
                     tracing::error!("PTY worker failed: {}", e);
@@ -186,6 +429,10 @@ impl PaneIoRegistry {
             has_exited,
             exited_panes,
             visible_gen,
+            has_command_events,
+            command_events,
+            command_tracking_enabled,
+            selection_copy_receiver,
         })
     }
 
@@ -193,6 +440,10 @@ impl PaneIoRegistry {
         receiver: Channel<PtyWorkerCommand>,
         exited_panes: Arc<RwLock<Vec<PaneId>>>,
         has_exited: Arc<AtomicBool>,
+        command_events: Arc<RwLock<Vec<CommandCompletionEvent>>>,
+        has_command_events: Arc<AtomicBool>,
+        command_tracking_enabled: Arc<AtomicBool>,
+        selection_copy_sender: std::sync::mpsc::Sender<SelectionCopyResult>,
         wakeup_signal: calloop::LoopSignal,
     ) -> Result<()> {
         let mut event_loop: EventLoop<WorkerState> =
@@ -244,14 +495,32 @@ impl PaneIoRegistry {
                         PtyWorkerCommand::ScrollToBottom(pane_id) => {
                             state.with_pane(pane_id, |p| p.screen_buffer.view_scroll_to_bottom())
                         }
-                        PtyWorkerCommand::SetScrollOffset(pane_id, offset) => {
-                            state.with_pane(pane_id, |p| p.screen_buffer.view_scroll_to_offset(offset))
-                        }
+                        PtyWorkerCommand::SetScrollOffset(pane_id, offset) => state
+                            .with_pane(pane_id, |p| p.screen_buffer.view_scroll_to_offset(offset)),
                         PtyWorkerCommand::UpdateSelection(pane_id, sel) => {
                             state.with_pane(pane_id, |p| p.screen_buffer.set_selection(sel))
                         }
                         PtyWorkerCommand::ClearSelection(pane_id) => {
                             state.with_pane(pane_id, |p| p.screen_buffer.clear_selection())
+                        }
+                        PtyWorkerCommand::CopySelection {
+                            pane_id,
+                            serial,
+                            clear_after_copy,
+                        } => {
+                            let text = state
+                                .panes
+                                .get(&pane_id)
+                                .and_then(|pane| selected_text(&pane.screen_buffer));
+                            if clear_after_copy {
+                                state.with_pane(pane_id, |pane| {
+                                    pane.screen_buffer.clear_selection()
+                                });
+                            }
+                            let _ = state
+                                .selection_copy_sender
+                                .send(SelectionCopyResult { serial, text });
+                            state.wakeup_signal.wakeup();
                         }
                         PtyWorkerCommand::UpdateTheme(pane_id, fg, bg, colors) => state
                             .with_pane(pane_id, |p| p.screen_buffer.update_theme(fg, bg, colors)),
@@ -308,6 +577,17 @@ impl PaneIoRegistry {
                             }
                             state.wakeup_signal.wakeup();
                         }
+                        PtyWorkerCommand::SetCommandCompletionTracking(enabled) => {
+                            state
+                                .command_tracking_enabled
+                                .store(enabled, Ordering::Release);
+                            if !enabled {
+                                for pane in state.panes.values_mut() {
+                                    pane.command_started_at = None;
+                                    pane.command_program_name = None;
+                                }
+                            }
+                        }
                     }
                 }
             })
@@ -327,6 +607,10 @@ impl PaneIoRegistry {
             wakeup_signal,
             loop_handle: loop_handle.clone(),
             visible_panes: std::collections::HashSet::new(),
+            command_events,
+            has_command_events,
+            command_tracking_enabled,
+            selection_copy_sender,
         };
 
         loop {
@@ -375,6 +659,44 @@ impl PaneIoRegistry {
         let panes = std::mem::take(&mut *exited);
         self.has_exited.store(false, Ordering::Release);
         panes
+    }
+
+    pub fn has_command_events(&self) -> bool {
+        self.has_command_events.load(Ordering::Acquire)
+    }
+
+    pub fn command_events(&self) -> Vec<CommandCompletionEvent> {
+        let mut events = self.command_events.write().unwrap();
+        let out = std::mem::take(&mut *events);
+        self.has_command_events.store(false, Ordering::Release);
+        out
+    }
+
+    pub fn set_command_completion_tracking(&self, enabled: bool) {
+        self.command_tracking_enabled
+            .store(enabled, Ordering::Release);
+        self.sender
+            .send(PtyWorkerCommand::SetCommandCompletionTracking(enabled))
+            .ok();
+    }
+
+    pub fn request_selection_copy(
+        &self,
+        pane_id: PaneId,
+        serial: u32,
+        clear_after_copy: bool,
+    ) -> bool {
+        self.sender
+            .send(PtyWorkerCommand::CopySelection {
+                pane_id,
+                serial,
+                clear_after_copy,
+            })
+            .is_ok()
+    }
+
+    pub fn try_recv_selection_copy(&self) -> Option<SelectionCopyResult> {
+        self.selection_copy_receiver.try_recv().ok()
     }
 
     pub fn remove_pane(&self, pane_id: PaneId) {
@@ -430,6 +752,8 @@ impl WorkerState {
                 pending_write: Vec::new(),
                 interest,
                 fd: raw_fd,
+                command_started_at: None,
+                command_program_name: None,
             },
         );
         Ok(())
@@ -456,7 +780,12 @@ impl WorkerState {
         }
     }
 
-    fn process_pane_io(&mut self, pane_id: PaneId, fd: RawFd, readiness: calloop::Readiness) -> std::io::Result<PostAction> {
+    fn process_pane_io(
+        &mut self,
+        pane_id: PaneId,
+        fd: RawFd,
+        readiness: calloop::Readiness,
+    ) -> std::io::Result<PostAction> {
         let mut bytes_read = 0usize;
         let mut iterations = 0usize;
         let mut processed_output = false;
@@ -493,37 +822,72 @@ impl WorkerState {
                             break;
                         }
                         Ok(n) => n,
-                    Err(rustix::io::Errno::AGAIN) => {
-                        drained = true;
-                        break;
-                    }
-                    Err(rustix::io::Errno::IO) => {
-                        exited = true;
-                        drained = true;
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::warn!(pane_id = pane_id.get(), "PTY read failed: {}", e);
-                        exited = true;
-                        break;
-                    }
-                };
+                        Err(rustix::io::Errno::AGAIN) => {
+                            drained = true;
+                            break;
+                        }
+                        Err(rustix::io::Errno::IO) => {
+                            exited = true;
+                            drained = true;
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!(pane_id = pane_id.get(), "PTY read failed: {}", e);
+                            exited = true;
+                            break;
+                        }
+                    };
 
-                bytes_read += len;
-                processed_output = true;
+                    bytes_read += len;
+                    processed_output = true;
 
-                let data = &pane.read_buf[..len];
-                let responses = pane.vte_processor.process(data, &mut pane.screen_buffer);
+                    let data = &pane.read_buf[..len];
+                    let responses = pane.vte_processor.process(data, &mut pane.screen_buffer);
 
-                if !responses.is_empty() {
-                    pane.pending_write.extend_from_slice(&responses);
-                    flush_pending_write(fd, &mut pane.pending_write);
+                    if self.command_tracking_enabled.load(Ordering::Acquire) {
+                        let now = std::time::Instant::now();
+                        for event in pane.vte_processor.take_command_events() {
+                            match event {
+                                CommandLifecycleEvent::Started { command } => {
+                                    pane.command_started_at = Some(now);
+                                    pane.command_program_name =
+                                        command.as_deref().and_then(normalize_command_program_name);
+                                }
+                                CommandLifecycleEvent::Finished { exit_code } => {
+                                    if let Some(started_at) = pane.command_started_at.take() {
+                                        let duration_ms =
+                                            now.saturating_duration_since(started_at).as_millis();
+                                        let event = CommandCompletionEvent {
+                                            pane_id,
+                                            duration_ms: duration_ms.min(u128::from(u64::MAX))
+                                                as u64,
+                                            exit_code,
+                                            program_name: pane.command_program_name.take(),
+                                        };
+                                        if let Ok(mut events) = self.command_events.write() {
+                                            events.push(event);
+                                            self.has_command_events.store(true, Ordering::Release);
+                                            self.wakeup_signal.wakeup();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        let _ = pane.vte_processor.take_command_events();
+                        pane.command_started_at = None;
+                        pane.command_program_name = None;
+                    }
+
+                    if !responses.is_empty() {
+                        pane.pending_write.extend_from_slice(&responses);
+                        flush_pending_write(fd, &mut pane.pending_write);
+                    }
+                }
+                if processed_output {
+                    pane.screen_buffer.view_scroll_to_bottom();
                 }
             }
-            if processed_output {
-                pane.screen_buffer.view_scroll_to_bottom();
-            }
-        }
         }
 
         if exited {

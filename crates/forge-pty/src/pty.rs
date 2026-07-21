@@ -115,7 +115,7 @@ impl Pty {
         env_map.insert("TERM".to_string(), "xterm-256color".to_string());
         env_map.insert("COLORTERM".to_string(), "truecolor".to_string());
         env_map.insert("LANG".to_string(), "en_US.UTF-8".to_string());
-        for (k, v) in &shell.env {
+        for (k, v) in &shell.parsed_env {
             env_map.insert(k.clone(), v.clone());
         }
 

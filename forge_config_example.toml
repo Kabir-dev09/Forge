@@ -2,9 +2,15 @@
 # Forge loads ~/.config/forge/config.toml.
 
 [font]
-family = "monospace"
-size = 16.0
+# "builtin" is self-contained and uses Forge's prebuilt four-style atlas.
+# A fontconfig family name or a direct font file path may be used instead.
+family = "builtin"
+size = 14.0
 nerd_fonts = true
+# Optional style overrides accept the same family name or direct style-file paths.
+# bold_family = "Iosevka"
+# italic_family = "Iosevka"
+# bold_italic_family = "Iosevka"
 
 [font.ligatures]
 enabled = true

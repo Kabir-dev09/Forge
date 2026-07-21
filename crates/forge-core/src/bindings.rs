@@ -57,6 +57,7 @@ pub enum Action {
     ToggleSidebar,
     ClosePane,
     SpawnFloatingPane,
+    TogglePaneFloating,
     FocusPaneLeft,
     FocusPaneRight,
     FocusPaneUp,

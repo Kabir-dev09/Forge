@@ -34,6 +34,7 @@ pub struct ScrollingTabManager {
 impl PaneRuntime {
     pub fn from_config(
         mode: PaneManagerMode,
+        animation_duration_ms: u64,
         tiling_tabs: &TabManager,
         viewport_cols: usize,
         viewport_rows: usize,
@@ -46,6 +47,7 @@ impl PaneRuntime {
                 viewport_cols,
                 viewport_rows,
                 fallback_pane_size,
+                animation_duration_ms,
             )),
         }
     }
@@ -82,6 +84,7 @@ impl ScrollingTabManager {
         viewport_cols: usize,
         viewport_rows: usize,
         _fallback_pane_size: GridSize,
+        animation_duration_ms: u64,
     ) -> Self {
         let tabs = tiling_tabs
             .tabs
@@ -93,7 +96,7 @@ impl ScrollingTabManager {
                     viewport_rows.max(1),
                     viewport_cols.max(1),
                     viewport_rows.max(1),
-                );
+                ).with_animation_duration(animation_duration_ms);
                 panes.add_existing_pane_at(active_pane, 0, 0);
                 ScrollingTab { id: tab.id, panes }
             })
@@ -124,14 +127,14 @@ impl ScrollingTabManager {
         true
     }
 
-    pub fn add_tab_from_tiling(&mut self, tab: &Tab, viewport_cols: usize, viewport_rows: usize) {
+    pub fn add_tab_from_tiling(&mut self, tab: &Tab, viewport_cols: usize, viewport_rows: usize, animation_duration_ms: u64) {
         let active_pane = tab.mux.active_pane_id();
         let mut panes = ScrollingPaneManager::new(
             viewport_cols.max(1),
             viewport_rows.max(1),
             viewport_cols.max(1),
             viewport_rows.max(1),
-        );
+        ).with_animation_duration(animation_duration_ms);
         panes.add_existing_pane_at(active_pane, 0, 0);
         self.tabs.push(ScrollingTab { id: tab.id, panes });
         self.active_tab_index = self.tabs.len().saturating_sub(1);
@@ -311,6 +314,7 @@ mod tests {
         let tabs = TabManager::new(make_mux(1));
         let runtime = PaneRuntime::from_config(
             PaneManagerMode::Tiling,
+            120,
             &tabs,
             80,
             24,
@@ -327,6 +331,7 @@ mod tests {
         let tabs = TabManager::new(make_mux(7));
         let mut runtime = PaneRuntime::from_config(
             PaneManagerMode::Scrolling,
+            120,
             &tabs,
             120,
             40,
@@ -348,6 +353,7 @@ mod tests {
         let tabs = TabManager::new(make_mux(1));
         let mut runtime = PaneRuntime::from_config(
             PaneManagerMode::Scrolling,
+            120,
             &tabs,
             160,
             24,
@@ -366,6 +372,7 @@ mod tests {
         let tabs = TabManager::new(make_mux(1));
         let mut runtime = PaneRuntime::from_config(
             PaneManagerMode::Scrolling,
+            120,
             &tabs,
             80,
             24,
@@ -389,6 +396,7 @@ mod tests {
         let mut tabs = TabManager::new(make_mux(1));
         let mut runtime = PaneRuntime::from_config(
             PaneManagerMode::Scrolling,
+            120,
             &tabs,
             80,
             24,
@@ -396,7 +404,7 @@ mod tests {
         );
         tabs.create_tab(make_mux(10));
         let scrolling = runtime.scrolling_mut().expect("scrolling runtime");
-        scrolling.add_tab_from_tiling(tabs.active_tab(), 80, 24);
+        scrolling.add_tab_from_tiling(tabs.active_tab(), 80, 24, 120);
 
         assert_eq!(scrolling.active_pane_id(), Some(PaneId::new(10)));
         assert_eq!(scrolling.visible_pane_ids(), vec![PaneId::new(10)]);
@@ -407,6 +415,7 @@ mod tests {
         let tabs = TabManager::new(make_mux(1));
         let mut runtime = PaneRuntime::from_config(
             PaneManagerMode::Scrolling,
+            120,
             &tabs,
             200,
             80,
@@ -429,6 +438,7 @@ mod tests {
         let tabs = TabManager::new(make_mux(1));
         let mut runtime = PaneRuntime::from_config(
             PaneManagerMode::Scrolling,
+            120,
             &tabs,
             200,
             80,
@@ -450,6 +460,7 @@ mod tests {
         let tabs = TabManager::new(make_mux(1));
         let mut runtime = PaneRuntime::from_config(
             PaneManagerMode::Scrolling,
+            120,
             &tabs,
             200,
             80,

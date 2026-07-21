@@ -7,7 +7,7 @@ use super::font::{
 };
 use super::grid_tessellator::{
     ContextMenuRenderData, GridTessellator, LigatureRenderContext, PixelRect, RowVertexRanges,
-    VertexRange,
+    StatusbarHoverRenderData, VertexRange,
 };
 use super::{
     device::*, framebuffer::*, instance::*, pipeline::*, surface::*, swapchain::*, sync::*,
@@ -152,6 +152,33 @@ fn rect_to_scissor(rect: PaneRenderRect, extent: vk::Extent2D) -> Option<vk::Rec
     })
 }
 
+fn command_indicator_text_clip(
+    popup_rect: PaneRenderRect,
+    dot_center_x: f32,
+    dot_size: f32,
+    text_x: f32,
+    cell_width: f32,
+) -> Option<PaneRenderRect> {
+    if popup_rect.width <= popup_rect.height + 0.5 {
+        return None;
+    }
+
+    let dot_gap = cell_width * 0.25;
+    let left = popup_rect
+        .x
+        .max(text_x)
+        .max(dot_center_x + dot_size * 0.5 + dot_gap);
+    let right = popup_rect.x + popup_rect.width;
+    (right > left).then(|| {
+        PaneRenderRect::new(
+            left,
+            popup_rect.y,
+            right - left,
+            popup_rect.height,
+        )
+    })
+}
+
 fn full_scissor(extent: vk::Extent2D) -> vk::Rect2D {
     vk::Rect2D {
         offset: vk::Offset2D { x: 0, y: 0 },
@@ -203,6 +230,7 @@ pub struct PaneRenderInput<'a> {
     pub rect: PaneRenderRect,
     pub opacity: f32,
     pub layer: PaneRenderLayer,
+    pub apply_pane_padding: bool,
     pub grid: &'a [&'a [forge_core::cell::Cell]],
     pub dirty_generations: &'a [u64],
     pub cursor: Option<(usize, usize)>,
@@ -217,6 +245,23 @@ pub struct PaneRenderInput<'a> {
     pub scroll_id: u64,
     pub is_active: bool,
     pub overflow_indicators: PaneOverflowIndicators,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandCompletionIndicatorRenderData {
+    pub rect: PaneRenderRect,
+    pub cell_width: f32,
+    pub cell_height: f32,
+    pub content_x: f32,
+    pub content_y: f32,
+    pub dot_center_x: f32,
+    pub corner_radius: f32,
+    pub background_color: Option<[f32; 4]>,
+    pub dot_color: [f32; 4],
+    pub text_color: [f32; 4],
+    pub failure_color: [f32; 4],
+    pub command: std::sync::Arc<str>,
+    pub exit_text: Option<std::sync::Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -240,6 +285,74 @@ pub enum PaneRenderLayer {
 pub struct SplitBorderRenderInput {
     pub rect: PaneRenderRect,
     pub color: [f32; 4],
+}
+
+fn materialize_split_divider(rect: PaneRenderRect, thickness: f32) -> Option<PaneRenderRect> {
+    let thickness = thickness.max(1.0);
+    if rect.width <= 0.0 && rect.height > 0.0 {
+        return Some(PaneRenderRect::new(
+            rect.x - thickness * 0.5,
+            rect.y,
+            thickness,
+            rect.height,
+        ));
+    }
+    if rect.height <= 0.0 && rect.width > 0.0 {
+        return Some(PaneRenderRect::new(
+            rect.x,
+            rect.y - thickness * 0.5,
+            rect.width,
+            thickness,
+        ));
+    }
+    rect.has_positive_area().then_some(rect)
+}
+
+pub fn adjacent_pane_divider(
+    first: PaneRenderRect,
+    second: PaneRenderRect,
+    max_horizontal_gap: f32,
+    max_vertical_gap: f32,
+) -> Option<PaneRenderRect> {
+    let overlap_top = first.y.max(second.y);
+    let overlap_bottom = (first.y + first.height).min(second.y + second.height);
+    if overlap_bottom > overlap_top {
+        let (left, right) = if first.x <= second.x {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let gap = right.x - (left.x + left.width);
+        if gap >= -f32::EPSILON && gap <= max_horizontal_gap + f32::EPSILON {
+            return Some(PaneRenderRect::new(
+                left.x + left.width + gap.max(0.0) * 0.5,
+                overlap_top,
+                0.0,
+                overlap_bottom - overlap_top,
+            ));
+        }
+    }
+
+    let overlap_left = first.x.max(second.x);
+    let overlap_right = (first.x + first.width).min(second.x + second.width);
+    if overlap_right > overlap_left {
+        let (top, bottom) = if first.y <= second.y {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let gap = bottom.y - (top.y + top.height);
+        if gap >= -f32::EPSILON && gap <= max_vertical_gap + f32::EPSILON {
+            return Some(PaneRenderRect::new(
+                overlap_left,
+                top.y + top.height + gap.max(0.0) * 0.5,
+                overlap_right - overlap_left,
+                0.0,
+            ));
+        }
+    }
+
+    None
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -382,6 +495,8 @@ pub struct Renderer {
     ligature_shaper: ShaperCache,
     font_rasterizer: Option<FontRasterizer>,
     bold_font_rasterizer: Option<FontRasterizer>,
+    italic_font_rasterizer: Option<FontRasterizer>,
+    bold_italic_font_rasterizer: Option<FontRasterizer>,
     fallback_font_rasterizers: Vec<FontRasterizer>,
     font_px_size: f32,
 
@@ -474,6 +589,8 @@ impl Renderer {
                 key,
                 rasterizer,
                 self.bold_font_rasterizer.as_ref(),
+                self.italic_font_rasterizer.as_ref(),
+                self.bold_italic_font_rasterizer.as_ref(),
                 &self.fallback_font_rasterizers,
                 self.font_px_size,
             ) {
@@ -504,8 +621,8 @@ impl Renderer {
                     tracing::debug!(
                         char = %key.c,
                         codepoint = format_args!("U+{:04X}", key.c as u32),
-                        is_bold = key.is_bold,
-                        "Glyph is missing from primary, bold, and fallback fonts"
+                        style = ?key.style,
+                        "Glyph is missing from configured and fallback fonts"
                     );
                 }
             }
@@ -575,6 +692,8 @@ impl Renderer {
                 key,
                 rasterizer,
                 self.bold_font_rasterizer.as_ref(),
+                self.italic_font_rasterizer.as_ref(),
+                self.bold_italic_font_rasterizer.as_ref(),
                 self.font_px_size,
             ) {
                 ShapedGlyphInsertResult::Inserted(update) => {
@@ -635,6 +754,10 @@ impl Renderer {
         self.ligature_shaper
             .set_max_entries(self.ligature_config.cache_entries);
         self.ligature_shaper.clear();
+    }
+
+    pub fn has_real_font_metrics(&self) -> bool {
+        self.font_rasterizer.is_some()
     }
 
     fn create_mapped_vertex_buffer(
@@ -823,8 +946,13 @@ impl Renderer {
             pixels: vec![255], // 1x1 solid white pixel
             glyphs: std::collections::HashMap::new(),
             glyphs_bold: std::collections::HashMap::new(),
+            glyphs_italic: std::collections::HashMap::new(),
+            glyphs_bold_italic: std::collections::HashMap::new(),
             shaped_glyphs: std::collections::HashMap::new(),
             descriptor: super::font::atlas::GlyphAtlasDescriptor::dummy(),
+            font_cell_width: cell_width,
+            font_cell_height: cell_height,
+            font_baseline: baseline,
             atlas_cell_width: 1,
             atlas_cell_height: 1,
             next_dynamic_slot: 1,
@@ -958,6 +1086,8 @@ impl Renderer {
             ligature_shaper: ShaperCache::default(),
             font_rasterizer: None,
             bold_font_rasterizer: None,
+            italic_font_rasterizer: None,
+            bold_italic_font_rasterizer: None,
             fallback_font_rasterizers: Vec::new(),
             font_px_size: baseline as f32,
             cell_width,
@@ -982,6 +1112,12 @@ impl Renderer {
         if let Some(r) = self.bold_font_rasterizer.as_mut() {
             r.update_size(px_size)?;
         }
+        if let Some(r) = self.italic_font_rasterizer.as_mut() {
+            r.update_size(px_size)?;
+        }
+        if let Some(r) = self.bold_italic_font_rasterizer.as_mut() {
+            r.update_size(px_size)?;
+        }
 
         for r in self.fallback_font_rasterizers.iter_mut() {
             r.update_size(px_size)?;
@@ -996,6 +1132,8 @@ impl Renderer {
             self.atlas = GlyphAtlas::build(
                 r,
                 self.bold_font_rasterizer.as_ref(),
+                self.italic_font_rasterizer.as_ref(),
+                self.bold_italic_font_rasterizer.as_ref(),
                 px_size,
                 false, // Full build in fast time since rasterization is already done
             )?;
@@ -1408,6 +1546,8 @@ impl Renderer {
                     shaper: &mut shaper,
                     rasterizer: self.font_rasterizer.as_ref().unwrap(),
                     bold_rasterizer: self.bold_font_rasterizer.as_ref(),
+                    italic_rasterizer: self.italic_font_rasterizer.as_ref(),
+                    bold_italic_rasterizer: self.bold_italic_font_rasterizer.as_ref(),
                     px_size: self.font_px_size,
                 })
             } else {
@@ -1438,6 +1578,7 @@ impl Renderer {
                 context_menu_transparent,
                 scroll_event,
                 0,
+                None,
                 ligature_context.as_mut(),
             );
         }
@@ -1462,6 +1603,8 @@ impl Renderer {
                     shaper: &mut shaper,
                     rasterizer: self.font_rasterizer.as_ref().unwrap(),
                     bold_rasterizer: self.bold_font_rasterizer.as_ref(),
+                    italic_rasterizer: self.italic_font_rasterizer.as_ref(),
+                    bold_italic_rasterizer: self.bold_italic_font_rasterizer.as_ref(),
                     px_size: self.font_px_size,
                 })
             } else {
@@ -1492,6 +1635,7 @@ impl Renderer {
                 context_menu_transparent,
                 None,
                 0,
+                None,
                 ligature_context.as_mut(),
             );
             self.ligature_shaper = shaper;
@@ -1501,7 +1645,7 @@ impl Renderer {
                 tracing::trace!(
                     char = %key.c,
                     codepoint = format_args!("U+{:04X}", key.c as u32),
-                    is_bold = key.is_bold,
+                    style = ?key.style,
                     "Glyph missing from current atlas; fallback glyph used"
                 );
             }
@@ -1534,6 +1678,8 @@ impl Renderer {
         inactive_outline_color: [f32; 4],
         pane_padding: forge_core::config_registry::PaddingConfig,
         modal_dim_color: Option<[f32; 4]>,
+        command_completion_indicator: Option<CommandCompletionIndicatorRenderData>,
+        statusbar_hover: Option<StatusbarHoverRenderData>,
     ) -> Result<bool> {
         let _span = tracing::trace_span!(
             "renderer.render_panes",
@@ -1563,12 +1709,24 @@ impl Renderer {
                     shaper: &mut shaper,
                     rasterizer: self.font_rasterizer.as_ref().unwrap(),
                     bold_rasterizer: self.bold_font_rasterizer.as_ref(),
+                    italic_rasterizer: self.italic_font_rasterizer.as_ref(),
+                    bold_italic_rasterizer: self.bold_italic_font_rasterizer.as_ref(),
                     px_size: self.font_px_size,
                 })
             } else {
                 None
             };
             for pane in panes {
+                let origin_x = if pane.apply_pane_padding {
+                    pane.rect.x + pane_padding.left as f32
+                } else {
+                    pane.rect.x
+                };
+                let origin_y = if pane.apply_pane_padding {
+                    pane.rect.y + pane_padding.top as f32
+                } else {
+                    pane.rect.y
+                };
                 let tessellator = self
                     .pane_tessellators
                     .entry(pane.pane_id)
@@ -1591,13 +1749,14 @@ impl Renderer {
                     pane.cursor_visible_phase,
                     pane.selection,
                     pane.selection_bg,
-                    pane.rect.x + pane_padding.left as f32,
-                    pane.rect.y + pane_padding.top as f32,
+                    origin_x,
+                    origin_y,
                     None,
                     None,
                     false,
                     pane.scroll_event,
                     pane.scroll_id,
+                    None,
                     ligature_context.as_mut(),
                 );
             }
@@ -1626,6 +1785,8 @@ impl Renderer {
                     shaper: &mut shaper,
                     rasterizer: self.font_rasterizer.as_ref().unwrap(),
                     bold_rasterizer: self.bold_font_rasterizer.as_ref(),
+                    italic_rasterizer: self.italic_font_rasterizer.as_ref(),
+                    bold_italic_rasterizer: self.bold_italic_font_rasterizer.as_ref(),
                     px_size: self.font_px_size,
                 })
             } else {
@@ -1634,6 +1795,16 @@ impl Renderer {
             for pane in panes {
                 let all_dirty = vec![1; pane.grid.len()];
                 if let Some(tessellator) = self.pane_tessellators.get_mut(&pane.pane_id) {
+                    let origin_x = if pane.apply_pane_padding {
+                        pane.rect.x + pane_padding.left as f32
+                    } else {
+                        pane.rect.x
+                    };
+                    let origin_y = if pane.apply_pane_padding {
+                        pane.rect.y + pane_padding.top as f32
+                    } else {
+                        pane.rect.y
+                    };
                     tessellator.tessellate(
                         pane.grid,
                         &all_dirty,
@@ -1652,13 +1823,14 @@ impl Renderer {
                         pane.cursor_visible_phase,
                         pane.selection,
                         pane.selection_bg,
-                        pane.rect.x + pane_padding.left as f32,
-                        pane.rect.y + pane_padding.top as f32,
+                        origin_x,
+                        origin_y,
                         None,
                         None,
                         false,
                         None,
                         0,
+                        None,
                         ligature_context.as_mut(),
                     );
                 }
@@ -1734,17 +1906,14 @@ impl Renderer {
                 } else {
                     inactive_outline_color
                 };
-                self.tessellator.append_solid_rect(
-                    vp_w,
-                    vp_h,
-                    PixelRect::new(
-                        border.rect.x,
-                        border.rect.y,
-                        border.rect.width,
-                        border.rect.height,
-                    ),
-                    color,
-                );
+                if let Some(rect) = materialize_split_divider(border.rect, outline_width) {
+                    self.tessellator.append_solid_rect(
+                        vp_w,
+                        vp_h,
+                        PixelRect::new(rect.x, rect.y, rect.width, rect.height),
+                        color,
+                    );
+                }
             }
         } else if outline_width > 0.0 {
             let num_real_panes = panes.iter().filter(|p| !p.pane_id.is_synthetic() && p.layer != PaneRenderLayer::Floating).count();
@@ -1822,17 +1991,9 @@ impl Renderer {
             }
         }
         self.tessellator
+            .append_statusbar_hover_overlay(vp_w, vp_h, statusbar_hover);
+        self.tessellator
             .append_scrollbar_overlay(vp_w, vp_h, scrollbar);
-        self.tessellator.append_context_menu_overlay(
-            &self.atlas,
-            self.baseline as f32,
-            effective_cell_w,
-            effective_cell_h,
-            vp_w,
-            vp_h,
-            context_menu,
-            context_menu_transparent,
-        );
         if let Some(color) = modal_dim_color.filter(|color| color[3] > 0.0) {
             self.tessellator.append_solid_rect(
                 vp_w,
@@ -1910,7 +2071,7 @@ impl Renderer {
                 });
             }
 
-            if outline_width > 0.0 {
+            if outline_width > 0.0 && !pane.pane_id.is_synthetic() {
                 let rect = pane.rect;
                 let current_border_color = if pane.is_active {
                     active_outline_color
@@ -1979,6 +2140,119 @@ impl Renderer {
             }
         }
 
+        if let Some(indicator) = command_completion_indicator {
+            let popup_scissor = rect_to_scissor(indicator.rect, self.swapchain.extent);
+            let chrome_start = self.tessellator.vertices.len();
+            if let Some(background) = indicator.background_color {
+                self.tessellator.append_rounded_rect(
+                    vp_w,
+                    vp_h,
+                    PixelRect::new(
+                        indicator.rect.x,
+                        indicator.rect.y,
+                        indicator.rect.width,
+                        indicator.rect.height,
+                    ),
+                    indicator.corner_radius,
+                    background,
+                );
+            }
+            let cell_h = indicator.cell_height;
+            let cell_w = indicator.cell_width.max(1.0);
+            let dot_size = cell_h * 0.5;
+            let dot_padding = ((cell_h - dot_size) * 0.5).min(1.0);
+            let dot_x = indicator.dot_center_x - dot_size * 0.5;
+            let dot_y = indicator.content_y + (cell_h - dot_size) * 0.5;
+            self.tessellator.append_circle(
+                vp_w,
+                vp_h,
+                dot_x,
+                dot_y,
+                dot_size,
+                dot_padding,
+                indicator.dot_color,
+            );
+            let text_x = indicator.content_x + cell_w * 2.0;
+            let chrome_count = self.tessellator.vertices.len() - chrome_start;
+            if chrome_count > 0 {
+                if let Some(scissor) = popup_scissor {
+                    draw_batches.push(RenderDrawBatch {
+                        start: chrome_start,
+                        count: chrome_count,
+                        scissor,
+                        is_opaque: false,
+                    });
+                }
+            }
+
+            if let Some(text_clip) = command_indicator_text_clip(
+                indicator.rect,
+                indicator.dot_center_x,
+                dot_size,
+                text_x,
+                cell_w,
+            ) {
+                let text_start = self.tessellator.vertices.len();
+                self.tessellator.append_overlay_text(
+                    &self.atlas,
+                    vp_w,
+                    vp_h,
+                    text_x,
+                    indicator.content_y,
+                    cell_w,
+                    cell_h,
+                    indicator.command.as_ref(),
+                    indicator.text_color,
+                );
+                if let Some(exit_text) = indicator.exit_text.as_deref() {
+                    let exit_x = text_x + indicator.command.chars().count() as f32 * cell_w;
+                    self.tessellator.append_overlay_text(
+                        &self.atlas,
+                        vp_w,
+                        vp_h,
+                        exit_x,
+                        indicator.content_y,
+                        cell_w,
+                        cell_h,
+                        exit_text,
+                        indicator.failure_color,
+                    );
+                }
+                let text_count = self.tessellator.vertices.len() - text_start;
+                if text_count > 0 {
+                    if let Some(scissor) = rect_to_scissor(text_clip, self.swapchain.extent) {
+                        draw_batches.push(RenderDrawBatch {
+                            start: text_start,
+                            count: text_count,
+                            scissor,
+                            is_opaque: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        let cm_start = self.tessellator.vertices.len();
+        self.tessellator.append_context_menu_overlay(
+            &self.atlas,
+            self.baseline as f32,
+            effective_cell_w,
+            effective_cell_h,
+            vp_w,
+            vp_h,
+            context_menu,
+            context_menu_transparent,
+        );
+        let cm_count = self.tessellator.vertices.len() - cm_start;
+        if cm_count > 0 {
+            draw_batches.push(RenderDrawBatch {
+                start: cm_start,
+                count: cm_count,
+                scissor: full_scissor(self.swapchain.extent),
+                is_opaque: false,
+            });
+        }
+
         for key in pane_missing_glyphs
             .iter()
             .chain(self.tessellator.missing_glyphs().iter())
@@ -1987,7 +2261,7 @@ impl Renderer {
                 tracing::trace!(
                     char = %key.c,
                     codepoint = format_args!("U+{:04X}", key.c as u32),
-                    is_bold = key.is_bold,
+                    style = ?key.style,
                     "Glyph missing from current atlas; fallback glyph used"
                 );
             }
@@ -2051,6 +2325,8 @@ impl Renderer {
         &mut self,
         rasterizer: FontRasterizer,
         bold_rasterizer: Option<FontRasterizer>,
+        italic_rasterizer: Option<FontRasterizer>,
+        bold_italic_rasterizer: Option<FontRasterizer>,
         fallback_rasterizers: Vec<FontRasterizer>,
         px_size: f32,
         mut atlas: GlyphAtlas,
@@ -2080,6 +2356,8 @@ impl Renderer {
         self.atlas = atlas;
         self.font_rasterizer = Some(rasterizer);
         self.bold_font_rasterizer = bold_rasterizer;
+        self.italic_font_rasterizer = italic_rasterizer;
+        self.bold_italic_font_rasterizer = bold_italic_rasterizer;
         self.fallback_font_rasterizers = fallback_rasterizers;
         self.reported_missing_glyphs.clear();
         self.unsupported_dynamic_glyphs.clear();
@@ -2187,6 +2465,30 @@ mod tests {
 
         assert!(rect_to_scissor(PaneRenderRect::new(10.0, 10.0, 0.0, 5.0), extent).is_none());
         assert!(rect_to_scissor(PaneRenderRect::new(120.0, 10.0, 4.0, 5.0), extent).is_none());
+    }
+
+    #[test]
+    fn command_indicator_text_clip_stays_clear_of_moving_dot() {
+        let popup = PaneRenderRect::new(20.0, 30.0, 120.0, 30.0);
+        let clip = command_indicator_text_clip(popup, 75.0, 10.0, 50.0, 10.0).unwrap();
+
+        assert_eq!(clip.x, 82.5);
+        assert_eq!(clip.x + clip.width, popup.x + popup.width);
+        assert!(clip.x > 75.0 + 5.0);
+    }
+
+    #[test]
+    fn command_indicator_text_clip_disappears_before_crossing_dot() {
+        let popup = PaneRenderRect::new(80.0, 30.0, 30.0, 30.0);
+
+        assert!(command_indicator_text_clip(popup, 105.0, 10.0, 50.0, 10.0).is_none());
+    }
+
+    #[test]
+    fn command_indicator_circle_never_exposes_text() {
+        let circle = PaneRenderRect::new(80.0, 30.0, 30.0, 30.0);
+
+        assert!(command_indicator_text_clip(circle, 95.0, 10.0, 92.0, 10.0).is_none());
     }
 
     #[test]
@@ -2341,5 +2643,37 @@ mod tests {
 
         assert_eq!(cell_w * 3.0, 30.0);
         assert_eq!(cell_h, 22.0);
+    }
+
+    #[test]
+    fn zero_width_and_height_borders_become_visible_dividers() {
+        assert_eq!(
+            materialize_split_divider(PaneRenderRect::new(40.0, 5.0, 0.0, 30.0), 1.0),
+            Some(PaneRenderRect::new(39.5, 5.0, 1.0, 30.0))
+        );
+        assert_eq!(
+            materialize_split_divider(PaneRenderRect::new(5.0, 40.0, 30.0, 0.0), 1.0),
+            Some(PaneRenderRect::new(5.0, 39.5, 30.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn adjacent_panes_get_only_a_shared_divider() {
+        let left = PaneRenderRect::new(0.0, 0.0, 40.0, 30.0);
+        let right = PaneRenderRect::new(50.0, 0.0, 40.0, 30.0);
+        assert_eq!(
+            adjacent_pane_divider(left, right, 10.0, 20.0),
+            Some(PaneRenderRect::new(45.0, 0.0, 0.0, 30.0))
+        );
+
+        let top = PaneRenderRect::new(0.0, 0.0, 40.0, 30.0);
+        let bottom = PaneRenderRect::new(0.0, 50.0, 40.0, 30.0);
+        assert_eq!(
+            adjacent_pane_divider(top, bottom, 10.0, 20.0),
+            Some(PaneRenderRect::new(0.0, 40.0, 40.0, 0.0))
+        );
+
+        let distant = PaneRenderRect::new(51.0, 0.0, 40.0, 30.0);
+        assert_eq!(adjacent_pane_divider(left, distant, 10.0, 20.0), None);
     }
 }

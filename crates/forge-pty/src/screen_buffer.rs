@@ -160,6 +160,7 @@ pub struct ScreenBuffer {
     pub cursor: CursorPos,
     pub selection: Option<SelectionRange>,
     pub application_cursor_keys: bool,
+    pub cursor_visible: bool,
     pub cursor_style_override: Option<forge_core::config_registry::CursorStyle>,
     pub cursor_blink_override: Option<bool>,
     pub dirty_generations: Vec<u64>,
@@ -292,6 +293,7 @@ impl ScreenBuffer {
             cursor: CursorPos { row: 0, col: 0 },
             selection: None,
             application_cursor_keys: false,
+            cursor_visible: true,
             cursor_style_override: None,
             cursor_blink_override: None,
             dirty_generations: vec![1; rows],
@@ -1225,6 +1227,13 @@ impl ScreenBuffer {
         self.cursor_style_override = Some(style);
         self.cursor_blink_override = blink;
         if changed {
+            self.mark_cursor_viewport_row_dirty();
+        }
+    }
+
+    pub fn set_cursor_visible(&mut self, visible: bool) {
+        if self.cursor_visible != visible {
+            self.cursor_visible = visible;
             self.mark_cursor_viewport_row_dirty();
         }
     }
@@ -2415,7 +2424,7 @@ mod reflow_tests {
 impl ScreenBuffer {
     pub fn generate_snapshot(&mut self) -> crate::snapshot::RenderSnapshot {
         let cursor_row_in_viewport = self.cursor.row as isize + self.scroll_offset as isize;
-        let cursor = if cursor_row_in_viewport < self.rows() as isize {
+        let cursor = if self.cursor_visible && cursor_row_in_viewport < self.rows() as isize {
             Some((self.cursor.col, cursor_row_in_viewport as usize))
         } else {
             None

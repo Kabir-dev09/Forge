@@ -5,7 +5,6 @@ use super::{
 };
 use std::time::{Duration, Instant};
 
-const DEFAULT_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtualPaneRect {
@@ -242,6 +241,7 @@ pub struct ScrollingPaneManager {
     layout_generation: u64,
     visible_cache: VisiblePaneCache,
     scroll_animation: ScrollAnimation,
+    animation_duration_ms: u64,
 }
 
 impl ScrollingPaneManager {
@@ -267,6 +267,7 @@ impl ScrollingPaneManager {
             layout_generation: 1,
             visible_cache: VisiblePaneCache::new(),
             scroll_animation: ScrollAnimation::Idle,
+            animation_duration_ms: 120,
         }
     }
 
@@ -274,6 +275,11 @@ impl ScrollingPaneManager {
         self.gap_cols = gap_cols;
         self.gap_rows = gap_rows;
         self.invalidate_layout();
+        self
+    }
+
+    pub fn with_animation_duration(mut self, ms: u64) -> Self {
+        self.animation_duration_ms = ms;
         self
     }
 
@@ -598,9 +604,12 @@ impl ScrollingPaneManager {
             self.normalize_geometry_gravity();
         }
         let (max_x, max_y) = self.max_scroll();
-        self.scroll_x_cols = self.scroll_x_cols.clamp(0, max_x);
-        self.scroll_y_rows = self.scroll_y_rows.clamp(0, max_y);
-        self.scroll_animation = ScrollAnimation::Idle;
+        let target_x = self.scroll_x_cols.clamp(0, max_x);
+        let target_y = self.scroll_y_rows.clamp(0, max_y);
+        self.set_scroll_target_at(target_x, target_y, Instant::now());
+        if let Some(active) = self.active_pane {
+            self.scroll_pane_into_view_at(active, Instant::now());
+        }
         self.invalidate_layout();
         ScrollingPaneRemoval {
             removed: true,
@@ -1511,7 +1520,7 @@ impl ScrollingPaneManager {
                 target_x: new_target.0,
                 target_y: new_target.1,
                 started_at: now,
-                duration: DEFAULT_SCROLL_ANIMATION_DURATION,
+                duration: Duration::from_millis(self.animation_duration_ms),
             };
         }
         self.invalidate_visible_cache();
@@ -1850,13 +1859,13 @@ mod tests {
         let now = Instant::now();
 
         assert!(manager.scroll_by_at(500, 500, now));
-        let half = now + DEFAULT_SCROLL_ANIMATION_DURATION / 2;
+        let half = now + Duration::from_millis(120) / 2;
         let (mid_x, mid_y, active_mid) = manager.visual_scroll_offset(half);
         assert!(active_mid);
         assert!(mid_x > 0.0 && mid_x < 60.0);
         assert!(mid_y > 0.0 && mid_y < 38.0);
 
-        let done = now + DEFAULT_SCROLL_ANIMATION_DURATION;
+        let done = now + Duration::from_millis(120);
         let (end_x, end_y, active_end) = manager.visual_scroll_offset(done);
         assert!(!active_end);
         assert_eq!(end_x, 60.0);
@@ -1872,7 +1881,7 @@ mod tests {
         let now = Instant::now();
 
         assert!(manager.scroll_by_at(60, 0, now));
-        let interrupt_at = now + DEFAULT_SCROLL_ANIMATION_DURATION / 2;
+        let interrupt_at = now + Duration::from_millis(120) / 2;
         let (current_x, _, active) = manager.visual_scroll_offset(interrupt_at);
         assert!(active);
         assert!(manager.scroll_by_at(-30, 0, interrupt_at));
@@ -1919,14 +1928,14 @@ mod tests {
         let now = Instant::now();
 
         assert!(manager.scroll_by_at(20, 0, now));
-        let render_visible = manager.render_visible_panes(now + DEFAULT_SCROLL_ANIMATION_DURATION);
+        let render_visible = manager.render_visible_panes(now + Duration::from_millis(120));
         let rendered_second = render_visible
             .iter()
             .find(|pane| pane.pane_id == second)
             .unwrap();
         assert_eq!(rendered_second.viewport_col, 50.0);
         assert!(!manager.has_active_scroll_animation(
-            now + DEFAULT_SCROLL_ANIMATION_DURATION + Duration::from_millis(1)
+            now + Duration::from_millis(120) + Duration::from_millis(1)
         ));
     }
 
@@ -1951,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_removal_cancels_scroll_animation() {
+    fn pane_removal_animates_to_new_bounds() {
         let mut manager = manager();
         manager.add_pane_at(0, 0);
         let second = manager.add_pane_at(100, 0);
@@ -1961,7 +1970,7 @@ mod tests {
         assert!(manager.has_active_scroll_animation(now));
         assert!(manager.remove_pane(second));
 
-        assert!(!manager.has_active_scroll_animation(now));
+        assert!(manager.has_active_scroll_animation(now));
     }
 
     #[test]

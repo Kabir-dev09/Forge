@@ -47,10 +47,10 @@ struct SidebarPalette {
 
 impl SidebarPalette {
     fn from_theme(theme: &ThemeConfig) -> Self {
-        let bg = mix_color(theme.background, Color::BLACK, 0.20);
+        let bg = mix_color(theme.parsed_background, Color::BLACK, 0.20);
         Self {
             bg,
-            fg: theme.foreground,
+            fg: theme.parsed_foreground,
         }
     }
 }
