@@ -1,0 +1,156 @@
+# Forge TOML configuration.
+# Forge loads ~/.config/forge/config.toml.
+
+[font]
+# family = "JetBrains Mono"
+# family = "FiraCode Nerd Font Mono"
+size = 16.0
+nerd_fonts = true
+
+[font.ligatures]
+enabled = true
+mode = "cursor-aware"
+features = ["liga", "clig", "calt"]
+max_token_len = 64
+cache_entries = 4096
+
+[window]
+width = 800
+height = 600
+opacity = 0.95
+title = "Forge"
+decorations = true
+center_grid = true
+gap = 0
+pane_outline_width = 1.0
+
+[window.padding]
+top = 8
+bottom = 8
+left = 8
+right = 8
+
+[window.pane_padding]
+top = 0
+bottom = 0
+left = 0
+right = 0
+
+[blur]
+enabled = true
+method = "auto"
+
+[cursor]
+style = "beam"
+blink = true
+blink_rate_ms = 530
+
+[scrollback]
+lines = 10000
+smooth_scroll = true
+scroll_multiplier = 3.0
+
+[shell]
+program = "fish"
+args = []
+env = []
+
+[behavior]
+copy_on_select = true
+hide_mouse_when_typing = false
+disable_default_keybindings = false
+
+[cursor.trail]
+enabled = true
+fast_decay_ms = 100
+slow_decay_ms = 400
+minimum_distance_x = 2
+minimum_distance_y = 2
+trigger_delay_ms = 50
+color = "cursor"
+
+[panes]
+mode = "scrolling"
+
+[render]
+braille_style = "dots"
+context_menu_transparent = false
+pane_animation = "expand"
+pane_animation_duration_ms = 180
+
+[confirm_close]
+background_mode = "opaque_panel"
+panel_color = "#0b1020"
+selected_color = "#facc15"
+
+[theme]
+background = "#141218"
+foreground = "#e6e0e9"
+cursor_color = "#d0bcff"
+selection_bg = "#4f378b"
+pane_outline_active = "#89b4fa"
+pane_outline_inactive = "#6c7086"
+popup_background = "#1e1e2e"
+
+ansi_colors = [
+    "#141218",
+    "#ff728f",
+    "#7fff9a",
+    "#ffda72",
+    "#bca5f2",
+    "#4e3d76",
+    "#d0bcff",
+    "#f4efff",
+    "#9d99a5",
+    "#ff9fb2",
+    "#a5ffb8",
+    "#ffe7a5",
+    "#d7c6ff",
+    "#ded0ff",
+    "#e9e0ff",
+    "#faf8ff",
+]
+
+[statusbar]
+enabled = true
+position = "top"
+placement = "absolute"
+bg_color = "#181825"
+fg_color = "#cdd6f4"
+
+[[statusbar.left]]
+type = "tabs"
+format = " {index}{zoom} "
+zoom_indicator = "()"
+
+[statusbar.left.active]
+fg = "#1e1e2e"
+bg = "#89b4fa"
+
+[statusbar.left.inactive]
+fg = "#a6adc8"
+
+[[statusbar.left]]
+type = "text"
+text = " + "
+action = "NewTab"
+
+[statusbar.auto_hide]
+enabled = false
+reveal_on_hover = true
+reveal_with_keybind = true
+
+[keybinds]
+copy = "ctrl+shift+c"
+paste = "ctrl+shift+v"
+toggle_fullscreen = "f11"
+split_vertical = "ctrl+shift+backslash"
+split_horizontal = "ctrl+shift+minus"
+toggle_pane_zoom = "ctrl+shift+z"
+toggle_sidebar = "ctrl+shift+b"
+close_pane = "ctrl+shift+q"
+new_tab = "ctrl+shift+t"
+close_tab = "ctrl+shift+w"
+next_tab = "ctrl+pagedown"
+previous_tab = "ctrl+pageup"
+toggle_statusbar = "ctrl+shift+s"
