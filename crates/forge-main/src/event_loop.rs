@@ -667,12 +667,35 @@ fn apply_scrolling_grid_changes(
     changes: Vec<(crate::mux::PaneId, crate::mux::GridSize)>,
     metrics: GridMetrics,
 ) {
+    let tab_id = app_data.tab_manager.active_tab().id;
+    apply_scrolling_grid_changes_to_tab(app_data, tab_id, changes, metrics);
+}
+
+fn apply_scrolling_grid_changes_to_tab(
+    app_data: &mut AppData,
+    tab_id: crate::mux::TabId,
+    changes: Vec<(crate::mux::PaneId, crate::mux::GridSize)>,
+    metrics: GridMetrics,
+) {
     if changes.is_empty() {
         return;
     }
 
+    let Some(tab_index) = app_data
+        .tab_manager
+        .tabs
+        .iter()
+        .position(|tab| tab.id == tab_id)
+    else {
+        return;
+    };
+
     for (pane_id, grid_size) in &changes {
-        if let Some(pane) = app_data.tab_manager.active_mux_mut().panes.get_mut(pane_id) {
+        if let Some(pane) = app_data.tab_manager.tabs[tab_index]
+            .mux
+            .panes
+            .get_mut(pane_id)
+        {
             if pane.grid_size != *grid_size {
                 pane.grid_size = *grid_size;
             }
@@ -685,9 +708,8 @@ fn apply_scrolling_grid_changes(
         .collect();
 
     for (pane_id, grid_size) in &changes {
-        if let Some(pty) = app_data
-            .tab_manager
-            .active_mux_mut()
+        if let Some(pty) = app_data.tab_manager.tabs[tab_index]
+            .mux
             .panes
             .get_mut(pane_id)
             .and_then(|pane| pane.pty.as_mut())
@@ -1591,6 +1613,150 @@ fn focus_pane_direction(app_data: &mut AppData, dir: crate::mux::state::Directio
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         app_data.force_immediate_render = true;
     }
+    app_data.wayland_state.force_redraw = true;
+}
+
+fn move_scrolling_pane_direction(app_data: &mut AppData, dir: crate::mux::state::Direction) {
+    if app_data.active_mouse_button.is_some() || app_data.dragging_scrolling_resize.is_some() {
+        return;
+    }
+    let moved = app_data
+        .pane_runtime
+        .scrolling_mut()
+        .map(|manager| manager.move_active_pane_direction(dir))
+        .unwrap_or(false);
+    if !moved {
+        return;
+    }
+
+    app_data.hovered_scrolling_resize = None;
+    app_data
+        .pane_io
+        .visible_gen
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    app_data.force_immediate_render = true;
+    app_data.wayland_state.force_redraw = true;
+}
+
+fn prepare_scrolling_transfer_animation_history(
+    app_data: &mut AppData,
+    tab_move: &crate::mux::runtime::ScrollingPaneTabMove,
+    metrics: GridMetrics,
+) {
+    if matches!(
+        app_data.config.render.pane_animation,
+        forge_core::config_registry::PaneAnimationMode::None
+    ) {
+        return;
+    }
+
+    app_data.last_layout_rects.remove(&tab_move.pane_id);
+    app_data.pane_animations.remove(&tab_move.pane_id);
+
+    let destination_tab = app_data
+        .tab_manager
+        .tabs
+        .iter()
+        .find(|tab| tab.id == tab_move.destination_tab_id);
+    for (pane_id, rect) in &tab_move.destination_previous_rects {
+        let logical_rect = crate::mux::PaneRect::new(
+            rect.col as f32 * metrics.effective_cell_w as f32,
+            rect.row as f32 * metrics.effective_cell_h as f32,
+            rect.cols as f32 * metrics.effective_cell_w as f32,
+            rect.rows as f32 * metrics.effective_cell_h as f32,
+        );
+        let screen_rect = destination_tab
+            .and_then(|tab| tab.mux.panes.get(pane_id))
+            .map(|pane| pane.rect)
+            .unwrap_or(logical_rect);
+        app_data
+            .last_layout_rects
+            .insert(*pane_id, (logical_rect, screen_rect));
+        app_data.pane_animations.remove(pane_id);
+    }
+}
+
+fn move_scrolling_pane_to_tab(app_data: &mut AppData, destination_index: usize) {
+    if app_data.active_mouse_button.is_some() || app_data.dragging_scrolling_resize.is_some() {
+        return;
+    }
+    let Some(destination_tab_id) = app_data
+        .tab_manager
+        .tabs
+        .get(destination_index)
+        .map(|tab| tab.id)
+    else {
+        return;
+    };
+    let source_tab_id = app_data.tab_manager.active_tab().id;
+    if source_tab_id == destination_tab_id {
+        return;
+    }
+    let pane_id = app_data.active_pane_id();
+    let source_has_only_scrolling_pane = app_data
+        .pane_runtime
+        .scrolling()
+        .and_then(|manager| manager.active_tab())
+        .map(|tab| tab.panes.pane_count() == 1)
+        .unwrap_or(false);
+    if app_data
+        .tab_manager
+        .active_mux()
+        .floating_panes
+        .contains(&pane_id)
+        || (source_has_only_scrolling_pane
+            && !app_data.tab_manager.active_mux().floating_panes.is_empty())
+        || !app_data
+            .tab_manager
+            .active_mux()
+            .panes
+            .contains_key(&pane_id)
+    {
+        return;
+    }
+
+    let Some(tab_move) = app_data
+        .pane_runtime
+        .scrolling_mut()
+        .and_then(|manager| manager.move_active_pane_to_tab(destination_tab_id))
+    else {
+        return;
+    };
+    if !app_data
+        .tab_manager
+        .move_detached_pane_to_tab(tab_move.pane_id, destination_tab_id)
+    {
+        tracing::error!(
+            pane_id = tab_move.pane_id.get(),
+            "Scrolling pane metadata moved but mux ownership transfer failed"
+        );
+        return;
+    }
+
+    if let Some(metrics) = app_data.cached_grid_metrics {
+        prepare_scrolling_transfer_animation_history(app_data, &tab_move, metrics);
+        apply_scrolling_grid_changes_to_tab(
+            app_data,
+            tab_move.source_tab_id,
+            tab_move.source_grid_changes,
+            metrics,
+        );
+        apply_scrolling_grid_changes_to_tab(
+            app_data,
+            tab_move.destination_tab_id,
+            tab_move.destination_grid_changes,
+            metrics,
+        );
+    }
+    sync_scrolling_active_tab(app_data);
+    app_data.context_menu = None;
+    app_data.hovered_scrolling_resize = None;
+    app_data.dragging_scrolling_resize = None;
+    app_data
+        .pane_io
+        .visible_gen
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    app_data.force_immediate_render = true;
     app_data.wayland_state.force_redraw = true;
 }
 
@@ -3000,6 +3166,57 @@ pub fn run_event_loop(
                     }
                     forge_core::bindings::Action::FocusPaneDown => {
                         focus_pane_direction(&mut app_data, crate::mux::state::Direction::Down);
+                    }
+                    forge_core::bindings::Action::MovePaneLeft => {
+                        move_scrolling_pane_direction(
+                            &mut app_data,
+                            crate::mux::state::Direction::Left,
+                        );
+                    }
+                    forge_core::bindings::Action::MovePaneRight => {
+                        move_scrolling_pane_direction(
+                            &mut app_data,
+                            crate::mux::state::Direction::Right,
+                        );
+                    }
+                    forge_core::bindings::Action::MovePaneUp => {
+                        move_scrolling_pane_direction(
+                            &mut app_data,
+                            crate::mux::state::Direction::Up,
+                        );
+                    }
+                    forge_core::bindings::Action::MovePaneDown => {
+                        move_scrolling_pane_direction(
+                            &mut app_data,
+                            crate::mux::state::Direction::Down,
+                        );
+                    }
+                    forge_core::bindings::Action::MovePaneToTab1 => {
+                        move_scrolling_pane_to_tab(&mut app_data, 0);
+                    }
+                    forge_core::bindings::Action::MovePaneToTab2 => {
+                        move_scrolling_pane_to_tab(&mut app_data, 1);
+                    }
+                    forge_core::bindings::Action::MovePaneToTab3 => {
+                        move_scrolling_pane_to_tab(&mut app_data, 2);
+                    }
+                    forge_core::bindings::Action::MovePaneToTab4 => {
+                        move_scrolling_pane_to_tab(&mut app_data, 3);
+                    }
+                    forge_core::bindings::Action::MovePaneToTab5 => {
+                        move_scrolling_pane_to_tab(&mut app_data, 4);
+                    }
+                    forge_core::bindings::Action::MovePaneToTab6 => {
+                        move_scrolling_pane_to_tab(&mut app_data, 5);
+                    }
+                    forge_core::bindings::Action::MovePaneToTab7 => {
+                        move_scrolling_pane_to_tab(&mut app_data, 6);
+                    }
+                    forge_core::bindings::Action::MovePaneToTab8 => {
+                        move_scrolling_pane_to_tab(&mut app_data, 7);
+                    }
+                    forge_core::bindings::Action::MovePaneToTab9 => {
+                        move_scrolling_pane_to_tab(&mut app_data, 8);
                     }
                     forge_core::bindings::Action::TogglePaneZoom => {
                         if let Err(err) = toggle_pane_zoom(&mut app_data, None) {

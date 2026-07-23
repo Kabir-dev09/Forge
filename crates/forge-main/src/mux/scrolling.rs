@@ -5,7 +5,6 @@ use super::{
 };
 use std::time::{Duration, Instant};
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtualPaneRect {
     pub col: i32,
@@ -325,9 +324,12 @@ impl ScrollingPaneManager {
         self.viewport_cols = cols;
         self.viewport_rows = rows;
 
+        let zoomed_id = self.valid_zoomed_pane();
         let mut changes = Vec::new();
-        if let Some(zoomed_id) = self.valid_zoomed_pane() {
-            changes.push((zoomed_id, GridSize::new(cols, rows)));
+        if zoomed_id.is_some() {
+            if self.panes.len() > 1 {
+                changes = self.fill_available_vertical_space();
+            }
         } else if self.panes.len() == 1 {
             if let Some(pane) = self.panes.first_mut() {
                 let new_rect = VirtualPaneRect::new(0, 0, cols, rows);
@@ -337,6 +339,11 @@ impl ScrollingPaneManager {
                     changes.push((pane.id, pane.grid_size));
                 }
             }
+        } else {
+            changes = self.fill_available_vertical_space();
+        }
+        if let Some(zoomed_id) = zoomed_id {
+            record_grid_change(&mut changes, zoomed_id, GridSize::new(cols, rows));
         }
 
         self.clamp_scroll();
@@ -368,6 +375,53 @@ impl ScrollingPaneManager {
             self.active_pane = Some(pane_id);
         }
         self.invalidate_layout();
+    }
+
+    pub fn transferred_pane(&self, pane_id: PaneId) -> Option<ScrollingPane> {
+        self.pane(pane_id).cloned()
+    }
+
+    pub fn pane_rects(&self) -> impl Iterator<Item = (PaneId, VirtualPaneRect)> + '_ {
+        self.panes
+            .iter()
+            .map(|pane| (pane.id, pane.virtual_rect))
+    }
+
+    pub fn insert_transferred_pane(
+        &mut self,
+        mut pane: ScrollingPane,
+    ) -> Option<Vec<(PaneId, GridSize)>> {
+        if self.pane(pane.id).is_some() {
+            return None;
+        }
+
+        self.zoomed_pane = None;
+        if self.panes.len() == 1 {
+            if let Some(changes) =
+                self.split_active_with_existing(SplitAxis::Vertical, pane.id)
+            {
+                return Some(changes);
+            }
+        }
+
+        let col = self
+            .panes
+            .iter()
+            .map(|existing| existing.virtual_rect.right())
+            .max()
+            .map(|right| right.saturating_add(self.gap_cols as i32))
+            .unwrap_or(0);
+        pane.virtual_rect.col = col;
+        pane.virtual_rect.row = 0;
+        pane.grid_size = GridSize::new(pane.virtual_rect.cols, pane.virtual_rect.rows);
+
+        let pane_id = pane.id;
+        self.next_pane_id = self.next_pane_id.max(pane_id.get().saturating_add(1));
+        self.panes.push(pane);
+        self.active_pane = Some(pane_id);
+        self.invalidate_layout();
+        self.scroll_pane_into_view(pane_id);
+        Some(Vec::new())
     }
 
     pub fn add_pane_right_of_active(&mut self) -> PaneId {
@@ -422,14 +476,16 @@ impl ScrollingPaneManager {
         });
         self.active_pane = Some(pane_id);
         self.normalize_geometry_gravity();
+        let mut changes = self.fill_available_vertical_space();
         self.invalidate_layout();
         self.scroll_pane_into_view(pane_id);
 
-        let mut changes = Vec::with_capacity(2);
         if resized_active {
-            changes.push((active_id, GridSize::new(active_rect.cols, active_rect.rows)));
+            let grid_size = self.panes[active_index].grid_size;
+            record_grid_change(&mut changes, active_id, grid_size);
         }
-        changes.push((pane_id, GridSize::new(new_rect.cols, new_rect.rows)));
+        let new_grid_size = self.pane(pane_id)?.grid_size;
+        record_grid_change(&mut changes, pane_id, new_grid_size);
         Some(changes)
     }
 
@@ -602,6 +658,16 @@ impl ScrollingPaneManager {
         } else if !self.panes.is_empty() {
             self.compact_after_removal(removed_rect);
             self.normalize_geometry_gravity();
+            for (changed_id, grid_size) in self.fill_available_vertical_space() {
+                record_grid_change(&mut grid_changes, changed_id, grid_size);
+            }
+        }
+        if let Some(zoomed_id) = self.valid_zoomed_pane() {
+            record_grid_change(
+                &mut grid_changes,
+                zoomed_id,
+                GridSize::new(self.viewport_cols, self.viewport_rows),
+            );
         }
         let (max_x, max_y) = self.max_scroll();
         let target_x = self.scroll_x_cols.clamp(0, max_x);
@@ -765,9 +831,145 @@ impl ScrollingPaneManager {
         let Some(active_id) = self.active_pane else {
             return false;
         };
-        let Some(active_rect) = self.pane(active_id).map(|pane| pane.virtual_rect) else {
+        let Some(pane_id) = self.directional_neighbor(active_id, dir) else {
             return false;
         };
+
+        self.active_pane = Some(pane_id);
+        self.scroll_pane_into_view(pane_id);
+        true
+    }
+
+    pub fn move_active_pane_direction(&mut self, dir: Direction) -> bool {
+        if self.is_zoomed() {
+            return false;
+        }
+        let Some(active_id) = self.active_pane else {
+            return false;
+        };
+        let Some(target_id) = self.directional_neighbor(active_id, dir) else {
+            return false;
+        };
+        let Some(active_index) = self.pane_index(active_id) else {
+            return false;
+        };
+        let Some(target_index) = self.pane_index(target_id) else {
+            return false;
+        };
+        let active_rect = self.panes[active_index].virtual_rect;
+        let target_rect = self.panes[target_index].virtual_rect;
+        let (moved_active, moved_target) = match dir {
+            Direction::Left => {
+                let gap = active_rect.col.saturating_sub(target_rect.right());
+                (
+                    VirtualPaneRect::new(
+                        target_rect.col,
+                        active_rect.row,
+                        active_rect.cols,
+                        active_rect.rows,
+                    ),
+                    VirtualPaneRect::new(
+                        target_rect
+                            .col
+                            .saturating_add(active_rect.cols as i32)
+                            .saturating_add(gap),
+                        target_rect.row,
+                        target_rect.cols,
+                        target_rect.rows,
+                    ),
+                )
+            }
+            Direction::Right => {
+                let gap = target_rect.col.saturating_sub(active_rect.right());
+                (
+                    VirtualPaneRect::new(
+                        active_rect
+                            .col
+                            .saturating_add(target_rect.cols as i32)
+                            .saturating_add(gap),
+                        active_rect.row,
+                        active_rect.cols,
+                        active_rect.rows,
+                    ),
+                    VirtualPaneRect::new(
+                        active_rect.col,
+                        target_rect.row,
+                        target_rect.cols,
+                        target_rect.rows,
+                    ),
+                )
+            }
+            Direction::Up => {
+                let gap = active_rect.row.saturating_sub(target_rect.bottom());
+                (
+                    VirtualPaneRect::new(
+                        active_rect.col,
+                        target_rect.row,
+                        active_rect.cols,
+                        active_rect.rows,
+                    ),
+                    VirtualPaneRect::new(
+                        target_rect.col,
+                        target_rect
+                            .row
+                            .saturating_add(active_rect.rows as i32)
+                            .saturating_add(gap),
+                        target_rect.cols,
+                        target_rect.rows,
+                    ),
+                )
+            }
+            Direction::Down => {
+                let gap = target_rect.row.saturating_sub(active_rect.bottom());
+                (
+                    VirtualPaneRect::new(
+                        active_rect.col,
+                        active_rect
+                            .row
+                            .saturating_add(target_rect.rows as i32)
+                            .saturating_add(gap),
+                        active_rect.cols,
+                        active_rect.rows,
+                    ),
+                    VirtualPaneRect::new(
+                        target_rect.col,
+                        active_rect.row,
+                        target_rect.cols,
+                        target_rect.rows,
+                    ),
+                )
+            }
+        };
+
+        if rects_overlap_with_gap(moved_active, moved_target, self.gap_cols, self.gap_rows)
+            || self.panes.iter().any(|pane| {
+                pane.id != active_id
+                    && pane.id != target_id
+                    && (rects_overlap_with_gap(
+                        moved_active,
+                        pane.virtual_rect,
+                        self.gap_cols,
+                        self.gap_rows,
+                    ) || rects_overlap_with_gap(
+                        moved_target,
+                        pane.virtual_rect,
+                        self.gap_cols,
+                        self.gap_rows,
+                    ))
+            })
+        {
+            return false;
+        }
+
+        self.panes[active_index].virtual_rect = moved_active;
+        self.panes[target_index].virtual_rect = moved_target;
+        self.invalidate_layout();
+        self.scroll_pane_into_view(active_id);
+        true
+    }
+
+    fn directional_neighbor(&self, active_id: PaneId, dir: Direction) -> Option<PaneId> {
+        let active_rect = self.pane(active_id)?.virtual_rect;
 
         let mut best_pane = None;
         let mut best_score = f32::INFINITY;
@@ -833,14 +1035,7 @@ impl ScrollingPaneManager {
                 best_pane = Some(pane.id);
             }
         }
-
-        if let Some(pane_id) = best_pane {
-            self.active_pane = Some(pane_id);
-            self.scroll_pane_into_view(pane_id);
-            true
-        } else {
-            false
-        }
+        best_pane
     }
 
     pub fn scroll_by(&mut self, dx_cols: i32, dy_rows: i32) -> bool {
@@ -1148,6 +1343,9 @@ impl ScrollingPaneManager {
         }
 
         self.normalize_geometry_gravity();
+        for (pane_id, grid_size) in self.fill_available_vertical_space() {
+            record_grid_change(&mut changes, pane_id, grid_size);
+        }
         self.clamp_scroll();
         self.cancel_scroll_animation();
         self.invalidate_layout();
@@ -1175,6 +1373,69 @@ impl ScrollingPaneManager {
             self.clamp_scroll();
         }
         moved_any
+    }
+
+    fn fill_available_vertical_space(&mut self) -> Vec<(PaneId, GridSize)> {
+        let mut changes = Vec::new();
+        for pane in &mut self.panes {
+            if pane.virtual_rect.rows <= self.viewport_rows {
+                continue;
+            }
+            pane.virtual_rect.rows = self.viewport_rows;
+            pane.grid_size = GridSize::new(pane.virtual_rect.cols, self.viewport_rows);
+            changes.push((pane.id, pane.grid_size));
+        }
+        if self.panes.len() <= 1 {
+            return changes;
+        }
+        if !changes.is_empty() {
+            self.normalize_geometry_gravity();
+        }
+
+        // The virtual extent is independent of scrolling, while the per-pane ceiling
+        // prevents distant off-screen panes from making a single PTY taller than the
+        // usable window grid.
+        let layout_bottom = self
+            .panes
+            .iter()
+            .map(|pane| pane.virtual_rect.bottom())
+            .max()
+            .unwrap_or(self.viewport_rows as i32)
+            .max(self.viewport_rows as i32);
+
+        for idx in 0..self.panes.len() {
+            let rect = self.panes[idx].virtual_rect;
+            let nearest_blocker = self
+                .panes
+                .iter()
+                .enumerate()
+                .filter(|(other_idx, other)| {
+                    *other_idx != idx
+                        && other.virtual_rect.row >= rect.bottom()
+                        && ranges_overlap(
+                            rect.col,
+                            rect.right(),
+                            other.virtual_rect.col,
+                            other.virtual_rect.right(),
+                        )
+                })
+                .map(|(_, other)| other.virtual_rect.row.saturating_sub(self.gap_rows as i32))
+                .min()
+                .unwrap_or(layout_bottom);
+            let pane_height_limit = rect.row.saturating_add(self.viewport_rows as i32);
+            let target_bottom = nearest_blocker.min(pane_height_limit).max(rect.bottom());
+            let target_rows = target_bottom.saturating_sub(rect.row) as usize;
+            if target_rows <= rect.rows {
+                continue;
+            }
+
+            let pane = &mut self.panes[idx];
+            pane.virtual_rect.rows = target_rows;
+            pane.grid_size = GridSize::new(pane.virtual_rect.cols, target_rows);
+            record_grid_change(&mut changes, pane.id, pane.grid_size);
+        }
+
+        changes
     }
 
     fn compact_left_once(&mut self) -> bool {
@@ -1445,10 +1706,12 @@ impl ScrollingPaneManager {
         let active_id = self.active_pane?;
         if self.zoomed_pane == Some(active_id) {
             self.zoomed_pane = None;
-            let rect = self.pane(active_id)?.virtual_rect;
+            let mut changes = self.fill_available_vertical_space();
+            let grid_size = self.pane(active_id)?.grid_size;
+            record_grid_change(&mut changes, active_id, grid_size);
             self.cancel_scroll_animation();
             self.invalidate_layout();
-            return Some(vec![(active_id, GridSize::new(rect.cols, rect.rows))]);
+            return Some(changes);
         }
 
         self.pane(active_id)?;
@@ -1760,6 +2023,14 @@ fn pane_local_overflow(
 
 fn ranges_overlap(first_start: i32, first_end: i32, second_start: i32, second_end: i32) -> bool {
     first_start < second_end && second_start < first_end
+}
+
+fn record_grid_change(changes: &mut Vec<(PaneId, GridSize)>, pane_id: PaneId, grid_size: GridSize) {
+    if let Some((_, existing)) = changes.iter_mut().find(|(id, _)| *id == pane_id) {
+        *existing = grid_size;
+    } else {
+        changes.push((pane_id, grid_size));
+    }
 }
 
 fn planned_rect_for(
@@ -2086,6 +2357,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn vertical_fill_expands_to_virtual_layout_bottom() {
+        let mut manager = ScrollingPaneManager::new(80, 40, 20, 10).with_gap(1, 1);
+        let left = manager.add_pane_at(0, 0);
+        let right = manager.add_pane_at(30, 0);
+        manager.panes[1].virtual_rect.rows = 40;
+        manager.panes[1].grid_size = GridSize::new(20, 40);
+
+        let changes = manager.fill_available_vertical_space();
+
+        assert_eq!(changes, vec![(left, GridSize::new(20, 40))]);
+        assert_eq!(
+            manager.pane(left).unwrap().virtual_rect,
+            VirtualPaneRect::new(0, 0, 20, 40)
+        );
+        assert_eq!(
+            manager.pane(right).unwrap().virtual_rect,
+            VirtualPaneRect::new(30, 0, 20, 40)
+        );
+    }
+
+    #[test]
+    fn vertical_fill_stops_at_nearest_blocker_and_preserves_gap() {
+        let mut manager = ScrollingPaneManager::new(80, 40, 20, 10).with_gap(1, 2);
+        let top = manager.add_pane_at(0, 0);
+        let bottom = manager.add_pane_at(0, 25);
+        manager.panes[1].virtual_rect.rows = 15;
+        manager.panes[1].grid_size = GridSize::new(20, 15);
+
+        let changes = manager.fill_available_vertical_space();
+
+        assert_eq!(changes, vec![(top, GridSize::new(20, 23))]);
+        let top_rect = manager.pane(top).unwrap().virtual_rect;
+        let bottom_rect = manager.pane(bottom).unwrap().virtual_rect;
+        assert_eq!(top_rect.bottom() + manager.gap_rows as i32, bottom_rect.row);
+        assert!(!rects_overlap(top_rect, bottom_rect));
+    }
+
+    #[test]
+    fn vertical_fill_does_not_treat_side_by_side_pane_as_blocker() {
+        let mut manager = ScrollingPaneManager::new(80, 40, 20, 10).with_gap(2, 1);
+        let pane = manager.add_pane_at(0, 0);
+        manager.add_pane_at(22, 12);
+
+        manager.fill_available_vertical_space();
+
+        assert_eq!(manager.pane(pane).unwrap().virtual_rect.rows, 40);
+    }
+
+    #[test]
+    fn vertical_fill_never_exceeds_usable_viewport_height() {
+        let mut manager = ScrollingPaneManager::new(80, 24, 20, 10).with_gap(1, 1);
+        let pane = manager.add_pane_at(0, 0);
+        let offscreen = manager.add_pane_at(30, 100);
+
+        let changes = manager.fill_available_vertical_space();
+
+        assert_eq!(changes, vec![(pane, GridSize::new(20, 24))]);
+        assert_eq!(manager.pane(pane).unwrap().virtual_rect.rows, 24);
+        assert_eq!(manager.pane(pane).unwrap().virtual_rect.bottom(), 24);
+        assert_eq!(manager.pane(offscreen).unwrap().virtual_rect.row, 100);
+        assert!(manager
+            .panes
+            .iter()
+            .all(|pane| pane.virtual_rect.rows <= manager.viewport_rows));
+    }
+
+    #[test]
+    fn viewport_shrink_caps_existing_panes_and_reports_grid_changes() {
+        let mut manager = ScrollingPaneManager::new(80, 40, 80, 40).with_gap(1, 1);
+        manager.add_pane_at(0, 0);
+        manager
+            .split_active_with_existing(SplitAxis::Vertical, PaneId::new(2))
+            .expect("split should succeed");
+
+        let changes = manager.set_viewport_size(80, 24);
+
+        assert_eq!(
+            changes,
+            vec![
+                (PaneId::new(1), GridSize::new(39, 24)),
+                (PaneId::new(2), GridSize::new(40, 24)),
+            ]
+        );
+        assert!(manager
+            .panes
+            .iter()
+            .all(|pane| pane.virtual_rect.bottom() <= manager.viewport_rows as i32));
     }
 
     #[test]
@@ -2515,7 +2876,13 @@ mod tests {
         manager.panes[3].grid_size = GridSize::new(120, 20);
         manager.invalidate_layout();
 
-        assert!(manager.remove_pane(PaneId::new(2)));
+        let removal = manager.remove_pane_with_changes(PaneId::new(2));
+
+        assert!(removal.removed);
+        assert_eq!(
+            removal.grid_changes,
+            vec![(PaneId::new(4), GridSize::new(120, 29))]
+        );
 
         for i in 0..manager.panes.len() {
             for pane in manager.panes.iter().skip(i + 1) {
@@ -2533,12 +2900,12 @@ mod tests {
         );
         assert_eq!(
             manager.pane(PaneId::new(4)).unwrap().virtual_rect,
-            VirtualPaneRect::new(0, 21, 120, 20)
+            VirtualPaneRect::new(0, 21, 120, 29)
         );
     }
 
     #[test]
-    fn viewport_resize_preserves_multi_pane_virtual_rects() {
+    fn viewport_growth_expands_multi_pane_rows_without_moving_columns() {
         let mut manager = ScrollingPaneManager::new(80, 24, 80, 24).with_gap(1, 1);
         manager.add_pane_at(0, 0);
         manager
@@ -2549,14 +2916,20 @@ mod tests {
         let second_before = manager.pane(PaneId::new(2)).unwrap().virtual_rect;
         let changes = manager.set_viewport_size(120, 40);
 
-        assert!(changes.is_empty());
+        assert_eq!(
+            changes,
+            vec![
+                (PaneId::new(1), GridSize::new(first_before.cols, 40)),
+                (PaneId::new(2), GridSize::new(second_before.cols, 40)),
+            ]
+        );
         assert_eq!(
             manager.pane(PaneId::new(1)).unwrap().virtual_rect,
-            first_before
+            VirtualPaneRect::new(first_before.col, first_before.row, first_before.cols, 40)
         );
         assert_eq!(
             manager.pane(PaneId::new(2)).unwrap().virtual_rect,
-            second_before
+            VirtualPaneRect::new(second_before.col, second_before.row, second_before.cols, 40)
         );
     }
 
@@ -2596,6 +2969,209 @@ mod tests {
         assert_eq!(manager.active_pane(), Some(below));
         assert!(manager.focus_pane_direction(Direction::Up));
         assert_eq!(manager.active_pane(), Some(first));
+    }
+
+    #[test]
+    fn directional_move_reorders_equal_panes_and_keeps_focus() {
+        let mut manager = manager();
+        let first = manager.add_pane_at(0, 0);
+        let second = manager.add_pane_at(42, 0);
+        let first_rect = manager.pane(first).unwrap().virtual_rect;
+        let second_rect = manager.pane(second).unwrap().virtual_rect;
+
+        assert!(manager.move_active_pane_direction(Direction::Right));
+
+        assert_eq!(manager.active_pane(), Some(first));
+        assert_eq!(manager.pane(first).unwrap().virtual_rect, second_rect);
+        assert_eq!(manager.pane(second).unwrap().virtual_rect, first_rect);
+        assert!(!rects_overlap(
+            manager.pane(first).unwrap().virtual_rect,
+            manager.pane(second).unwrap().virtual_rect,
+        ));
+
+        assert!(manager.move_active_pane_direction(Direction::Left));
+        assert_eq!(manager.pane(first).unwrap().virtual_rect, first_rect);
+        assert_eq!(manager.pane(second).unwrap().virtual_rect, second_rect);
+    }
+
+    #[test]
+    fn directional_move_preserves_unequal_pane_sizes() {
+        let mut manager = ScrollingPaneManager::new(80, 24, 80, 24).with_gap(1, 1);
+        let first = manager.add_pane_at(0, 0);
+        let second = manager.add_pane_at(31, 0);
+        manager.panes[0].virtual_rect = VirtualPaneRect::new(0, 0, 30, 24);
+        manager.panes[0].grid_size = GridSize::new(30, 24);
+        manager.panes[1].virtual_rect = VirtualPaneRect::new(31, 0, 49, 24);
+        manager.panes[1].grid_size = GridSize::new(49, 24);
+
+        let first_grid = manager.pane(first).unwrap().grid_size;
+        let second_grid = manager.pane(second).unwrap().grid_size;
+        assert!(manager.move_active_pane_direction(Direction::Right));
+
+        assert_eq!(
+            manager.pane(first).unwrap().virtual_rect,
+            VirtualPaneRect::new(50, 0, 30, 24)
+        );
+        assert_eq!(
+            manager.pane(second).unwrap().virtual_rect,
+            VirtualPaneRect::new(0, 0, 49, 24)
+        );
+        assert_eq!(manager.pane(first).unwrap().grid_size, first_grid);
+        assert_eq!(manager.pane(second).unwrap().grid_size, second_grid);
+    }
+
+    #[test]
+    fn directional_move_up_and_down_preserves_vertical_layout() {
+        let mut manager = ScrollingPaneManager::new(80, 24, 80, 24).with_gap(1, 1);
+        let top = manager.add_pane_at(0, 0);
+        manager
+            .split_active_with_existing(SplitAxis::Horizontal, PaneId::new(2))
+            .expect("horizontal split should succeed");
+        let bottom = PaneId::new(2);
+        let top_rect = manager.pane(top).unwrap().virtual_rect;
+        let bottom_rect = manager.pane(bottom).unwrap().virtual_rect;
+        assert!(manager.focus_pane(top));
+
+        assert!(manager.move_active_pane_direction(Direction::Down));
+        assert_eq!(manager.active_pane(), Some(top));
+        assert_eq!(
+            manager.pane(top).unwrap().virtual_rect,
+            VirtualPaneRect::new(
+                top_rect.col,
+                bottom_rect.bottom() - top_rect.rows as i32,
+                top_rect.cols,
+                top_rect.rows,
+            )
+        );
+        assert_eq!(
+            manager.pane(bottom).unwrap().virtual_rect,
+            VirtualPaneRect::new(
+                bottom_rect.col,
+                top_rect.row,
+                bottom_rect.cols,
+                bottom_rect.rows,
+            )
+        );
+
+        assert!(manager.move_active_pane_direction(Direction::Up));
+        assert_eq!(manager.pane(top).unwrap().virtual_rect, top_rect);
+        assert_eq!(manager.pane(bottom).unwrap().virtual_rect, bottom_rect);
+    }
+
+    #[test]
+    fn directional_move_scrolls_offscreen_destination_into_view() {
+        let mut manager = ScrollingPaneManager::new(80, 24, 40, 24).with_gap(2, 1);
+        let first = manager.add_pane_at(0, 0);
+        manager.add_pane_at(100, 0);
+
+        assert!(manager.move_active_pane_direction(Direction::Right));
+
+        assert_eq!(manager.active_pane(), Some(first));
+        assert_eq!(manager.pane(first).unwrap().virtual_rect.col, 100);
+        assert_eq!(manager.scroll_offset(), (60, 0));
+    }
+
+    #[test]
+    fn directional_move_is_noop_without_neighbor_or_while_zoomed() {
+        let mut manager = manager();
+        manager.add_pane_at(0, 0);
+        let generation = manager.layout_generation();
+        assert!(!manager.move_active_pane_direction(Direction::Right));
+        assert_eq!(manager.layout_generation(), generation);
+
+        manager.add_pane_at(42, 0);
+        manager.toggle_zoom_active().expect("zoom should enable");
+        assert!(!manager.move_active_pane_direction(Direction::Right));
+    }
+
+    #[test]
+    fn directional_move_rejects_geometry_that_would_overlap_another_lane() {
+        let mut manager = ScrollingPaneManager::new(80, 24, 20, 10).with_gap(1, 1);
+        let active = manager.add_pane_at(0, 0);
+        let target = manager.add_pane_at(21, 0);
+        let blocker = manager.add_pane_at(21, 11);
+        manager.panes[0].virtual_rect = VirtualPaneRect::new(0, 0, 20, 20);
+        manager.panes[0].grid_size = GridSize::new(20, 20);
+        manager.panes[1].virtual_rect = VirtualPaneRect::new(21, 0, 40, 10);
+        manager.panes[1].grid_size = GridSize::new(40, 10);
+        manager.panes[2].virtual_rect = VirtualPaneRect::new(21, 11, 40, 10);
+        manager.panes[2].grid_size = GridSize::new(40, 10);
+        let before: Vec<_> = manager
+            .panes
+            .iter()
+            .map(|pane| (pane.id, pane.virtual_rect, pane.grid_size))
+            .collect();
+
+        assert!(!manager.move_active_pane_direction(Direction::Right));
+        assert_eq!(
+            manager
+                .panes
+                .iter()
+                .map(|pane| (pane.id, pane.virtual_rect, pane.grid_size))
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(manager.active_pane(), Some(active));
+        assert_eq!(manager.pane(target).unwrap().virtual_rect.cols, 40);
+        assert_eq!(manager.pane(blocker).unwrap().virtual_rect.rows, 10);
+    }
+
+    #[test]
+    fn transferred_pane_keeps_size_and_appends_without_overlap() {
+        let mut source = ScrollingPaneManager::new(80, 24, 30, 12).with_gap(2, 1);
+        source.add_existing_pane_at(PaneId::new(99), 0, 0);
+        let pane_id = PaneId::new(99);
+        let transferred = source.transferred_pane(pane_id).unwrap();
+        let mut destination = ScrollingPaneManager::new(80, 24, 40, 24).with_gap(2, 1);
+        let first = destination.add_pane_at(0, 0);
+        let second = destination.add_pane_at(42, 0);
+
+        let changes = destination.insert_transferred_pane(transferred).unwrap();
+        let moved = destination.pane(pane_id).unwrap();
+        assert!(changes.is_empty());
+        assert_eq!(moved.virtual_rect, VirtualPaneRect::new(84, 0, 30, 12));
+        assert_eq!(moved.grid_size, GridSize::new(30, 12));
+        assert_eq!(destination.active_pane(), Some(pane_id));
+        assert!(!rects_overlap_with_gap(
+            destination.pane(first).unwrap().virtual_rect,
+            moved.virtual_rect,
+            2,
+            1,
+        ));
+        assert!(!rects_overlap_with_gap(
+            destination.pane(second).unwrap().virtual_rect,
+            moved.virtual_rect,
+            2,
+            1,
+        ));
+    }
+
+    #[test]
+    fn transferred_pane_splits_single_pane_and_reports_both_grid_changes() {
+        let mut source = ScrollingPaneManager::new(80, 24, 30, 12).with_gap(2, 1);
+        source.add_existing_pane_at(PaneId::new(99), 0, 0);
+        let transferred = source.transferred_pane(PaneId::new(99)).unwrap();
+        let mut destination = ScrollingPaneManager::new(80, 24, 80, 24).with_gap(2, 1);
+        let existing = destination.add_pane_at(0, 0);
+
+        let changes = destination.insert_transferred_pane(transferred).unwrap();
+
+        assert_eq!(
+            destination.pane(existing).unwrap().virtual_rect,
+            VirtualPaneRect::new(0, 0, 39, 24)
+        );
+        assert_eq!(
+            destination.pane(PaneId::new(99)).unwrap().virtual_rect,
+            VirtualPaneRect::new(41, 0, 39, 24)
+        );
+        assert_eq!(
+            changes,
+            vec![
+                (existing, GridSize::new(39, 24)),
+                (PaneId::new(99), GridSize::new(39, 24)),
+            ]
+        );
+        assert_eq!(destination.active_pane(), Some(PaneId::new(99)));
     }
 
     #[test]

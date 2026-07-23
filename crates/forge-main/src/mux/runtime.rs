@@ -3,7 +3,8 @@ use forge_core::config_registry::PaneManagerMode;
 use super::{
     pane::{GridSize, PaneId},
     scrolling::{
-        RenderScrollingPane, ScrollingPaneManager, ScrollingPaneRemoval, VisibleScrollingPane,
+        RenderScrollingPane, ScrollingPaneManager, ScrollingPaneRemoval, VirtualPaneRect,
+        VisibleScrollingPane,
     },
     state::Direction,
     tab::{Tab, TabId, TabManager},
@@ -29,6 +30,17 @@ pub struct ScrollingTab {
 pub struct ScrollingTabManager {
     pub tabs: Vec<ScrollingTab>,
     pub active_tab_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrollingPaneTabMove {
+    pub pane_id: PaneId,
+    pub source_tab_id: TabId,
+    pub destination_tab_id: TabId,
+    pub source_tab_removed: bool,
+    pub source_grid_changes: Vec<(PaneId, GridSize)>,
+    pub destination_grid_changes: Vec<(PaneId, GridSize)>,
+    pub destination_previous_rects: Vec<(PaneId, VirtualPaneRect)>,
 }
 
 impl PaneRuntime {
@@ -236,6 +248,76 @@ impl ScrollingTabManager {
             .unwrap_or(false)
     }
 
+    pub fn move_active_pane_direction(&mut self, dir: Direction) -> bool {
+        self.active_tab_mut()
+            .map(|tab| tab.panes.move_active_pane_direction(dir))
+            .unwrap_or(false)
+    }
+
+    pub fn move_active_pane_to_tab(
+        &mut self,
+        destination_tab_id: TabId,
+    ) -> Option<ScrollingPaneTabMove> {
+        let source_index = self.active_tab_index;
+        let destination_index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == destination_tab_id)?;
+        if source_index == destination_index {
+            return None;
+        }
+
+        let pane_id = self.tabs.get(source_index)?.panes.active_pane()?;
+        let pane = self.tabs[source_index].panes.transferred_pane(pane_id)?;
+        if self.tabs[destination_index]
+            .panes
+            .transferred_pane(pane_id)
+            .is_some()
+        {
+            return None;
+        }
+
+        let source_tab_id = self.tabs[source_index].id;
+        let destination_previous_rects = self.tabs[destination_index]
+            .panes
+            .pane_rects()
+            .collect();
+        let removal = self.tabs[source_index]
+            .panes
+            .remove_pane_with_changes(pane_id);
+        if !removal.removed {
+            return None;
+        }
+        let destination_grid_changes = self.tabs[destination_index]
+            .panes
+            .insert_transferred_pane(pane)?;
+
+        let source_tab_removed = self.tabs[source_index].panes.pane_count() == 0;
+        let source_grid_changes = if source_tab_removed {
+            Vec::new()
+        } else {
+            removal.grid_changes
+        };
+        if source_tab_removed {
+            self.tabs.remove(source_index);
+        }
+        self.active_tab_index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == destination_tab_id)
+            .expect("destination scrolling tab must remain after pane transfer");
+
+        Some(ScrollingPaneTabMove {
+            pane_id,
+            source_tab_id,
+            destination_tab_id,
+            source_tab_removed,
+            source_grid_changes,
+            destination_grid_changes,
+            destination_previous_rects,
+        })
+    }
+
     pub fn focus_pane(&mut self, pane_id: PaneId) -> bool {
         self.active_tab_mut()
             .map(|tab| tab.panes.focus_pane(pane_id))
@@ -288,7 +370,7 @@ mod tests {
     use super::*;
     use crate::mux::{
         pane::{GridSize, Pane, PaneId},
-        state::{LayoutNode, MuxState},
+        state::{LayoutNode, MuxState, SplitAxis},
     };
     use std::collections::HashMap;
 
@@ -453,6 +535,108 @@ mod tests {
         assert_eq!(scrolling.active_pane_id(), Some(PaneId::new(2)));
         assert!(scrolling.focus_pane_direction(Direction::Left));
         assert_eq!(scrolling.active_pane_id(), Some(PaneId::new(1)));
+    }
+
+    #[test]
+    fn scrolling_runtime_moves_active_pane_without_changing_focus() {
+        let tabs = TabManager::new(make_mux(1));
+        let mut runtime = PaneRuntime::from_config(
+            PaneManagerMode::Scrolling,
+            120,
+            &tabs,
+            200,
+            80,
+            GridSize::new(80, 24),
+        );
+        let scrolling = runtime.scrolling_mut().expect("scrolling runtime");
+        assert!(scrolling.add_pane_right_of_active(PaneId::new(2)));
+        assert!(scrolling.focus_pane(PaneId::new(1)));
+
+        assert!(scrolling.move_active_pane_direction(Direction::Right));
+        assert_eq!(scrolling.active_pane_id(), Some(PaneId::new(1)));
+    }
+
+    #[test]
+    fn scrolling_runtime_splits_single_pane_destination_and_reports_resizes() {
+        let mut tabs = TabManager::new(make_mux(1));
+        let destination_id = tabs.create_tab(make_mux(10));
+        tabs.switch_to_index(0);
+        let mut runtime = PaneRuntime::from_config(
+            PaneManagerMode::Scrolling,
+            120,
+            &tabs,
+            80,
+            24,
+            GridSize::new(80, 24),
+        );
+        let scrolling = runtime.scrolling_mut().unwrap();
+        scrolling
+            .active_tab_mut()
+            .unwrap()
+            .panes
+            .split_active_with_existing(SplitAxis::Vertical, PaneId::new(2))
+            .unwrap();
+        let moved_before = scrolling
+            .active_tab()
+            .unwrap()
+            .panes
+            .transferred_pane(PaneId::new(2))
+            .unwrap();
+
+        let moved = scrolling
+            .move_active_pane_to_tab(destination_id)
+            .expect("destination tab exists");
+
+        assert_eq!(moved.pane_id, PaneId::new(2));
+        assert!(!moved.source_tab_removed);
+        assert_eq!(
+            moved.destination_previous_rects,
+            vec![(PaneId::new(10), VirtualPaneRect::new(0, 0, 80, 24))]
+        );
+        assert_eq!(
+            moved.destination_grid_changes,
+            vec![
+                (PaneId::new(10), GridSize::new(39, 24)),
+                (PaneId::new(2), GridSize::new(40, 24)),
+            ]
+        );
+        assert_eq!(scrolling.active_tab().unwrap().id, destination_id);
+        let destination_pane = scrolling
+            .active_tab()
+            .unwrap()
+            .panes
+            .transferred_pane(PaneId::new(2))
+            .unwrap();
+        assert_eq!(destination_pane.grid_size, GridSize::new(40, 24));
+        assert_eq!(destination_pane.virtual_rect.cols, 40);
+        assert_eq!(destination_pane.virtual_rect.rows, moved_before.virtual_rect.rows);
+    }
+
+    #[test]
+    fn scrolling_runtime_removes_empty_source_tab_after_transfer() {
+        let mut tabs = TabManager::new(make_mux(1));
+        let destination_id = tabs.create_tab(make_mux(10));
+        tabs.switch_to_index(0);
+        let mut runtime = PaneRuntime::from_config(
+            PaneManagerMode::Scrolling,
+            120,
+            &tabs,
+            80,
+            24,
+            GridSize::new(80, 24),
+        );
+        let scrolling = runtime.scrolling_mut().unwrap();
+
+        let moved = scrolling
+            .move_active_pane_to_tab(destination_id)
+            .expect("destination tab exists");
+
+        assert!(moved.source_tab_removed);
+        assert_eq!(scrolling.tabs.len(), 1);
+        assert_eq!(scrolling.active_tab().unwrap().id, destination_id);
+        assert_eq!(scrolling.active_pane_id(), Some(PaneId::new(1)));
+        assert!(scrolling.move_active_pane_to_tab(destination_id).is_none());
+        assert!(scrolling.move_active_pane_to_tab(TabId::new(999)).is_none());
     }
 
     #[test]

@@ -604,19 +604,26 @@ impl MuxState {
     }
 
     pub fn remove_detached_pane(&mut self, pane_id: PaneId) -> RemovePaneResult {
+        self.take_detached_pane(pane_id)
+            .map(|(_, result)| result)
+            .unwrap_or(RemovePaneResult::MissingPane)
+    }
+
+    pub fn take_detached_pane(&mut self, pane_id: PaneId) -> Option<(Pane, RemovePaneResult)> {
         if !self.panes.contains_key(&pane_id) {
-            return RemovePaneResult::MissingPane;
+            return None;
         }
 
         if self.zoomed_pane == Some(pane_id) {
             self.zoomed_pane = None;
         }
         let removed_active = self.active_pane == pane_id;
-        self.panes.remove(&pane_id);
+        self.floating_panes.retain(|id| *id != pane_id);
+        let pane = self.panes.remove(&pane_id)?;
         self.layout_generation = self.layout_generation.wrapping_add(1);
 
         if self.panes.is_empty() {
-            return RemovePaneResult::RemovedLastPane;
+            return Some((pane, RemovePaneResult::RemovedLastPane));
         }
 
         let new_active = if !removed_active && self.panes.contains_key(&self.active_pane) {
@@ -635,10 +642,13 @@ impl MuxState {
             self.last_borders.clear();
         }
 
-        RemovePaneResult::Removed {
-            new_active,
-            removed_active,
-        }
+        Some((
+            pane,
+            RemovePaneResult::Removed {
+                new_active,
+                removed_active,
+            },
+        ))
     }
 
     pub fn remove_pane(&mut self, pane_id: PaneId) -> RemovePaneResult {

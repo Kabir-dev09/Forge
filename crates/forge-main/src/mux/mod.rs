@@ -15,7 +15,9 @@ pub use layout::{
     DEFAULT_MIN_PANE_COLS, DEFAULT_MIN_PANE_ROWS, DEFAULT_SPLIT_BORDER_PX,
 };
 pub use pane::{GridSize, Pane, PaneId, PaneRect};
-pub use runtime::{PaneRuntime, PaneRuntimeKind, ScrollingTab, ScrollingTabManager};
+pub use runtime::{
+    PaneRuntime, PaneRuntimeKind, ScrollingPaneTabMove, ScrollingTab, ScrollingTabManager,
+};
 pub use scrolling::{
     ScrollingOverflowIndicators, ScrollingPane, ScrollingPaneManager, ScrollingPanePointTarget,
     ScrollingResizeDrag, ScrollingResizeHandle, VirtualPaneRect, VisiblePaneCache,

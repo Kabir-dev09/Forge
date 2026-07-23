@@ -254,6 +254,71 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                         .pending_tab_actions
                                         .push(forge_core::bindings::Action::FocusPaneDown);
                                 }
+                                forge_core::bindings::Action::MovePaneLeft => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneLeft);
+                                }
+                                forge_core::bindings::Action::MovePaneRight => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneRight);
+                                }
+                                forge_core::bindings::Action::MovePaneUp => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneUp);
+                                }
+                                forge_core::bindings::Action::MovePaneDown => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneDown);
+                                }
+                                forge_core::bindings::Action::MovePaneToTab1 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneToTab1);
+                                }
+                                forge_core::bindings::Action::MovePaneToTab2 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneToTab2);
+                                }
+                                forge_core::bindings::Action::MovePaneToTab3 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneToTab3);
+                                }
+                                forge_core::bindings::Action::MovePaneToTab4 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneToTab4);
+                                }
+                                forge_core::bindings::Action::MovePaneToTab5 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneToTab5);
+                                }
+                                forge_core::bindings::Action::MovePaneToTab6 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneToTab6);
+                                }
+                                forge_core::bindings::Action::MovePaneToTab7 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneToTab7);
+                                }
+                                forge_core::bindings::Action::MovePaneToTab8 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneToTab8);
+                                }
+                                forge_core::bindings::Action::MovePaneToTab9 => {
+                                    state
+                                        .pending_tab_actions
+                                        .push(forge_core::bindings::Action::MovePaneToTab9);
+                                }
                                 forge_core::bindings::Action::NewTab => {
                                     state
                                         .pending_tab_actions

@@ -833,6 +833,19 @@ pub fn parse_action(value: &str) -> Option<Action> {
         "focus_pane_right" | "focuspaneright" => Some(Action::FocusPaneRight),
         "focus_pane_up" | "focuspaneup" => Some(Action::FocusPaneUp),
         "focus_pane_down" | "focuspanedown" => Some(Action::FocusPaneDown),
+        "move_pane_left" | "movepaneleft" => Some(Action::MovePaneLeft),
+        "move_pane_right" | "movepaneright" => Some(Action::MovePaneRight),
+        "move_pane_up" | "movepaneup" => Some(Action::MovePaneUp),
+        "move_pane_down" | "movepanedown" => Some(Action::MovePaneDown),
+        "move_pane_to_tab_1" | "movepanetotab1" => Some(Action::MovePaneToTab1),
+        "move_pane_to_tab_2" | "movepanetotab2" => Some(Action::MovePaneToTab2),
+        "move_pane_to_tab_3" | "movepanetotab3" => Some(Action::MovePaneToTab3),
+        "move_pane_to_tab_4" | "movepanetotab4" => Some(Action::MovePaneToTab4),
+        "move_pane_to_tab_5" | "movepanetotab5" => Some(Action::MovePaneToTab5),
+        "move_pane_to_tab_6" | "movepanetotab6" => Some(Action::MovePaneToTab6),
+        "move_pane_to_tab_7" | "movepanetotab7" => Some(Action::MovePaneToTab7),
+        "move_pane_to_tab_8" | "movepanetotab8" => Some(Action::MovePaneToTab8),
+        "move_pane_to_tab_9" | "movepanetotab9" => Some(Action::MovePaneToTab9),
         "new_tab" | "newtab" => Some(Action::NewTab),
         "close_tab" | "closetab" => Some(Action::CloseTab),
         "next_tab" | "nexttab" => Some(Action::NextTab),
@@ -882,6 +895,19 @@ fn install_default_keybindings(keybindings: &mut HashMap<KeyStroke, Action>) {
         ("Alt+j", "FocusPaneDown"),
         ("Alt+k", "FocusPaneUp"),
         ("Alt+l", "FocusPaneRight"),
+        ("Ctrl+Shift+Left", "MovePaneLeft"),
+        ("Ctrl+Shift+Right", "MovePaneRight"),
+        ("Ctrl+Shift+Up", "MovePaneUp"),
+        ("Ctrl+Shift+Down", "MovePaneDown"),
+        ("Ctrl+Shift+1", "MovePaneToTab1"),
+        ("Ctrl+Shift+2", "MovePaneToTab2"),
+        ("Ctrl+Shift+3", "MovePaneToTab3"),
+        ("Ctrl+Shift+4", "MovePaneToTab4"),
+        ("Ctrl+Shift+5", "MovePaneToTab5"),
+        ("Ctrl+Shift+6", "MovePaneToTab6"),
+        ("Ctrl+Shift+7", "MovePaneToTab7"),
+        ("Ctrl+Shift+8", "MovePaneToTab8"),
+        ("Ctrl+Shift+9", "MovePaneToTab9"),
         ("Ctrl+Shift+T", "NewTab"),
         ("Ctrl+Shift+W", "CloseTab"),
         ("Ctrl+PageDown", "NextTab"),
@@ -1068,6 +1094,34 @@ mod tests {
         };
 
         assert_eq!(config.keybindings.get(&key), Some(&Action::ClosePane));
+    }
+
+    #[test]
+    fn default_ctrl_shift_bindings_move_scrolling_panes() {
+        let config = ForgeConfig::default();
+        for (key, action) in [
+            ("ctrl+shift+left", Action::MovePaneLeft),
+            ("ctrl+shift+right", Action::MovePaneRight),
+            ("ctrl+shift+up", Action::MovePaneUp),
+            ("ctrl+shift+down", Action::MovePaneDown),
+            ("ctrl+shift+1", Action::MovePaneToTab1),
+            ("ctrl+shift+2", Action::MovePaneToTab2),
+            ("ctrl+shift+3", Action::MovePaneToTab3),
+            ("ctrl+shift+4", Action::MovePaneToTab4),
+            ("ctrl+shift+5", Action::MovePaneToTab5),
+            ("ctrl+shift+6", Action::MovePaneToTab6),
+            ("ctrl+shift+7", Action::MovePaneToTab7),
+            ("ctrl+shift+8", Action::MovePaneToTab8),
+            ("ctrl+shift+9", Action::MovePaneToTab9),
+        ] {
+            assert_eq!(
+                config.keybindings.get(&KeyStroke::parse(key).unwrap()),
+                Some(&action)
+            );
+        }
+        assert!(!config
+            .keybindings
+            .contains_key(&KeyStroke::parse("alt+shift+left").unwrap()));
     }
 
     #[test]

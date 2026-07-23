@@ -182,6 +182,51 @@ impl TabManager {
             .find(|tab| tab.mux.panes.contains_key(&pane_id))
             .map(|tab| &mut tab.mux)
     }
+
+    pub fn move_detached_pane_to_tab(
+        &mut self,
+        pane_id: super::pane::PaneId,
+        destination_tab_id: TabId,
+    ) -> bool {
+        let Some(source_index) = self.find_tab_for_pane(pane_id) else {
+            return false;
+        };
+        let Some(destination_index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == destination_tab_id)
+        else {
+            return false;
+        };
+        if source_index == destination_index
+            || self.tabs[source_index]
+                .mux
+                .floating_panes
+                .contains(&pane_id)
+            || self.tabs[destination_index]
+                .mux
+                .panes
+                .contains_key(&pane_id)
+        {
+            return false;
+        }
+
+        let Some((pane, _)) = self.tabs[source_index].mux.take_detached_pane(pane_id) else {
+            return false;
+        };
+        self.tabs[destination_index].mux.insert_detached_pane(pane);
+        self.tabs[destination_index].mux.zoomed_pane = None;
+
+        if self.tabs[source_index].mux.panes.is_empty() {
+            self.tabs.remove(source_index);
+        }
+        self.active_tab_index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == destination_tab_id)
+            .expect("destination tab must remain after pane transfer");
+        true
+    }
 }
 
 #[cfg(test)]
@@ -294,5 +339,43 @@ mod tests {
         mgr.move_active_left();
         assert_eq!(mgr.active_tab_index, 0);
         assert_eq!(mgr.tabs[0].id, tab2_id);
+    }
+
+    #[test]
+    fn moving_detached_pane_between_tabs_preserves_owned_state() {
+        let mut mgr = TabManager::new(make_mux(1));
+        let moved_id = PaneId::new(2);
+        mgr.active_mux_mut()
+            .insert_detached_pane(Pane::layout_only(moved_id, GridSize::new(37, 19)));
+        let snapshot = mgr.active_mux().panes[&moved_id].snapshot.clone();
+        let destination_id = mgr.create_tab(make_mux(10));
+        mgr.switch_to_index(0);
+
+        assert!(mgr.move_detached_pane_to_tab(moved_id, destination_id));
+
+        assert_eq!(mgr.tabs.len(), 2);
+        assert_eq!(mgr.active_tab().id, destination_id);
+        assert!(!mgr.tabs[0].mux.panes.contains_key(&moved_id));
+        let moved = mgr.active_mux().panes.get(&moved_id).unwrap();
+        assert_eq!(moved.grid_size, GridSize::new(37, 19));
+        assert!(std::sync::Arc::ptr_eq(&moved.snapshot, &snapshot));
+        assert_eq!(mgr.active_mux().active_pane_id(), moved_id);
+    }
+
+    #[test]
+    fn moving_only_pane_removes_source_tab_and_invalid_destinations_are_noops() {
+        let mut mgr = TabManager::new(make_mux(1));
+        let source_id = mgr.active_tab().id;
+        let destination_id = mgr.create_tab(make_mux(10));
+        mgr.switch_to_index(0);
+
+        assert!(!mgr.move_detached_pane_to_tab(PaneId::new(1), source_id));
+        assert!(!mgr.move_detached_pane_to_tab(PaneId::new(1), TabId::new(999)));
+        assert!(mgr.move_detached_pane_to_tab(PaneId::new(1), destination_id));
+
+        assert_eq!(mgr.tabs.len(), 1);
+        assert_eq!(mgr.active_tab().id, destination_id);
+        assert!(mgr.active_mux().panes.contains_key(&PaneId::new(1)));
+        assert!(mgr.active_mux().panes.contains_key(&PaneId::new(10)));
     }
 }
