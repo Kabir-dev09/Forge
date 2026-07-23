@@ -44,6 +44,8 @@ impl Default for StatusBarState {
 }
 
 #[cfg(test)]
+// Tests are kept near the state definitions they exercise; rendering methods follow below.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use forge_core::config_registry::{StatusbarConfig, StatusbarItem};
@@ -54,15 +56,17 @@ mod tests {
 
     #[test]
     fn tabs_format_renders_zoom_indicator_only_for_zoomed_tabs() {
-        let mut config = StatusbarConfig::default();
-        config.left = vec![StatusbarItem::Tabs {
-            format: " {index}{zoom} ".to_string(),
-            zoom_indicator: "(Z)".to_string(),
-            left_edge: String::new(),
-            right_edge: String::new(),
-            active: None,
-            inactive: None,
-        }];
+        let config = StatusbarConfig {
+            left: vec![StatusbarItem::Tabs {
+                format: " {index}{zoom} ".to_string(),
+                zoom_indicator: "(Z)".to_string(),
+                left_edge: String::new(),
+                right_edge: String::new(),
+                active: None,
+                inactive: None,
+            }],
+            ..StatusbarConfig::default()
+        };
         let tabs = vec![
             StatusbarTab {
                 index: 0,
@@ -86,15 +90,17 @@ mod tests {
 
     #[test]
     fn zoom_indicator_keeps_tab_click_region_target() {
-        let mut config = StatusbarConfig::default();
-        config.left = vec![StatusbarItem::Tabs {
-            format: " {index}{zoom} ".to_string(),
-            zoom_indicator: "(Z)".to_string(),
-            left_edge: String::new(),
-            right_edge: String::new(),
-            active: None,
-            inactive: None,
-        }];
+        let config = StatusbarConfig {
+            left: vec![StatusbarItem::Tabs {
+                format: " {index}{zoom} ".to_string(),
+                zoom_indicator: "(Z)".to_string(),
+                left_edge: String::new(),
+                right_edge: String::new(),
+                active: None,
+                inactive: None,
+            }],
+            ..StatusbarConfig::default()
+        };
         let tabs = vec![StatusbarTab {
             index: 0,
             title: "One".to_string(),
@@ -112,19 +118,21 @@ mod tests {
 
     #[test]
     fn tab_edges_use_tab_background_as_foreground() {
-        let mut config = StatusbarConfig::default();
-        config.bg_color = "transparent".to_string();
-        config.left = vec![StatusbarItem::Tabs {
-            format: " {index} ".to_string(),
-            zoom_indicator: String::new(),
-            left_edge: "".to_string(),
-            right_edge: "".to_string(),
-            active: Some(forge_core::config_registry::StatusbarStyle {
-                fg: Some("#111111".to_string()),
-                bg: Some("#89B4FA".to_string()),
-            }),
-            inactive: None,
-        }];
+        let config = StatusbarConfig {
+            bg_color: "transparent".to_string(),
+            left: vec![StatusbarItem::Tabs {
+                format: " {index} ".to_string(),
+                zoom_indicator: String::new(),
+                left_edge: "".to_string(),
+                right_edge: "".to_string(),
+                active: Some(forge_core::config_registry::StatusbarStyle {
+                    fg: Some("#111111".to_string()),
+                    bg: Some("#89B4FA".to_string()),
+                }),
+                inactive: None,
+            }],
+            ..StatusbarConfig::default()
+        };
         let tabs = vec![StatusbarTab {
             index: 0,
             title: "One".to_string(),
@@ -187,7 +195,7 @@ impl StatusBarState {
         let bg_color = parse_hex_color(&config.bg_color).unwrap_or(Color::TRANSPARENT);
         let fg_color = parse_hex_color(&config.fg_color).unwrap_or(Color::WHITE);
 
-        let mut process_items = |items: &Vec<StatusbarItem>| -> Vec<(Cell, Option<String>)> {
+        let process_items = |items: &Vec<StatusbarItem>| -> Vec<(Cell, Option<String>)> {
             let mut out = Vec::new();
             for item in items {
                 match item {
@@ -316,13 +324,13 @@ impl StatusBarState {
         let mut active_action: Option<String> = None;
         let mut start_col = 0;
 
-        let mut place_cell = |c: Cell,
-                              action: Option<String>,
-                              col: usize,
-                              out_click: &mut Vec<ClickRegion>,
-                              cells: &mut Vec<Cell>,
-                              active_action: &mut Option<String>,
-                              start_col: &mut usize| {
+        let place_cell = |c: Cell,
+                          action: Option<String>,
+                          col: usize,
+                          out_click: &mut Vec<ClickRegion>,
+                          cells: &mut Vec<Cell>,
+                          active_action: &mut Option<String>,
+                          start_col: &mut usize| {
             if col < total_w {
                 cells[col] = c;
                 if action != *active_action {

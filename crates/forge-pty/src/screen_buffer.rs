@@ -180,6 +180,7 @@ pub struct ScreenBuffer {
     pub attr_italic: bool,
     pub attr_underline: bool,
     pub attr_strikethrough: bool,
+    pub attr_inverse: bool,
     pub palette: [Color; 16],
     pub saved_cursor: Option<CursorPos>,
     pub scroll_id: u64,
@@ -187,7 +188,7 @@ pub struct ScreenBuffer {
     pub use_alt_buffer: bool,
     saved_primary_grid: Option<VecDeque<Row>>,
     saved_primary_cursor: Option<CursorPos>,
-    saved_primary_attrs: Option<(Color, Color, bool, bool, bool, bool)>,
+    saved_primary_attrs: Option<(Color, Color, bool, bool, bool, bool, bool)>,
     pub margin_top: usize,
     pub margin_bottom: usize,
     pub mouse_tracking_enabled: bool,
@@ -216,6 +217,9 @@ impl ScreenBuffer {
         }
         if self.attr_strikethrough {
             cell.set_strikethrough(true);
+        }
+        if self.attr_inverse {
+            cell.set_inverse(true);
         }
         cell.set_width(width);
         cell
@@ -313,6 +317,7 @@ impl ScreenBuffer {
             attr_italic: false,
             attr_underline: false,
             attr_strikethrough: false,
+            attr_inverse: false,
             palette,
             saved_cursor: None,
             pending_scroll: None,
@@ -457,6 +462,9 @@ impl ScreenBuffer {
         }
         if self.attr_strikethrough {
             attr_flags |= Cell::FLAG_STRIKETHROUGH;
+        }
+        if self.attr_inverse {
+            attr_flags |= Cell::FLAG_INVERSE;
         }
         let cur_fg = self.current_fg;
         let cur_bg = self.current_bg;
@@ -1359,6 +1367,7 @@ impl ScreenBuffer {
                 self.attr_italic,
                 self.attr_underline,
                 self.attr_strikethrough,
+                self.attr_inverse,
             ));
 
             // Clear current grid (which becomes alt grid)
@@ -1401,7 +1410,8 @@ impl ScreenBuffer {
                 self.cursor.row = cursor.row.min(self.rows.saturating_sub(1));
                 self.cursor.col = cursor.col.min(self.cols.saturating_sub(1));
             }
-            if let Some((fg, bg, bold, italic, underline, strike)) = self.saved_primary_attrs.take()
+            if let Some((fg, bg, bold, italic, underline, strike, inverse)) =
+                self.saved_primary_attrs.take()
             {
                 self.current_fg = fg;
                 self.current_bg = bg;
@@ -1409,6 +1419,7 @@ impl ScreenBuffer {
                 self.attr_italic = italic;
                 self.attr_underline = underline;
                 self.attr_strikethrough = strike;
+                self.attr_inverse = inverse;
             }
             self.clear_cursor_style_override();
             self.scroll_offset = 0;
@@ -1552,7 +1563,7 @@ impl ScreenBuffer {
             }
         }
 
-        if let Some((fg, bg, _, _, _, _)) = &mut self.saved_primary_attrs {
+        if let Some((fg, bg, _, _, _, _, _)) = &mut self.saved_primary_attrs {
             if *fg == old_fg {
                 *fg = new_fg;
             }
@@ -2448,7 +2459,7 @@ impl ScreenBuffer {
         // for the next snapshot, without waiting for the renderer to ack.
         self.mark_all_clean();
 
-        let scroll_event = self.pending_scroll.clone();
+        let scroll_event = self.pending_scroll;
         let scroll_id = self.scroll_id;
         self.snapshot_id = self.snapshot_id.wrapping_add(1);
         let current_snapshot_id = self.snapshot_id;

@@ -7,8 +7,6 @@ use forge_core::cell::Cell;
 use forge_core::config_registry::LigatureConfig;
 use std::collections::HashSet;
 
-const CONTEXT_MENU_RADIUS: f32 = 15.0;
-
 #[derive(Clone, Default)]
 pub struct RowTessellation {
     pub bg_vertices: Vec<GlyphVertex>,
@@ -386,12 +384,11 @@ fn plan_ligatures_for_row<Nd, Push, ColorFn>(
                 continue;
             }
 
-            for col in absolute_start..absolute_end {
-                suppressed_cells[col] = true;
-            }
+            suppressed_cells[absolute_start..absolute_end].fill(true);
 
-            let fg = color_to_f32(row[absolute_start].fg);
-            let bg = color_to_f32(row[absolute_start].bg);
+            let (fg_color, bg_color) = resolved_cell_colors(&row[absolute_start]);
+            let fg = color_to_f32(fg_color);
+            let bg = color_to_f32(bg_color);
             let cluster_x = absolute_start as f32 * cell_w + pad_x;
             let mut pen_x = 0.0;
             for (glyph, key) in cluster_glyphs.iter().zip(shaped_keys.iter()) {
@@ -434,6 +431,15 @@ fn cluster_bounds(glyphs: &[ShapedGlyph], char_count: usize) -> Vec<(usize, usiz
             (start, end)
         })
         .collect()
+}
+
+#[inline(always)]
+fn resolved_cell_colors(cell: &Cell) -> (forge_core::color::Color, forge_core::color::Color) {
+    if cell.is_inverse() {
+        (cell.bg, cell.fg)
+    } else {
+        (cell.fg, cell.bg)
+    }
 }
 
 fn context_menu_fingerprint(menu: Option<ContextMenuRenderData<'_>>) -> u64 {
@@ -547,6 +553,8 @@ fn push_quad_vertices(
     });
 }
 
+// Flat scalar geometry avoids constructing temporary render descriptors in this hot path.
+#[allow(clippy::too_many_arguments)]
 fn push_pixel_quad(
     vertices: &mut Vec<GlyphVertex>,
     vp_w: f32,
@@ -569,6 +577,8 @@ fn push_pixel_quad(
     );
 }
 
+// Flat scalar geometry avoids constructing temporary render descriptors in this hot path.
+#[allow(clippy::too_many_arguments)]
 fn push_antialiased_rounded_pixel_quad(
     vertices: &mut Vec<GlyphVertex>,
     vp_w: f32,
@@ -642,6 +652,8 @@ fn push_antialiased_rounded_pixel_quad(
     ]);
 }
 
+// Flat scalar geometry avoids constructing temporary render descriptors in this hot path.
+#[allow(clippy::too_many_arguments)]
 fn push_antialiased_circle_pixel_quad(
     vertices: &mut Vec<GlyphVertex>,
     vp_w: f32,
@@ -706,6 +718,8 @@ fn push_antialiased_circle_pixel_quad(
     ]);
 }
 
+// The borrowed render targets and immutable metrics are intentionally explicit.
+#[allow(clippy::too_many_arguments)]
 fn tessellate_context_menu(
     vertices: &mut Vec<GlyphVertex>,
     atlas: &GlyphAtlas,
@@ -760,6 +774,8 @@ fn tessellate_context_menu(
     }
 }
 
+// The borrowed render targets and immutable metrics are intentionally explicit.
+#[allow(clippy::too_many_arguments)]
 fn tessellate_context_menu_panel(
     vertices: &mut Vec<GlyphVertex>,
     atlas: &GlyphAtlas,
@@ -1035,6 +1051,8 @@ impl GridTessellator {
         Some(VertexRange::new(start, self.vertices.len() - start))
     }
 
+    // This mirrors the primitive's scalar geometry without allocating a descriptor.
+    #[allow(clippy::too_many_arguments)]
     pub fn append_circle(
         &mut self,
         vp_w: f32,
@@ -1200,6 +1218,8 @@ impl GridTessellator {
         }
     }
 
+    // This render entry point keeps borrowed resources and metrics explicit.
+    #[allow(clippy::too_many_arguments)]
     pub fn append_context_menu_overlay(
         &mut self,
         atlas: &GlyphAtlas,
@@ -1212,7 +1232,7 @@ impl GridTessellator {
         transparent: bool,
     ) {
         self.context_menu_range = None;
-        self.context_menu_fingerprint = context_menu_fingerprint(context_menu.clone());
+        self.context_menu_fingerprint = context_menu_fingerprint(context_menu);
 
         if let Some(menu) = context_menu {
             let start = self.vertices.len();
@@ -1354,14 +1374,10 @@ impl GridTessellator {
         self.actual_dirty.clear();
         self.actual_dirty.resize(grid.len(), false);
         self.last_dirty_generations.resize(grid.len(), 0);
-        for i in 0..grid.len() {
-            if i < dirty_generations.len() {
-                if dirty_generations[i] > 0
-                    && self.last_dirty_generations[i] != dirty_generations[i]
-                {
-                    self.actual_dirty[i] = true;
-                    self.last_dirty_generations[i] = dirty_generations[i];
-                }
+        for (i, &generation) in dirty_generations.iter().take(grid.len()).enumerate() {
+            if generation > 0 && self.last_dirty_generations[i] != generation {
+                self.actual_dirty[i] = true;
+                self.last_dirty_generations[i] = generation;
             }
         }
 
@@ -1593,9 +1609,7 @@ impl GridTessellator {
                     plan_ligatures_for_row(
                         row,
                         row_idx,
-                        cursor
-                            .map(|(col, row)| (row == row_idx).then_some(col))
-                            .flatten(),
+                        cursor.and_then(|(col, row)| (row == row_idx).then_some(col)),
                         selection,
                         context,
                         atlas,
@@ -1628,8 +1642,9 @@ impl GridTessellator {
                     rects_intersect(rect, PixelRect::new(px_x, px_y, cell_w, cell_h))
                 });
 
-                let mut fg = color_to_f32(cell.fg);
-                let mut bg = color_to_f32(cell.bg);
+                let (fg_color, bg_color) = resolved_cell_colors(cell);
+                let mut fg = color_to_f32(fg_color);
+                let mut bg = color_to_f32(bg_color);
 
                 // Check if in selection
                 let mut in_selection = false;
@@ -2027,6 +2042,9 @@ fn decode_box_drawing(c: char) -> Option<(u32, u32, u32, u32, bool)> {
 }
 
 #[cfg(test)]
+// Keeping the large procedural-glyph implementation contiguous avoids a noisy
+// source move while this test module remains colocated with its private helpers.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::font::atlas::{GlyphAtlas, GlyphAtlasDescriptor, GlyphMetrics};
@@ -2130,6 +2148,8 @@ mod tests {
         );
     }
 
+    // Test setup exposes each independent render input at the call site.
+    #[allow(clippy::too_many_arguments)]
     fn tessellate_test_grid_with_cursor(
         tessellator: &mut GridTessellator,
         atlas: &GlyphAtlas,
@@ -2195,6 +2215,31 @@ mod tests {
             assert_eq!(actual.fg_color, expected.fg_color);
             assert_eq!(actual.bg_color, expected.bg_color);
         }
+    }
+
+    #[test]
+    fn inverse_video_swaps_resolved_foreground_and_background() {
+        let mut cell = Cell {
+            c: 'A',
+            fg: Color {
+                r: 240,
+                g: 241,
+                b: 242,
+                a: 255,
+            },
+            bg: Color {
+                r: 10,
+                g: 11,
+                b: 12,
+                a: 255,
+            },
+            flags: 0,
+        };
+
+        assert_eq!(resolved_cell_colors(&cell), (cell.fg, cell.bg));
+
+        cell.set_inverse(true);
+        assert_eq!(resolved_cell_colors(&cell), (cell.bg, cell.fg));
     }
 
     #[test]
@@ -2687,7 +2732,7 @@ mod tests {
             b: 38,
             a: 255,
         };
-        let grid = vec![vec![Cell {
+        let grid = [vec![Cell {
             c: 'A',
             fg,
             bg,
@@ -2766,7 +2811,7 @@ mod tests {
             b: 38,
             a: 255,
         };
-        let grid = vec![vec![Cell {
+        let grid = [vec![Cell {
             c: 'Ω',
             fg,
             bg,
@@ -2826,7 +2871,7 @@ mod tests {
             b: 38,
             a: 255,
         };
-        let grid = vec![vec![Cell {
+        let grid = [vec![Cell {
             c: '─',
             fg,
             bg,
@@ -2869,6 +2914,9 @@ mod tests {
 }
 
 #[inline(always)]
+// Procedural glyph generation keeps its scalar geometry and callback inputs
+// explicit so the per-cell path creates no temporary context object.
+#[allow(clippy::too_many_arguments)]
 fn tessellate_procedural_glyph(
     c: char,
     px_x: f32,

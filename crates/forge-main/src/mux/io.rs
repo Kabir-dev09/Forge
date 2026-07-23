@@ -8,8 +8,7 @@ use std::sync::{
 use arc_swap::ArcSwap;
 use calloop::{
     channel::{channel, Channel, Sender},
-    generic::Generic,
-    EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+    EventLoop, Interest, LoopHandle, PostAction, RegistrationToken,
 };
 use forge_core::{ForgeError, Result};
 use forge_pty::vte_parser::CommandLifecycleEvent;
@@ -45,8 +44,8 @@ pub enum PtyWorkerCommand {
     AddPane {
         pane_id: PaneId,
         fd: OwnedFd,
-        vte_processor: VteProcessor,
-        screen_buffer: ScreenBuffer,
+        vte_processor: Box<VteProcessor>,
+        screen_buffer: Box<ScreenBuffer>,
         snapshot: Arc<ArcSwap<RenderSnapshot>>,
     },
     RemovePane(PaneId),
@@ -109,7 +108,6 @@ impl calloop::EventSource for DynamicPtySource {
                 let mut fd = file.as_raw_fd();
                 callback(ready, &mut fd)
             })
-            .map_err(|e| e)
     }
 
     fn register(
@@ -136,6 +134,8 @@ impl calloop::EventSource for DynamicPtySource {
 }
 
 #[cfg(test)]
+// Tests stay beside command-normalization helpers while the runtime implementation follows.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{normalize_command_program_name, selected_text};
 
@@ -436,6 +436,8 @@ impl PaneIoRegistry {
         })
     }
 
+    // Worker bootstrap passes each shared channel/state handle exactly once.
+    #[allow(clippy::too_many_arguments)]
     fn run_worker(
         receiver: Channel<PtyWorkerCommand>,
         exited_panes: Arc<RwLock<Vec<PaneId>>>,
@@ -464,7 +466,13 @@ impl PaneIoRegistry {
                             snapshot,
                         } => {
                             if let Err(e) =
-                                state.add_pane(pane_id, fd, vte_processor, screen_buffer, snapshot)
+                                state.add_pane(
+                                    pane_id,
+                                    fd,
+                                    *vte_processor,
+                                    *screen_buffer,
+                                    snapshot,
+                                )
                             {
                                 tracing::error!("Failed to add pane {}: {}", pane_id.get(), e);
                             }
@@ -632,8 +640,8 @@ impl PaneIoRegistry {
             .send(PtyWorkerCommand::AddPane {
                 pane_id,
                 fd,
-                vte_processor,
-                screen_buffer,
+                vte_processor: Box::new(vte_processor),
+                screen_buffer: Box::new(screen_buffer),
                 snapshot,
             })
             .map_err(|e| ForgeError::Other(format!("Failed to send to PTY worker: {}", e)))?;
@@ -791,7 +799,6 @@ impl WorkerState {
         let mut processed_output = false;
 
         let mut exited = false;
-        let mut drained = false;
         let mut interest_changed = false;
 
         if let Some(pane) = self.panes.get_mut(&pane_id) {
@@ -818,17 +825,14 @@ impl WorkerState {
                     let len = match read_res {
                         Ok(0) => {
                             exited = true;
-                            drained = true;
                             break;
                         }
                         Ok(n) => n,
                         Err(rustix::io::Errno::AGAIN) => {
-                            drained = true;
                             break;
                         }
                         Err(rustix::io::Errno::IO) => {
                             exited = true;
-                            drained = true;
                             break;
                         }
                         Err(e) => {

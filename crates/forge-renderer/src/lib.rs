@@ -1,5 +1,6 @@
 //! Forge Vulkan Rendering Backend
 pub mod device;
+mod cursor_trail;
 pub mod font;
 pub mod frame;
 pub mod framebuffer;

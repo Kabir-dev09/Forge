@@ -377,15 +377,23 @@ mod tests {
         assert!(data.bold_italic.is_some());
         assert!(!data.atlas.glyphs_italic.is_empty());
         assert!(!data.atlas.glyphs_bold_italic.is_empty());
+        for glyph in ['', '', '', ''] {
+            assert!(data
+                .atlas
+                .get_exact(glyph, forge_renderer::font::atlas::FontStyle::Regular)
+                .is_some());
+        }
     }
 
     #[test]
     fn configured_path_remains_supported() {
         let path = std::env::temp_dir().join(format!("forge-font-{}.ttf", std::process::id()));
         std::fs::write(&path, b"font").unwrap();
-        let mut config = FontConfig::default();
-        config.family = path.to_string_lossy().into_owned();
-        config.nerd_fonts = false;
+        let config = FontConfig {
+            family: path.to_string_lossy().into_owned(),
+            nerd_fonts: false,
+            ..FontConfig::default()
+        };
         let files = resolve_font_files(&config).unwrap();
         assert_eq!(files.regular, FontSource::File(path.clone()));
         std::fs::remove_file(path).ok();

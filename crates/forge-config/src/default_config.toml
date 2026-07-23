@@ -47,6 +47,17 @@ style = "block"
 blink = true
 blink_rate_ms = 530
 
+[cursor.trail]
+enabled = false
+# Render the trail as cell-sized opacity bands.
+segmented = false
+fast_decay_ms = 100
+slow_decay_ms = 400
+minimum_distance_x = 2
+minimum_distance_y = 2
+trigger_delay_ms = 50
+color = "cursor"
+
 [scrollback]
 lines = 10000
 smooth_scroll = true

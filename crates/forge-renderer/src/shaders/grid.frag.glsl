@@ -40,6 +40,14 @@ void main() {
             return;
         }
 
+        if (proc_id == -60.0) {
+            float section_count = max(v_bg_color.r, 1.0);
+            float section_index = clamp(floor(max(v_tex_coord.y, 0.0)), 0.0, section_count - 1.0);
+            float opacity = (section_count - section_index) / section_count;
+            out_color = vec4(v_fg_color.rgb, v_fg_color.a * opacity);
+            return;
+        }
+
         if (proc_id <= -100.0 && proc_id > -500.0) {
             int data = int(abs(proc_id) - 100.0);
             int u = data & 3;

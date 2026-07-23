@@ -141,12 +141,21 @@ impl<'a> Perform for TerminalPerformer<'a> {
             'B' => self.buffer.move_cursor_relative(p0, 0),
             'C' => self.buffer.move_cursor_relative(0, p0),
             'D' => self.buffer.move_cursor_relative(0, -p0),
+            'E' => self
+                .buffer
+                .move_cursor_to(self.buffer.cursor.row.saturating_add(p0 as usize), 0),
+            'F' => self
+                .buffer
+                .move_cursor_to(self.buffer.cursor.row.saturating_sub(p0 as usize), 0),
             'G' => self
                 .buffer
                 .move_cursor_to(self.buffer.cursor.row, (p0 - 1).max(0) as usize),
             'H' | 'f' => self
                 .buffer
                 .move_cursor_to((p0 - 1).max(0) as usize, (p1 - 1).max(0) as usize),
+            'd' => self
+                .buffer
+                .move_cursor_to((p0 - 1).max(0) as usize, self.buffer.cursor.col),
             'J' => match get_param_or(params, 0, 0) {
                 0 => self.buffer.erase_to_end_of_screen(),
                 1 => {
@@ -415,16 +424,19 @@ fn handle_sgr(params: &Params, buffer: &mut ScreenBuffer) {
                 buffer.attr_italic = false;
                 buffer.attr_underline = false;
                 buffer.attr_strikethrough = false;
+                buffer.attr_inverse = false;
                 buffer.current_fg = buffer.default_fg;
                 buffer.current_bg = buffer.default_bg;
             }
             1 => buffer.attr_bold = true,
             3 => buffer.attr_italic = true,
             4 => buffer.attr_underline = true,
+            7 => buffer.attr_inverse = true,
             9 => buffer.attr_strikethrough = true,
             22 => buffer.attr_bold = false,
             23 => buffer.attr_italic = false,
             24 => buffer.attr_underline = false,
+            27 => buffer.attr_inverse = false,
             29 => buffer.attr_strikethrough = false,
             30..=37 => buffer.current_fg = ansi_256_color(flat[i] as u8 - 30, &buffer.palette),
             39 => buffer.current_fg = buffer.default_fg,
@@ -712,6 +724,19 @@ mod tests {
     }
 
     #[test]
+    fn test_sgr_reverse_video_and_reset() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(20, 5);
+
+        processor.process(b"\x1b[7mA\x1b[27mB\x1b[7mC\x1b[0mD", &mut buf);
+
+        assert!(buf.visible_row(0)[0].is_inverse());
+        assert!(!buf.visible_row(0)[1].is_inverse());
+        assert!(buf.visible_row(0)[2].is_inverse());
+        assert!(!buf.visible_row(0)[3].is_inverse());
+    }
+
+    #[test]
     fn test_split_escape_does_not_fast_path_payload() {
         let mut processor = VteProcessor::new();
         let mut buf = test_screen(20, 5);
@@ -867,6 +892,70 @@ mod tests {
         processor.process(b"\x1b[A", &mut buf);
         assert_eq!(buf.cursor.row, 3);
         assert_eq!(buf.cursor.col, 9);
+    }
+
+    #[test]
+    fn cursor_next_and_previous_line_reset_column_and_clamp() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(20, 10);
+        buf.move_cursor_to(5, 7);
+
+        processor.process(b"\x1b[2F", &mut buf);
+        assert_eq!(buf.cursor.row, 3);
+        assert_eq!(buf.cursor.col, 0);
+
+        processor.process(b"\x1b[E", &mut buf);
+        assert_eq!(buf.cursor.row, 4);
+        assert_eq!(buf.cursor.col, 0);
+
+        processor.process(b"\x1b[99F", &mut buf);
+        assert_eq!(buf.cursor.row, 0);
+        assert_eq!(buf.cursor.col, 0);
+
+        processor.process(b"\x1b[99E", &mut buf);
+        assert_eq!(buf.cursor.row, 9);
+        assert_eq!(buf.cursor.col, 0);
+    }
+
+    #[test]
+    fn vertical_position_absolute_preserves_column() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(80, 24);
+        buf.move_cursor_to(23, 17);
+
+        processor.process(b"\x1b[2d", &mut buf);
+
+        assert_eq!(buf.cursor.row, 1);
+        assert_eq!(buf.cursor.col, 17);
+    }
+
+    #[test]
+    fn nano_final_cursor_sequence_moves_from_footer_to_edit_area() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(80, 24);
+        buf.move_cursor_to(23, 79);
+
+        processor.process(b"\r\x1b[2d\x1b[?12l\x1b[?25h", &mut buf);
+
+        assert_eq!(buf.cursor.row, 1);
+        assert_eq!(buf.cursor.col, 0);
+        assert!(buf.cursor_visible);
+    }
+
+    #[test]
+    fn pacman_style_multibar_updates_existing_rows() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(32, 6);
+        processor.process(b"package-a\r\npackage-b\r\nTotal", &mut buf);
+
+        processor.process(b"\x1b[2F\x1b[Kupdated-a", &mut buf);
+        processor.process(b"\x1b[2E\x1b[Kupdated-total", &mut buf);
+
+        assert_eq!(buf.cursor.row, 2);
+        assert_eq!(buf.visible_row(0)[0].c, 'u');
+        assert_eq!(buf.visible_row(1)[0].c, 'p');
+        assert_eq!(buf.visible_row(2)[0].c, 'u');
+        assert!(buf.visible_row(3).iter().all(|cell| cell.is_empty()));
     }
 
     #[test]

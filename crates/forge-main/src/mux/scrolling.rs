@@ -1451,9 +1451,7 @@ impl ScrollingPaneManager {
             return Some(vec![(active_id, GridSize::new(rect.cols, rect.rows))]);
         }
 
-        if self.pane(active_id).is_none() {
-            return None;
-        }
+        self.pane(active_id)?;
         self.zoomed_pane = Some(active_id);
         self.cancel_scroll_animation();
         self.invalidate_layout();

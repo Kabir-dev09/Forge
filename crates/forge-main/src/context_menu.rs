@@ -372,27 +372,6 @@ impl ContextMenuState {
     }
 }
 
-fn point_inside_rounded_rect(x: f64, y: f64, width: f64, height: f64, radius: f64) -> bool {
-    let radius = radius.min(width * 0.5).min(height * 0.5);
-    let corner_x = if x < radius {
-        radius
-    } else if x > width - radius {
-        width - radius
-    } else {
-        x
-    };
-    let corner_y = if y < radius {
-        radius
-    } else if y > height - radius {
-        height - radius
-    } else {
-        y
-    };
-    let dx = x - corner_x;
-    let dy = y - corner_y;
-    dx * dx + dy * dy <= radius * radius
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

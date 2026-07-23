@@ -249,8 +249,7 @@ impl Dispatch<WlDataDevice, ()> for WaylandState {
                             .iter()
                             .position(|pending| pending.offer.id() == id.id());
                         clip.current_mime = pending_index
-                            .map(|index| clip.pending_offers.swap_remove(index).mime)
-                            .flatten();
+                            .and_then(|index| clip.pending_offers.swap_remove(index).mime);
                         clip.current_offer = Some(id);
                     } else {
                         clip.current_offer = None;
@@ -297,6 +296,8 @@ impl Dispatch<WlDataOffer, ()> for WaylandState {
 }
 
 #[cfg(test)]
+// Protocol dispatch implementations follow these focused pure-helper tests.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

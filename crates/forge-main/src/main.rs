@@ -20,7 +20,7 @@ fn main() {
     init_logging();
     forge_core::crash::install_panic_handler();
 
-    let result = std::panic::catch_unwind(|| run());
+    let result = std::panic::catch_unwind(run);
 
     match result {
         Ok(Ok(())) => {}
@@ -232,6 +232,7 @@ fn run() -> forge_core::Result<()> {
         )?
     };
     renderer.set_ligature_config(config.font.ligatures.clone());
+    renderer.set_cursor_trail_config(&config.cursor.trail);
     tracing::debug!(
         "[PROFILER] Vulkan Boot (Renderer::new) took: {:?}",
         t_vulkan.elapsed()

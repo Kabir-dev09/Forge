@@ -276,9 +276,11 @@ mod tests {
 
     #[test]
     fn spawn_echo_and_read() {
-        let mut shell = ShellConfig::default();
-        shell.program = "/bin/sh".to_string();
-        shell.args = vec!["-c".to_string(), "echo hello; exit 0".to_string()];
+        let shell = ShellConfig {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "echo hello; exit 0".to_string()],
+            ..ShellConfig::default()
+        };
         let winsize = Winsize {
             ws_col: 80,
             ws_row: 24,

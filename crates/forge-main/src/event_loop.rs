@@ -443,13 +443,6 @@ impl AppData {
     }
 }
 
-fn mark_cursor_row_dirty(
-    screen_buffer: &std::sync::Arc<std::sync::RwLock<forge_pty::ScreenBuffer>>,
-) {
-    let mut sb = screen_buffer.write().unwrap();
-    sb.mark_cursor_viewport_row_dirty();
-}
-
 fn debug_screen_artifacts(rows: &[&[forge_core::cell::Cell]]) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     static LOGGED_FRAMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -500,6 +493,8 @@ fn debug_screen_artifacts(rows: &[&[forge_core::cell::Cell]]) {
     }
 }
 
+// This pure predicate keeps independent event-loop state explicit at its call sites.
+#[allow(clippy::too_many_arguments)]
 fn scrollbar_overlay_wants_redraw(
     use_alt_buffer: bool,
     scrollback_lines: usize,
@@ -902,10 +897,10 @@ fn request_close_active_pane(app_data: &mut AppData) {
 }
 
 pub fn close_pane(app_data: &mut AppData, pane_id: crate::mux::PaneId) {
-    let play_anim = match app_data.config.render.pane_animation {
-        forge_core::config_registry::PaneAnimationMode::None => false,
-        _ => true,
-    };
+    let play_anim = !matches!(
+        app_data.config.render.pane_animation,
+        forge_core::config_registry::PaneAnimationMode::None
+    );
 
     if play_anim {
         let is_floating = app_data
@@ -1200,6 +1195,7 @@ fn frame_wants_redraw(
     scroll_animation_wants_redraw: bool,
     pane_animation_wants_redraw: bool,
     command_indicator_animation_wants_redraw: bool,
+    cursor_trail_wants_redraw: bool,
 ) -> bool {
     has_dirty_rows
         || force_redraw
@@ -1207,6 +1203,7 @@ fn frame_wants_redraw(
         || scroll_animation_wants_redraw
         || pane_animation_wants_redraw
         || command_indicator_animation_wants_redraw
+        || cursor_trail_wants_redraw
 }
 
 fn redraw_can_run_immediately(
@@ -1215,6 +1212,10 @@ fn redraw_can_run_immediately(
     frame_ready: bool,
 ) -> bool {
     force_immediate_render || (force_redraw && frame_ready)
+}
+
+fn frame_callback_request_needed(frame_callback_pending: bool) -> bool {
+    !frame_callback_pending
 }
 
 fn frame_should_mark_clean(needs_recreate: bool) -> bool {
@@ -1754,7 +1755,7 @@ fn expire_command_completion_indicators(app_data: &mut AppData, now: std::time::
         .retain(|_, indicator| {
             indicator
                 .expires_at
-                .map_or(true, |expires_at| expires_at > now)
+                .is_none_or(|expires_at| expires_at > now)
         });
     if app_data.command_completion_indicators.len() != before {
         app_data.force_immediate_render = true;
@@ -2105,7 +2106,10 @@ pub fn run_event_loop(
     let mut wayland_state = wayland_state;
     wayland_state.keybindings = config.keybindings.clone();
     wayland_state.hide_mouse_when_typing = config.behavior.hide_mouse_when_typing;
-    wayland_state.frame_callback_pending = true;
+    // No frame callback has been requested yet. The first rendered frame starts
+    // the callback chain; keeping this truthful prevents both duplicate callbacks
+    // during immediate redraws and a false pending state at startup.
+    wayland_state.frame_callback_pending = false;
     wayland_state.needs_flush = false;
     let _ = wayland_state.conn.flush();
 
@@ -2154,7 +2158,6 @@ pub fn run_event_loop(
         .map(|renderer| renderer.has_real_font_metrics())
         .unwrap_or(true)
         || font_atlas_receiver.is_none();
-    let loop_signal_clone = loop_signal.clone();
     let mut app_data = AppData {
         wayland_state,
         loop_signal: loop_signal.clone(),
@@ -2365,7 +2368,7 @@ pub fn run_event_loop(
                             metrics.effective_cell_w as f32,
                             metrics.effective_cell_h as f32,
                             app_data.config.window.gap as f32,
-                            app_data.effective_pane_padding().clone(),
+                            app_data.effective_pane_padding(),
                         );
                         if let Ok(changes) =
                             app_data.tab_manager.tabs[idx].mux.relayout(layout_params)
@@ -2461,6 +2464,11 @@ pub fn run_event_loop(
             next_command_completion_indicator_timeout(&app_data, std::time::Instant::now())
         {
             timeout = Some(timeout.map_or(indicator_timeout, |t| t.min(indicator_timeout)));
+        }
+        if let Some(trail_timeout) = app_data.renderer.as_ref().and_then(|renderer| {
+            renderer.cursor_trail_next_wakeup(std::time::Instant::now())
+        }) {
+            timeout = Some(timeout.map_or(trail_timeout, |t| t.min(trail_timeout)));
         }
         if redraw_can_run_immediately(
             app_data.force_immediate_render,
@@ -2850,7 +2858,6 @@ pub fn run_event_loop(
                         request_clipboard_paste(&mut app_data);
                     }
                     forge_core::bindings::Action::NewTab => {
-                        let metrics = pointer_layout_metrics(&app_data);
                         let grid_metrics =
                             app_data.cached_grid_metrics.expect("grid metrics missing");
                         let cols = grid_metrics.cols;
@@ -2902,7 +2909,7 @@ pub fn run_event_loop(
                                     metrics.0 as f32,
                                     metrics.1 as f32,
                                     app_data.config.window.gap as f32,
-                                    app_data.effective_pane_padding().clone(),
+                                    app_data.effective_pane_padding(),
                                 )) {
                                     tracing::warn!(?err, "New tab mux relayout failed");
                                 }
@@ -3354,6 +3361,11 @@ pub fn run_event_loop(
                         renderer.set_ligature_config(app_data.config.font.ligatures.clone());
                     }
                 }
+                if changes.cursor {
+                    if let Some(renderer) = app_data.renderer.as_mut() {
+                        renderer.set_cursor_trail_config(&app_data.config.cursor.trail);
+                    }
+                }
                 if changes.command_completion_indicator {
                     let enabled = command_completion_tracking_enabled(
                         &app_data.config.command_completion_indicator,
@@ -3390,7 +3402,6 @@ pub fn run_event_loop(
                     app_data.statusbar.generation = app_data.statusbar.generation.wrapping_add(1);
                 }
 
-                if changes.theme || changes.window || changes.statusbar || changes.render {}
                 app_data
                     .pane_io
                     .send_ui_command(crate::mux::io::PtyWorkerCommand::MarkAllDirty(
@@ -3449,7 +3460,6 @@ pub fn run_event_loop(
         }
 
         let (mouse_tracking_enabled, mouse_sgr_mode, use_alt, scrollback_lines) = {
-            let active_pane = app_data.tab_manager.active_mux().active_pane;
             let sb = app_data
                 .tab_manager
                 .active_mux()
@@ -3683,15 +3693,14 @@ pub fn run_event_loop(
 
                     if let Some(border) = app_data.dragging_split.clone() {
                         let parent = &border.parent_rect;
-                        let mut new_ratio = border.current_ratio;
-                        if border.axis == crate::mux::state::SplitAxis::Vertical {
+                        let new_ratio = if border.axis == crate::mux::state::SplitAxis::Vertical {
                             let rel_x = x as f32 - parent.x;
-                            new_ratio = rel_x / parent.width;
+                            rel_x / parent.width
                         } else {
                             let rel_y = y as f32 - parent.y;
-                            new_ratio = rel_y / parent.height;
+                            rel_y / parent.height
                         }
-                        new_ratio = new_ratio.clamp(0.05, 0.95);
+                        .clamp(0.05, 0.95);
                         if app_data
                             .tab_manager
                             .active_mux_mut()
@@ -3710,7 +3719,7 @@ pub fn run_event_loop(
                                 cell_w as f32,
                                 cell_h as f32,
                                 app_data.config.window.gap as f32,
-                                app_data.effective_pane_padding().clone(),
+                                app_data.effective_pane_padding(),
                             );
                             let _ = app_data
                                 .tab_manager
@@ -3915,7 +3924,7 @@ pub fn run_event_loop(
                                             .get(&active_pane)
                                         {
                                             let sb = pane.snapshot.load();
-                                            let history_lines = sb.history_lines as f64;
+                                            let history_lines = sb.history_lines;
                                             let new_offset =
                                                 (scroll_ratio * history_lines).round() as usize;
 
@@ -3992,8 +4001,8 @@ pub fn run_event_loop(
                         }
                     }
 
-                    let ptr_x = app_data.pointer_x as f64;
-                    let ptr_y = app_data.pointer_y as f64;
+                    let ptr_x = app_data.pointer_x;
+                    let ptr_y = app_data.pointer_y;
 
                     if let Some(cm) = app_data.context_menu.take() {
                         let win_w =
@@ -4109,26 +4118,22 @@ pub fn run_event_loop(
                                 }
 
                                 if let Some(action) = action_to_execute {
-                                    if action.starts_with("SwitchTab") {
-                                        if let Ok(idx) =
-                                            action["SwitchTab".len()..].parse::<usize>()
-                                        {
+                                    if let Some(tab) = action.strip_prefix("SwitchTab") {
+                                        if let Ok(idx) = tab.parse::<usize>() {
                                             if idx > 0 {
                                                 let target = idx - 1;
-                                                if target < app_data.tab_manager.tabs.len() {
-                                                    if app_data.tab_manager.active_tab_index
+                                                if target < app_data.tab_manager.tabs.len()
+                                                    && app_data.tab_manager.active_tab_index
                                                         != target
-                                                    {
-                                                        app_data.tab_manager.active_tab_index =
-                                                            target;
-                                                        sync_scrolling_active_tab(&mut app_data);
-                                                        app_data.pane_io.visible_gen.fetch_add(
-                                                            1,
-                                                            std::sync::atomic::Ordering::Release,
-                                                        );
-                                                        app_data.force_immediate_render = true;
-                                                        app_data.wayland_state.force_redraw = true;
-                                                    }
+                                                {
+                                                    app_data.tab_manager.active_tab_index = target;
+                                                    sync_scrolling_active_tab(&mut app_data);
+                                                    app_data.pane_io.visible_gen.fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Release,
+                                                    );
+                                                    app_data.force_immediate_render = true;
+                                                    app_data.wayland_state.force_redraw = true;
                                                 }
                                             }
                                         }
@@ -4578,6 +4583,10 @@ pub fn run_event_loop(
         });
         let command_indicator_animation_wants_redraw =
             command_completion_indicator_animation_active(&app_data, now);
+        let cursor_trail_wants_redraw = app_data
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.cursor_trail_wants_redraw(now));
 
         let wants_redraw = frame_wants_redraw(
             has_dirty_rows,
@@ -4586,6 +4595,7 @@ pub fn run_event_loop(
             scroll_animation_wants_redraw,
             pane_animation_wants_redraw,
             command_indicator_animation_wants_redraw,
+            cursor_trail_wants_redraw,
         );
         // FIX #1: When force_immediate_render is set (structural event like pane close),
         // bypass the frame_ready gate entirely so we don't wait up to one full vsync.
@@ -4593,8 +4603,6 @@ pub fn run_event_loop(
         let frame_gate_open = app_data.wayland_state.frame_ready || app_data.force_immediate_render;
         if app_data.force_immediate_render {
             app_data.force_immediate_render = false;
-            // Also ensure frame_ready is true for next cycle so the callback chain stays intact.
-            app_data.wayland_state.frame_ready = true;
         }
         if frame_gate_open && wants_redraw {
             {
@@ -4611,10 +4619,9 @@ pub fn run_event_loop(
                 app_data.last_snapshot_ids.insert(active_pane_id, sid);
             }
             app_data.wayland_state.frame_ready = false;
-            app_data.wayland_state.frame_callback_pending = false;
 
             if let Some(window) = app_data.wayland_state.window.as_ref() {
-                if !app_data.wayland_state.frame_callback_pending {
+                if frame_callback_request_needed(app_data.wayland_state.frame_callback_pending) {
                     crate::wayland::frame_callback::request_frame_callback(
                         &window.surface,
                         &app_data.queue_handle,
@@ -4694,7 +4701,6 @@ pub fn run_event_loop(
                     .unwrap()
                     .snapshot
                     .load();
-                let cursor = sb.cursor;
                 let bg_color = app_data.cached_bg_color;
                 let final_alpha = bg_color.a * app_data.config.window.opacity;
                 let default_bg = [bg_color.r, bg_color.g, bg_color.b, bg_color.a];
@@ -4824,8 +4830,8 @@ pub fn run_event_loop(
                         if let Some(action) = app_data.statusbar.hovered_action.as_deref() {
                             if action == "NewTab" {
                                 is_hovering = true;
-                            } else if action.starts_with("SwitchTab") {
-                                if let Ok(tab_num) = action["SwitchTab".len()..].parse::<usize>() {
+                            } else if let Some(tab) = action.strip_prefix("SwitchTab") {
+                                if let Ok(tab_num) = tab.parse::<usize>() {
                                     if tab_num > 0
                                         && tab_num - 1 != app_data.tab_manager.active_tab_index
                                     {
@@ -5015,10 +5021,10 @@ pub fn run_event_loop(
                 if !modal_blank_screen {
                     let active_pane_id = runtime_active_pane_id;
 
-                    let play_anim = match app_data.config.render.pane_animation {
-                        forge_core::config_registry::PaneAnimationMode::None => false,
-                        _ => true,
-                    };
+                    let play_anim = !matches!(
+                        app_data.config.render.pane_animation,
+                        forge_core::config_registry::PaneAnimationMode::None
+                    );
 
                     let is_tab_switch_or_new = !pane_spans.is_empty()
                         && !pane_spans
@@ -5256,7 +5262,7 @@ pub fn run_event_loop(
                             selection_bg: selection_bg_arr,
                             viewport_offset: snap.viewport_offset,
                             scroll_event: if is_active && !span.is_partial {
-                                scroll_event.clone()
+                                scroll_event
                             } else {
                                 None
                             },
@@ -5821,20 +5827,19 @@ pub fn run_event_loop(
                     }
                     crate::mux::PaneRuntime::Tiling => false,
                 };
-                let frame_should_mark_clean = |needs_recreate: bool| -> bool {
-                    needs_scrollbar_redraw
-                        || needs_statusbar_hover_redraw
-                        || needs_recreate
-                        || scroll_animation_still_active
-                };
+                let cursor_trail_still_active = app_data.renderer.as_ref().is_some_and(|renderer| {
+                    renderer.cursor_trail_wants_redraw(std::time::Instant::now())
+                });
                 app_data.wayland_state.force_redraw = needs_scrollbar_redraw
                     || needs_statusbar_hover_redraw
                     || needs_recreate
-                    || scroll_animation_still_active;
+                    || scroll_animation_still_active
+                    || cursor_trail_still_active;
                 if needs_scrollbar_redraw
                     || needs_statusbar_hover_redraw
                     || needs_recreate
                     || scroll_animation_still_active
+                    || cursor_trail_still_active
                 {
                     app_data.loop_signal.clone().wakeup();
                 }
@@ -5870,6 +5875,8 @@ pub struct GridMetrics {
     pub sidebar_width: f64,
 }
 
+// Window, statusbar, sidebar, and native-cell inputs are independent geometry sources.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_grid_metrics(
     win_w: f64,
     win_h: f64,
@@ -5882,7 +5889,7 @@ pub fn compute_grid_metrics(
 ) -> GridMetrics {
     let sidebar_width = (sidebar_cols as f64 * native_cell_w).min((win_w - native_cell_w).max(0.0));
     let content_win_w = (win_w - sidebar_width).max(native_cell_w);
-    let mut avail_w =
+    let avail_w =
         (content_win_w - pad_cfg.left as f64 - pad_cfg.right as f64).max(native_cell_w);
     let mut avail_h = (win_h - pad_cfg.top as f64 - pad_cfg.bottom as f64).max(native_cell_h);
 
@@ -6093,10 +6100,12 @@ mod metric_tests {
 
     #[test]
     fn command_indicator_rect_is_bottom_centered_in_content_viewport() {
-        let mut statusbar = forge_core::config_registry::StatusbarConfig::default();
-        statusbar.enabled = true;
-        statusbar.position = forge_core::config_registry::StatusbarPosition::Top;
-        statusbar.placement = forge_core::config_registry::StatusbarPlacement::Inside;
+        let statusbar = forge_core::config_registry::StatusbarConfig {
+            enabled: true,
+            position: forge_core::config_registry::StatusbarPosition::Top,
+            placement: forge_core::config_registry::StatusbarPlacement::Inside,
+            ..forge_core::config_registry::StatusbarConfig::default()
+        };
         let metrics =
             compute_grid_metrics(300.0, 120.0, &padding(), true, &statusbar, 4, 10.0, 20.0);
 
@@ -6117,10 +6126,12 @@ mod metric_tests {
 
     #[test]
     fn command_indicator_stays_above_bottom_statusbar_after_resize() {
-        let mut statusbar = forge_core::config_registry::StatusbarConfig::default();
-        statusbar.enabled = true;
-        statusbar.position = forge_core::config_registry::StatusbarPosition::Bottom;
-        statusbar.placement = forge_core::config_registry::StatusbarPlacement::Inside;
+        let statusbar = forge_core::config_registry::StatusbarConfig {
+            enabled: true,
+            position: forge_core::config_registry::StatusbarPosition::Bottom,
+            placement: forge_core::config_registry::StatusbarPlacement::Inside,
+            ..forge_core::config_registry::StatusbarConfig::default()
+        };
 
         for width in [240.0, 480.0] {
             let metrics =
@@ -6147,18 +6158,23 @@ mod metric_tests {
             10.0,
             20.0,
         );
-        let mut theme = forge_core::config_registry::ThemeConfig::default();
-        theme.parsed_foreground = forge_core::color::Color {
-            r: 9,
-            g: 8,
-            b: 7,
-            a: 255,
-        };
-        theme.parsed_ansi_colors[1] = forge_core::color::Color {
+        let mut parsed_ansi_colors =
+            forge_core::config_registry::ThemeConfig::default().parsed_ansi_colors;
+        parsed_ansi_colors[1] = forge_core::color::Color {
             r: 4,
             g: 5,
             b: 6,
             a: 255,
+        };
+        let theme = forge_core::config_registry::ThemeConfig {
+            parsed_foreground: forge_core::color::Color {
+                r: 9,
+                g: 8,
+                b: 7,
+                a: 255,
+            },
+            parsed_ansi_colors,
+            ..forge_core::config_registry::ThemeConfig::default()
         };
         let shown_at = Instant::now();
         let indicator = command_indicator(false, "cargo", 101, shown_at);
@@ -6329,8 +6345,10 @@ mod metric_tests {
 
     #[test]
     fn command_indicator_timeout_expiry_uses_configured_duration() {
-        let mut config = forge_core::config_registry::CommandCompletionIndicatorConfig::default();
-        config.display_duration_ms = 1_750;
+        let config = forge_core::config_registry::CommandCompletionIndicatorConfig {
+            display_duration_ms: 1_750,
+            ..forge_core::config_registry::CommandCompletionIndicatorConfig::default()
+        };
         let now = Instant::now();
 
         let expires_at = command_completion_indicator_expiry(&config, now).unwrap();
@@ -6348,8 +6366,10 @@ mod metric_tests {
     fn command_indicator_animation_runs_expand_hold_contract() {
         let shown_at = Instant::now();
         let indicator = command_indicator(true, "cargo", 0, shown_at);
-        let mut config = forge_core::config_registry::CommandCompletionIndicatorConfig::default();
-        config.display_duration_ms = 1_000;
+        let config = forge_core::config_registry::CommandCompletionIndicatorConfig {
+            display_duration_ms: 1_000,
+            ..forge_core::config_registry::CommandCompletionIndicatorConfig::default()
+        };
 
         let initial = command_indicator_visual(&indicator, &config, shown_at);
         assert_eq!(initial.expansion, 0.0);
@@ -6442,9 +6462,11 @@ mod metric_tests {
 
     #[test]
     fn command_indicator_on_interaction_has_no_expiry() {
-        let mut config = forge_core::config_registry::CommandCompletionIndicatorConfig::default();
-        config.dismissal =
-            forge_core::config_registry::CommandCompletionIndicatorDismissal::OnInteraction;
+        let config = forge_core::config_registry::CommandCompletionIndicatorConfig {
+            dismissal:
+                forge_core::config_registry::CommandCompletionIndicatorDismissal::OnInteraction,
+            ..forge_core::config_registry::CommandCompletionIndicatorConfig::default()
+        };
 
         assert_eq!(
             command_completion_indicator_expiry(&config, Instant::now()),
@@ -6549,7 +6571,7 @@ mod metric_tests {
     #[test]
     fn frame_redraw_predicate_skips_idle_frames() {
         assert!(!frame_wants_redraw(
-            false, false, false, false, false, false
+            false, false, false, false, false, false, false
         ));
     }
 
@@ -6569,13 +6591,20 @@ mod metric_tests {
     }
 
     #[test]
+    fn pending_wayland_callback_is_not_duplicated() {
+        assert!(!frame_callback_request_needed(true));
+        assert!(frame_callback_request_needed(false));
+    }
+
+    #[test]
     fn frame_redraw_predicate_renders_for_each_dirty_source() {
-        assert!(frame_wants_redraw(true, false, false, false, false, false));
-        assert!(frame_wants_redraw(false, true, false, false, false, false));
-        assert!(frame_wants_redraw(false, false, true, false, false, false));
-        assert!(frame_wants_redraw(false, false, false, true, false, false));
-        assert!(frame_wants_redraw(false, false, false, false, true, false));
-        assert!(frame_wants_redraw(false, false, false, false, false, true));
+        assert!(frame_wants_redraw(true, false, false, false, false, false, false));
+        assert!(frame_wants_redraw(false, true, false, false, false, false, false));
+        assert!(frame_wants_redraw(false, false, true, false, false, false, false));
+        assert!(frame_wants_redraw(false, false, false, true, false, false, false));
+        assert!(frame_wants_redraw(false, false, false, false, true, false, false));
+        assert!(frame_wants_redraw(false, false, false, false, false, true, false));
+        assert!(frame_wants_redraw(false, false, false, false, false, false, true));
     }
 
     #[test]

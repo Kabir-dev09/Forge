@@ -308,6 +308,7 @@ pub struct CursorConfig {
     pub style: CursorStyle,
     pub blink: bool,
     pub blink_rate_ms: u32,
+    pub trail: CursorTrailConfig,
 }
 
 impl Default for CursorConfig {
@@ -316,6 +317,39 @@ impl Default for CursorConfig {
             style: CursorStyle::Block,
             blink: true,
             blink_rate_ms: 530,
+            trail: CursorTrailConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CursorTrailConfig {
+    pub enabled: bool,
+    #[serde(alias = "experimental_segmented")]
+    pub segmented: bool,
+    pub fast_decay_ms: u32,
+    pub slow_decay_ms: u32,
+    pub minimum_distance_x: u32,
+    pub minimum_distance_y: u32,
+    pub trigger_delay_ms: u32,
+    pub color: String,
+    #[serde(skip)]
+    pub parsed_color: Option<Color>,
+}
+
+impl Default for CursorTrailConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            segmented: false,
+            fast_decay_ms: 100,
+            slow_decay_ms: 400,
+            minimum_distance_x: 2,
+            minimum_distance_y: 2,
+            trigger_delay_ms: 50,
+            color: "cursor".to_string(),
+            parsed_color: None,
         }
     }
 }
@@ -652,17 +686,11 @@ pub enum StatusbarItem {
 fn default_tabs_format() -> String { " {index}{zoom} ".to_string() }
 fn default_tabs_zoom() -> String { "()".to_string() }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatusbarStyle {
     pub fg: Option<String>,
     pub bg: Option<String>,
-}
-
-impl Default for StatusbarStyle {
-    fn default() -> Self {
-        Self { fg: None, bg: None }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -888,6 +916,15 @@ impl ForgeConfig {
         self.window.height = self.window.height.clamp(100, 6000);
         self.window.opacity = self.window.opacity.clamp(0.0, 1.0);
         self.cursor.blink_rate_ms = self.cursor.blink_rate_ms.clamp(100, 2000);
+        self.cursor.trail.fast_decay_ms = self.cursor.trail.fast_decay_ms.clamp(1, 2_000);
+        self.cursor.trail.slow_decay_ms = self
+            .cursor
+            .trail
+            .slow_decay_ms
+            .clamp(self.cursor.trail.fast_decay_ms, 4_000);
+        self.cursor.trail.minimum_distance_x = self.cursor.trail.minimum_distance_x.min(1_000);
+        self.cursor.trail.minimum_distance_y = self.cursor.trail.minimum_distance_y.min(1_000);
+        self.cursor.trail.trigger_delay_ms = self.cursor.trail.trigger_delay_ms.min(1_000);
         if let Some(lines) = self.scrollback.lines {
             self.scrollback.lines = Some(lines.max(100)); // allow unbounded if None, but min 100
         }
@@ -922,6 +959,16 @@ impl ForgeConfig {
         self.theme.parsed_selection_bg = parse_c(&self.theme.selection_bg, "theme.selection_bg", default_theme.parsed_selection_bg);
         self.theme.parsed_pane_outline_active = parse_c(&self.theme.pane_outline_active, "theme.pane_outline_active", default_theme.parsed_pane_outline_active);
         self.theme.parsed_pane_outline_inactive = parse_c(&self.theme.pane_outline_inactive, "theme.pane_outline_inactive", default_theme.parsed_pane_outline_inactive);
+
+        self.cursor.trail.parsed_color = if self.cursor.trail.color.eq_ignore_ascii_case("cursor") {
+            None
+        } else {
+            Some(parse_c(
+                &self.cursor.trail.color,
+                "cursor.trail.color",
+                default_theme.parsed_cursor_color,
+            ))
+        };
 
         if let Some(ansi_colors) = self.theme.ansi_colors.take() {
             self.theme.parsed_ansi_colors = std::array::from_fn(|index| {
@@ -1156,5 +1203,87 @@ mod tests {
             invalid.theme.parsed_popup_background,
             ThemeConfig::default().parsed_popup_background
         );
+    }
+
+    #[test]
+    fn cursor_trail_defaults_disabled_with_balanced_decay() {
+        let config = ForgeConfig::default();
+
+        assert!(!config.cursor.trail.enabled);
+        assert!(!config.cursor.trail.segmented);
+        assert_eq!(config.cursor.trail.fast_decay_ms, 100);
+        assert_eq!(config.cursor.trail.slow_decay_ms, 400);
+        assert_eq!(config.cursor.trail.minimum_distance_x, 2);
+        assert_eq!(config.cursor.trail.minimum_distance_y, 2);
+        assert_eq!(config.cursor.trail.trigger_delay_ms, 50);
+        assert_eq!(config.cursor.trail.color, "cursor");
+        assert_eq!(config.cursor.trail.parsed_color, None);
+    }
+
+    #[test]
+    fn cursor_trail_toml_parses_and_normalizes_once() {
+        let mut config: ForgeConfig = toml::from_str(
+            r##"
+            [cursor.trail]
+            enabled = true
+            segmented = true
+            fast_decay_ms = 250
+            slow_decay_ms = 100
+            minimum_distance_x = 3
+            minimum_distance_y = 5
+            trigger_delay_ms = 75
+            color = "#ff8040c0"
+            "##,
+        )
+        .expect("cursor trail config should parse");
+
+        assert!(config.validate().is_empty());
+        assert!(config.cursor.trail.enabled);
+        assert!(config.cursor.trail.segmented);
+        assert_eq!(config.cursor.trail.fast_decay_ms, 250);
+        assert_eq!(config.cursor.trail.slow_decay_ms, 250);
+        assert_eq!(config.cursor.trail.minimum_distance_x, 3);
+        assert_eq!(config.cursor.trail.minimum_distance_y, 5);
+        assert_eq!(config.cursor.trail.trigger_delay_ms, 75);
+        assert_eq!(
+            config.cursor.trail.parsed_color,
+            Some(Color {
+                r: 255,
+                g: 128,
+                b: 64,
+                a: 192,
+            })
+        );
+    }
+
+    #[test]
+    fn cursor_trail_accepts_legacy_experimental_segmented_name() {
+        let config: ForgeConfig = toml::from_str(
+            r#"
+            [cursor.trail]
+            experimental_segmented = true
+            "#,
+        )
+        .expect("legacy segmented trail option should remain compatible");
+
+        assert!(config.cursor.trail.segmented);
+    }
+
+    #[test]
+    fn cursor_trail_rejects_invalid_custom_color() {
+        let mut config: ForgeConfig = toml::from_str(
+            r#"
+            [cursor.trail]
+            enabled = true
+            color = "not-a-color"
+            "#,
+        )
+        .expect("cursor trail config should parse structurally");
+
+        let errors = config.validate();
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            ConfigError::InvalidColor { path, .. } if path == "cursor.trail.color"
+        )));
     }
 }

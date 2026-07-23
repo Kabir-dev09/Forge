@@ -74,6 +74,10 @@ impl ShaperCache {
         self.cache.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
     pub fn shape_run(
         &mut self,
         key: TextRunKey,

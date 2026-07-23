@@ -429,6 +429,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
 }
 
 #[cfg(test)]
+// Pointer protocol dispatch remains grouped below the keyboard-focused tests.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

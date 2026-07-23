@@ -87,8 +87,8 @@ impl KeyStroke {
         // Handle the literal "+" key carefully since we split by "+"
         let (modifier_part, key_str) = if s.to_lowercase().ends_with("+plus") {
             (s[..s.len() - 5].trim().to_string(), "plus")
-        } else if s.ends_with("++") {
-            (s[..s.len() - 2].trim().to_string(), "+")
+        } else if let Some(modifiers) = s.strip_suffix("++") {
+            (modifiers.trim().to_string(), "+")
         } else {
             let mut parts: Vec<&str> = s.split('+').map(|p| p.trim()).collect();
             if parts.is_empty() {

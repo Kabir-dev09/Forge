@@ -81,7 +81,7 @@ fn bench_screen_scroll_and_clear() {
     run_for_duration("screen_scroll_and_clear", line.len(), || {
         screen.write_str(black_box(&line));
         screen.line_feed();
-        if screen.scrollback_len() % 128 == 0 {
+        if screen.scrollback_len().is_multiple_of(128) {
             screen.erase_screen();
         }
         black_box(screen.cursor);

@@ -140,4 +140,16 @@ mod tests {
         assert!(changes.command_completion_indicator);
         assert!(changes.any());
     }
+
+    #[test]
+    fn detects_cursor_trail_changes_for_runtime_reload() {
+        let old = ForgeConfig::default();
+        let mut new = old.clone();
+        new.cursor.trail.enabled = true;
+
+        let changes = ConfigChangeSet::between(&old, &new);
+
+        assert!(changes.cursor);
+        assert!(changes.any());
+    }
 }

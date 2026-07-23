@@ -1,11 +1,10 @@
-use std::collections::HashMap;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use forge_core::cell::Cell;
 use forge_core::color::Color;
 use forge_core::config_registry::CursorStyle;
-use forge_renderer::font::atlas::{GlyphAtlas, GlyphAtlasDescriptor, GlyphMetrics};
+use forge_renderer::font::atlas::GlyphAtlas;
 use forge_renderer::grid_tessellator::GridTessellator;
 
 const BENCH_DURATION: Duration = Duration::from_millis(250);
@@ -29,7 +28,6 @@ where
         elapsed
     );
 }
-
 
 fn grid(cols: usize, rows: usize) -> Vec<Vec<Cell>> {
     let fg = Color {
@@ -106,6 +104,7 @@ fn tessellate_once(
         false,
         None,
         0,
+        None,
         None,
     );
 

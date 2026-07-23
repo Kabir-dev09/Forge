@@ -5,8 +5,9 @@ use std::collections::HashMap;
 const ATLAS_COLUMNS: u32 = 128;
 const DYNAMIC_GLYPH_SLOTS: u32 = 1024;
 const ATLAS_CACHE_MAGIC: &[u8; 8] = b"FORGEFA1";
-const ATLAS_CACHE_VERSION: u32 = 2;
+const ATLAS_CACHE_VERSION: u32 = 3;
 const MAX_CACHED_ATLAS_BYTES: usize = 256 * 1024 * 1024;
+const SCROLLING_OVERFLOW_GLYPHS: [char; 4] = ['', '', '', ''];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontStyle {
@@ -442,6 +443,7 @@ fn static_atlas_chars(fast_mode: bool) -> Vec<char> {
         push_char_range(&mut chars, 0x20A0, 0x20CF); // Currency Symbols
         push_char_range(&mut chars, 0x2100, 0x214F); // Letterlike Symbols
         push_char_range(&mut chars, 0x2190, 0x21FF); // Arrows
+        chars.extend(SCROLLING_OVERFLOW_GLYPHS);
     }
 
     chars
@@ -690,6 +692,9 @@ impl GlyphAtlas {
         self.shaped_glyphs.get(&key)
     }
 
+    // Keep the borrowed font sources explicit; this is a hot path and a wrapper
+    // object would add plumbing without reducing state or improving ownership.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_dynamic_glyph(
         &mut self,
         key: GlyphKey,
@@ -845,6 +850,9 @@ mod tests {
         assert!(chars.contains(&'é'));
         assert!(chars.contains(&'→'));
         assert!(chars.contains(&'€'));
+        assert!(SCROLLING_OVERFLOW_GLYPHS
+            .iter()
+            .all(|glyph| chars.contains(glyph)));
         assert!(!chars.contains(&'Ω'));
         assert!(!chars.contains(&'─'));
         assert!(!chars.contains(&'█'));

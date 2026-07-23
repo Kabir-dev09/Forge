@@ -42,9 +42,9 @@ impl Color {
         static SRGB_LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
         let lut = SRGB_LUT.get_or_init(|| {
             let mut table = [0.0; 256];
-            for i in 0..=255 {
+            for (i, value) in table.iter_mut().enumerate() {
                 let f = i as f32 / 255.0;
-                table[i] = if f <= 0.04045 {
+                *value = if f <= 0.04045 {
                     f / 12.92
                 } else {
                     ((f + 0.055) / 1.055).powf(2.4)

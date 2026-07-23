@@ -28,6 +28,7 @@ impl Cell {
     pub const FLAG_UNDERLINE: u8 = 0b0000_0100;
     pub const FLAG_STRIKETHROUGH: u8 = 0b0000_1000;
     pub const FLAG_WIDE: u8 = 0b0001_0000;
+    pub const FLAG_INVERSE: u8 = 0b0010_0000;
 
     #[inline(always)]
     pub fn is_bold(&self) -> bool {
@@ -44,6 +45,10 @@ impl Cell {
     #[inline(always)]
     pub fn is_strikethrough(&self) -> bool {
         self.flags & Self::FLAG_STRIKETHROUGH != 0
+    }
+    #[inline(always)]
+    pub fn is_inverse(&self) -> bool {
+        self.flags & Self::FLAG_INVERSE != 0
     }
     #[inline(always)]
     pub fn width(&self) -> CellWidth {
@@ -83,6 +88,14 @@ impl Cell {
             self.flags |= Self::FLAG_STRIKETHROUGH;
         } else {
             self.flags &= !Self::FLAG_STRIKETHROUGH;
+        }
+    }
+    #[inline(always)]
+    pub fn set_inverse(&mut self, val: bool) {
+        if val {
+            self.flags |= Self::FLAG_INVERSE;
+        } else {
+            self.flags &= !Self::FLAG_INVERSE;
         }
     }
     #[inline(always)]
@@ -128,5 +141,17 @@ mod tests {
     fn test_default_cell_c() {
         let cell = Cell::default();
         assert_eq!(cell.c, ' ');
+    }
+
+    #[test]
+    fn inverse_flag_round_trips() {
+        let mut cell = Cell::default();
+        assert!(!cell.is_inverse());
+
+        cell.set_inverse(true);
+        assert!(cell.is_inverse());
+
+        cell.set_inverse(false);
+        assert!(!cell.is_inverse());
     }
 }

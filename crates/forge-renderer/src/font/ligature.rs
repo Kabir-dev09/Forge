@@ -21,7 +21,8 @@ impl LigatureStyleKey {
                 & (Cell::FLAG_BOLD
                     | Cell::FLAG_ITALIC
                     | Cell::FLAG_UNDERLINE
-                    | Cell::FLAG_STRIKETHROUGH),
+                    | Cell::FLAG_STRIKETHROUGH
+                    | Cell::FLAG_INVERSE),
         }
     }
 }
@@ -321,5 +322,17 @@ mod tests {
         let tokens = tokenize_ligature_candidates(&row("aa==bb"), 4, None, None, 0);
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].text, "aa==");
+    }
+
+    #[test]
+    fn inverse_video_is_part_of_the_ligature_style_key() {
+        let normal = cell('=');
+        let mut inverse = normal;
+        inverse.set_inverse(true);
+
+        assert_ne!(
+            LigatureStyleKey::from_cell(&normal),
+            LigatureStyleKey::from_cell(&inverse)
+        );
     }
 }

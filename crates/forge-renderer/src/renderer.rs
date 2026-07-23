@@ -1,3 +1,4 @@
+use super::cursor_trail::{CursorTrail, CursorTrailSample, CursorTrailVisual, TrailPoint};
 use super::font::{
     atlas::{
         DynamicGlyphInsertResult, GlyphAtlas, GlyphKey, ShapedGlyphInsertResult, ShapedGlyphKey,
@@ -17,6 +18,7 @@ use ash::{vk, Device, Entry, Instance};
 use forge_core::{config_registry::LigatureConfig, ForgeError, Result};
 use std::collections::{HashMap, HashSet};
 use std::ptr;
+use std::time::{Duration, Instant};
 
 const MIN_VERTEX_CAPACITY: usize = 100_000;
 const VERTICES_PER_CELL_BUDGET: usize = 18;
@@ -58,6 +60,8 @@ fn outline_segments_around_gap(
     ]
 }
 
+// Flat geometry keeps this per-pane border helper allocation-free.
+#[allow(clippy::too_many_arguments)]
 fn append_segmented_horizontal_outline(
     tessellator: &mut GridTessellator,
     vp_w: f32,
@@ -86,6 +90,8 @@ fn append_segmented_horizontal_outline(
     }
 }
 
+// Flat geometry keeps this per-pane border helper allocation-free.
+#[allow(clippy::too_many_arguments)]
 fn append_segmented_vertical_outline(
     tessellator: &mut GridTessellator,
     vp_w: f32,
@@ -184,6 +190,222 @@ fn full_scissor(extent: vk::Extent2D) -> vk::Rect2D {
         offset: vk::Offset2D { x: 0, y: 0 },
         extent,
     }
+}
+
+#[derive(Clone, Copy)]
+enum TrailClipEdge {
+    MinX(f32),
+    MaxX(f32),
+    MinY(f32),
+    MaxY(f32),
+}
+
+fn trail_point_inside(point: TrailPoint, edge: TrailClipEdge) -> bool {
+    match edge {
+        TrailClipEdge::MinX(value) => point.x >= value,
+        TrailClipEdge::MaxX(value) => point.x <= value,
+        TrailClipEdge::MinY(value) => point.y >= value,
+        TrailClipEdge::MaxY(value) => point.y <= value,
+    }
+}
+
+fn trail_edge_intersection(a: TrailPoint, b: TrailPoint, edge: TrailClipEdge) -> TrailPoint {
+    let (numerator, denominator) = match edge {
+        TrailClipEdge::MinX(value) | TrailClipEdge::MaxX(value) => (value - a.x, b.x - a.x),
+        TrailClipEdge::MinY(value) | TrailClipEdge::MaxY(value) => (value - a.y, b.y - a.y),
+    };
+    let t = if denominator.abs() <= f32::EPSILON {
+        0.0
+    } else {
+        (numerator / denominator).clamp(0.0, 1.0)
+    };
+    TrailPoint {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+    }
+}
+
+fn clip_trail_polygon(
+    input: &[TrailPoint; 8],
+    input_len: usize,
+    edge: TrailClipEdge,
+) -> ([TrailPoint; 8], usize) {
+    let mut output = [TrailPoint::default(); 8];
+    if input_len == 0 {
+        return (output, 0);
+    }
+    let mut output_len = 0;
+    let mut previous = input[input_len - 1];
+    let mut previous_inside = trail_point_inside(previous, edge);
+    for &current in &input[..input_len] {
+        let current_inside = trail_point_inside(current, edge);
+        if current_inside != previous_inside {
+            output[output_len] = trail_edge_intersection(previous, current, edge);
+            output_len += 1;
+        }
+        if current_inside {
+            output[output_len] = current;
+            output_len += 1;
+        }
+        previous = current;
+        previous_inside = current_inside;
+    }
+    (output, output_len)
+}
+
+fn append_trail_polygon(
+    vertices: &mut Vec<GlyphVertex>,
+    polygon: &[TrailPoint; 8],
+    len: usize,
+    vp_w: f32,
+    vp_h: f32,
+    fill: CursorTrailFill,
+) {
+    if len < 3 {
+        return;
+    }
+    let vertex = |point: TrailPoint| {
+        let (tex_coord, color, metadata) = match fill {
+            CursorTrailFill::Continuous { color } => ([-1.0, 0.0], color, color),
+            CursorTrailFill::Segmented {
+                color,
+                origin,
+                direction,
+                section_length,
+                section_count,
+            } => {
+                let distance = ((point.x - origin.x) * direction.x
+                    + (point.y - origin.y) * direction.y)
+                    .max(0.0)
+                    / section_length;
+                ([-60.0, distance], color, [section_count, 0.0, 0.0, 0.0])
+            }
+        };
+        GlyphVertex {
+            position: [
+                (point.x / vp_w) * 2.0 - 1.0,
+                (point.y / vp_h) * 2.0 - 1.0,
+            ],
+            tex_coord,
+            fg_color: color,
+            bg_color: metadata,
+        }
+    };
+    for index in 1..len - 1 {
+        vertices.push(vertex(polygon[0]));
+        vertices.push(vertex(polygon[index]));
+        vertices.push(vertex(polygon[index + 1]));
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CursorTrailFill {
+    Continuous {
+        color: [f32; 4],
+    },
+    Segmented {
+        color: [f32; 4],
+        origin: TrailPoint,
+        direction: TrailPoint,
+        section_length: f32,
+        section_count: f32,
+    },
+}
+
+fn cursor_trail_fill(visual: CursorTrailVisual) -> CursorTrailFill {
+    if !visual.segmented {
+        return CursorTrailFill::Continuous {
+            color: visual.color,
+        };
+    }
+
+    let origin = TrailPoint {
+        x: visual.cursor_rect.x + visual.cursor_rect.width * 0.5,
+        y: visual.cursor_rect.y + visual.cursor_rect.height * 0.5,
+    };
+    let tail_center = TrailPoint {
+        x: visual.corners.iter().map(|point| point.x).sum::<f32>() * 0.25,
+        y: visual.corners.iter().map(|point| point.y).sum::<f32>() * 0.25,
+    };
+    let mut dx = tail_center.x - origin.x;
+    let mut dy = tail_center.y - origin.y;
+    let mut distance = dx.hypot(dy);
+    if distance <= f32::EPSILON {
+        if let Some((point, farthest)) = visual
+            .corners
+            .iter()
+            .map(|point| (*point, (point.x - origin.x).hypot(point.y - origin.y)))
+            .max_by(|(_, first), (_, second)| first.total_cmp(second))
+        {
+            dx = point.x - origin.x;
+            dy = point.y - origin.y;
+            distance = farthest;
+        }
+    }
+    if distance <= f32::EPSILON {
+        return CursorTrailFill::Continuous {
+            color: visual.color,
+        };
+    }
+
+    let direction = TrailPoint {
+        x: dx / distance,
+        y: dy / distance,
+    };
+    // Project one terminal cell onto the trail axis. This gives horizontal,
+    // vertical, and diagonal bands the visual length of one block cursor.
+    let section_length = (direction.x.abs() * visual.cell_width.max(1.0)
+        + direction.y.abs() * visual.cell_height.max(1.0))
+    .max(1.0);
+    let farthest = visual
+        .corners
+        .iter()
+        .map(|point| {
+            ((point.x - origin.x) * direction.x + (point.y - origin.y) * direction.y).max(0.0)
+        })
+        .fold(0.0, f32::max);
+    let section_count = (farthest / section_length).ceil().max(1.0);
+
+    CursorTrailFill::Segmented {
+        color: visual.color,
+        origin,
+        direction,
+        section_length,
+        section_count,
+    }
+}
+
+fn append_cursor_trail(
+    vertices: &mut Vec<GlyphVertex>,
+    visual: CursorTrailVisual,
+    vp_w: f32,
+    vp_h: f32,
+) {
+    let fill = cursor_trail_fill(visual);
+    let mut source = [TrailPoint::default(); 8];
+    source[..4].copy_from_slice(&visual.corners);
+    let cursor = visual.cursor_rect;
+    let cursor_right = cursor.x + cursor.width;
+    let cursor_bottom = cursor.y + cursor.height;
+
+    // Four non-overlapping regions reproduce Kitty's destination-cursor mask
+    // without a separate shader or render pass.
+    let (left, left_len) = clip_trail_polygon(&source, 4, TrailClipEdge::MaxX(cursor.x));
+    append_trail_polygon(vertices, &left, left_len, vp_w, vp_h, fill);
+
+    let (right, right_len) =
+        clip_trail_polygon(&source, 4, TrailClipEdge::MinX(cursor_right));
+    append_trail_polygon(vertices, &right, right_len, vp_w, vp_h, fill);
+
+    let (middle_left, middle_left_len) =
+        clip_trail_polygon(&source, 4, TrailClipEdge::MinX(cursor.x));
+    let (middle, middle_len) =
+        clip_trail_polygon(&middle_left, middle_left_len, TrailClipEdge::MaxX(cursor_right));
+    let (top, top_len) = clip_trail_polygon(&middle, middle_len, TrailClipEdge::MaxY(cursor.y));
+    append_trail_polygon(vertices, &top, top_len, vp_w, vp_h, fill);
+    let (bottom, bottom_len) =
+        clip_trail_polygon(&middle, middle_len, TrailClipEdge::MinY(cursor_bottom));
+    append_trail_polygon(vertices, &bottom, bottom_len, vp_w, vp_h, fill);
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -499,6 +721,7 @@ pub struct Renderer {
     bold_italic_font_rasterizer: Option<FontRasterizer>,
     fallback_font_rasterizers: Vec<FontRasterizer>,
     font_px_size: f32,
+    cursor_trail: Option<CursorTrail>,
 
     pub cell_width: u32,
     pub cell_height: u32,
@@ -754,6 +977,29 @@ impl Renderer {
         self.ligature_shaper
             .set_max_entries(self.ligature_config.cache_entries);
         self.ligature_shaper.clear();
+    }
+
+    pub fn set_cursor_trail_config(
+        &mut self,
+        config: &forge_core::config_registry::CursorTrailConfig,
+    ) {
+        self.cursor_trail = if config.enabled {
+            CursorTrail::new(config, Instant::now())
+        } else {
+            None
+        };
+    }
+
+    pub fn cursor_trail_wants_redraw(&self, now: Instant) -> bool {
+        self.cursor_trail
+            .as_ref()
+            .is_some_and(|trail| trail.wants_redraw(now))
+    }
+
+    pub fn cursor_trail_next_wakeup(&self, now: Instant) -> Option<Duration> {
+        self.cursor_trail
+            .as_ref()
+            .and_then(|trail| trail.next_wakeup(now))
     }
 
     pub fn has_real_font_metrics(&self) -> bool {
@@ -1090,6 +1336,7 @@ impl Renderer {
             bold_italic_font_rasterizer: None,
             fallback_font_rasterizers: Vec::new(),
             font_px_size: baseline as f32,
+            cursor_trail: None,
             cell_width,
             cell_height,
             baseline,
@@ -1700,6 +1947,45 @@ impl Renderer {
         let vp_w = self.swapchain.extent.width as f32;
         let vp_h = self.swapchain.extent.height as f32;
 
+        let cursor_trail_visual = self.cursor_trail.as_mut().and_then(|trail| {
+            let sample = panes.iter().find_map(|pane| {
+                // `cursor == None` is the terminal's authoritative hidden state.
+                // Blink phase must not discard an in-flight trail.
+                let (cursor_col, cursor_row) = pane.cursor?;
+                if !pane.is_active
+                    || pane.pane_id.is_synthetic()
+                    || matches!(pane.layer, PaneRenderLayer::AfterModalDim | PaneRenderLayer::Modal)
+                {
+                    return None;
+                }
+                let origin_x = if pane.apply_pane_padding {
+                    pane.rect.x + pane_padding.left as f32
+                } else {
+                    pane.rect.x
+                };
+                let origin_y = if pane.apply_pane_padding {
+                    pane.rect.y + pane_padding.top as f32
+                } else {
+                    pane.rect.y
+                };
+                Some(CursorTrailSample {
+                    pane_id: pane.pane_id,
+                    pane_rect: pane.rect,
+                    layer: pane.layer,
+                    origin_x,
+                    origin_y,
+                    cell_width: effective_cell_w,
+                    cell_height: effective_cell_h,
+                    cursor_col,
+                    cursor_row,
+                    cursor_style: pane.cursor_style,
+                    cursor_color: pane.cursor_color,
+                    pane_opacity: pane.opacity,
+                })
+            });
+            trail.update(sample, Instant::now())
+        });
+
         let ligatures_enabled = self.ligature_config.enabled && self.font_rasterizer.is_some();
         let mut shaper = std::mem::take(&mut self.ligature_shaper);
         {
@@ -1894,6 +2180,26 @@ impl Renderer {
                     is_opaque: false,
                 });
             }
+            if cursor_trail_visual.is_some_and(|trail| {
+                trail.layer == PaneRenderLayer::Normal && trail.pane_id == pane.pane_id
+            }) {
+                let start = self.tessellator.vertices.len();
+                append_cursor_trail(
+                    &mut self.tessellator.vertices,
+                    cursor_trail_visual.unwrap(),
+                    vp_w,
+                    vp_h,
+                );
+                let count = self.tessellator.vertices.len() - start;
+                if count > 0 {
+                    draw_batches.push(RenderDrawBatch {
+                        start,
+                        count,
+                        scissor,
+                        is_opaque: false,
+                    });
+                }
+            }
         }
 
         let overlay_start = self.tessellator.vertices.len();
@@ -2069,6 +2375,27 @@ impl Renderer {
                     scissor,
                     is_opaque: false,
                 });
+            }
+
+            if cursor_trail_visual.is_some_and(|trail| {
+                trail.layer == PaneRenderLayer::Floating && trail.pane_id == pane.pane_id
+            }) {
+                let start = self.tessellator.vertices.len();
+                append_cursor_trail(
+                    &mut self.tessellator.vertices,
+                    cursor_trail_visual.unwrap(),
+                    vp_w,
+                    vp_h,
+                );
+                let count = self.tessellator.vertices.len() - start;
+                if count > 0 {
+                    draw_batches.push(RenderDrawBatch {
+                        start,
+                        count,
+                        scissor,
+                        is_opaque: false,
+                    });
+                }
             }
 
             if outline_width > 0.0 && !pane.pane_id.is_synthetic() {
@@ -2321,6 +2648,8 @@ impl Renderer {
         Ok(())
     }
 
+    // The independently optional font styles are explicit ownership transfers.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_font_data(
         &mut self,
         rasterizer: FontRasterizer,
@@ -2466,6 +2795,7 @@ mod tests {
         assert!(rect_to_scissor(PaneRenderRect::new(10.0, 10.0, 0.0, 5.0), extent).is_none());
         assert!(rect_to_scissor(PaneRenderRect::new(120.0, 10.0, 4.0, 5.0), extent).is_none());
     }
+
 
     #[test]
     fn command_indicator_text_clip_stays_clear_of_moving_dot() {
@@ -2675,5 +3005,112 @@ mod tests {
 
         let distant = PaneRenderRect::new(51.0, 0.0, 40.0, 30.0);
         assert_eq!(adjacent_pane_divider(left, distant, 10.0, 20.0), None);
+    }
+
+    #[test]
+    fn cursor_trail_geometry_preserves_full_height_and_masks_destination_cursor() {
+        let visual = CursorTrailVisual {
+            pane_id: PaneRenderId(1),
+            corners: [
+                TrailPoint { x: 10.0, y: 20.0 },
+                TrailPoint { x: 110.0, y: 20.0 },
+                TrailPoint { x: 110.0, y: 40.0 },
+                TrailPoint { x: 10.0, y: 40.0 },
+            ],
+            cursor_rect: PaneRenderRect::new(100.0, 20.0, 10.0, 20.0),
+            pane_rect: PaneRenderRect::new(0.0, 0.0, 200.0, 100.0),
+            layer: PaneRenderLayer::Normal,
+            color: [0.5, 0.6, 0.7, 1.0],
+            cell_width: 10.0,
+            cell_height: 20.0,
+            segmented: false,
+        };
+        let mut vertices = Vec::new();
+        append_cursor_trail(&mut vertices, visual, 200.0, 100.0);
+
+        assert!(!vertices.is_empty());
+        let points: Vec<_> = vertices
+            .iter()
+            .map(|vertex| TrailPoint {
+                x: (vertex.position[0] + 1.0) * 100.0,
+                y: (vertex.position[1] + 1.0) * 50.0,
+            })
+            .collect();
+        let min_y = points.iter().map(|point| point.y).fold(f32::MAX, f32::min);
+        let max_y = points.iter().map(|point| point.y).fold(f32::MIN, f32::max);
+        assert!((min_y - 20.0).abs() < 0.001);
+        assert!((max_y - 40.0).abs() < 0.001);
+        assert!(points.iter().all(|point| {
+            point.x <= visual.cursor_rect.x
+                || point.x >= visual.cursor_rect.x + visual.cursor_rect.width
+                || point.y <= visual.cursor_rect.y
+                || point.y >= visual.cursor_rect.y + visual.cursor_rect.height
+        }));
+        assert!(vertices
+            .iter()
+            .all(|vertex| vertex.tex_coord == [-1.0, 0.0]));
+    }
+
+    #[test]
+    fn segmented_cursor_trail_reuses_geometry_with_cell_sized_sections() {
+        let visual = CursorTrailVisual {
+            pane_id: PaneRenderId(1),
+            corners: [
+                TrailPoint { x: 10.0, y: 20.0 },
+                TrailPoint { x: 110.0, y: 20.0 },
+                TrailPoint { x: 110.0, y: 40.0 },
+                TrailPoint { x: 10.0, y: 40.0 },
+            ],
+            cursor_rect: PaneRenderRect::new(100.0, 20.0, 10.0, 20.0),
+            pane_rect: PaneRenderRect::new(0.0, 0.0, 200.0, 100.0),
+            layer: PaneRenderLayer::Normal,
+            color: [0.5, 0.6, 0.7, 0.8],
+            cell_width: 10.0,
+            cell_height: 20.0,
+            segmented: true,
+        };
+
+        let fill = cursor_trail_fill(visual);
+        let CursorTrailFill::Segmented {
+            section_length,
+            section_count,
+            ..
+        } = fill
+        else {
+            panic!("segmented mode should select segmented trail metadata");
+        };
+        assert!((section_length - visual.cell_width).abs() < 0.001);
+        assert_eq!(section_count, 10.0);
+
+        let mut vertices = Vec::new();
+        append_cursor_trail(&mut vertices, visual, 200.0, 100.0);
+        assert!(!vertices.is_empty());
+        assert!(vertices
+            .iter()
+            .all(|vertex| vertex.tex_coord[0] == -60.0));
+        assert!(vertices
+            .iter()
+            .all(|vertex| vertex.bg_color == [section_count, 0.0, 0.0, 0.0]));
+        assert!(vertices
+            .iter()
+            .all(|vertex| vertex.fg_color == visual.color));
+    }
+
+    #[test]
+    fn cursor_trail_clipping_uses_fixed_stack_polygons() {
+        let source = [
+            TrailPoint { x: 0.0, y: 0.0 },
+            TrailPoint { x: 20.0, y: 0.0 },
+            TrailPoint { x: 20.0, y: 20.0 },
+            TrailPoint { x: 0.0, y: 20.0 },
+            TrailPoint::default(),
+            TrailPoint::default(),
+            TrailPoint::default(),
+            TrailPoint::default(),
+        ];
+        let (clipped, len) = clip_trail_polygon(&source, 4, TrailClipEdge::MaxX(8.0));
+
+        assert_eq!(len, 4);
+        assert!(clipped[..len].iter().all(|point| point.x <= 8.0));
     }
 }
