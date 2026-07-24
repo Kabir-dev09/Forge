@@ -17,6 +17,11 @@ fn init_logging() {
 }
 
 fn main() {
+    let cli_action = cli::parse_env();
+    if cli_action != cli::Action::Terminal {
+        std::process::exit(cli::execute(cli_action));
+    }
+
     init_logging();
     forge_core::crash::install_panic_handler();
 
@@ -35,6 +40,7 @@ fn main() {
     }
 }
 
+mod cli;
 pub mod confirm_modal;
 pub mod context_menu;
 pub mod event_loop;
