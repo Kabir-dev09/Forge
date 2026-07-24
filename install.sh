@@ -394,6 +394,48 @@ install_binary() {
     [ -x "$LINK_PATH" ] || die "installed forge command is not executable"
 }
 
+install_niri_center_rule() {
+    case ${NIRI_CONFIG:-} in
+        /*) niri_config=$NIRI_CONFIG ;;
+        *)
+            case ${XDG_CONFIG_HOME:-} in
+                /*) config_home=${XDG_CONFIG_HOME%/} ;;
+                *) config_home=$HOME/.config ;;
+            esac
+            niri_config=$config_home/niri/config.kdl
+            ;;
+    esac
+    [ -f "$niri_config" ] || return 0
+
+    rule_begin='// Forge terminal centered-launch rule'
+    if grep -Fqx "$rule_begin" "$niri_config"; then
+        note "Forge's Niri centered-launch rule is already installed"
+        return 0
+    fi
+
+    USER_STAGE=$(mktemp "${niri_config}.forge-install.XXXXXX") ||
+        die "could not stage the Niri centered-launch rule"
+    cat "$niri_config" >"$USER_STAGE" ||
+        die "could not copy $niri_config for update"
+    if [ -s "$USER_STAGE" ] && [ "$(tail -c 1 "$USER_STAGE" | wc -l)" -eq 0 ]; then
+        printf '\n' >>"$USER_STAGE"
+    fi
+    cat >>"$USER_STAGE" <<'EOF'
+// Forge terminal centered-launch rule
+window-rule {
+    match app-id=r#"^dev\.forge\.terminal\.centered$"#
+    open-floating true
+}
+// End Forge terminal centered-launch rule
+EOF
+    chmod --reference="$niri_config" "$USER_STAGE" ||
+        die "could not preserve permissions for $niri_config"
+    mv -f "$USER_STAGE" "$niri_config" ||
+        die "could not install the Niri centered-launch rule"
+    USER_STAGE=
+    note "Installed Forge's Niri centered-launch rule"
+}
+
 remove_user_tree() {
     path=$1
     description=$2
@@ -572,6 +614,7 @@ note "$ARTIFACT"
 
 stage "Installing Forge"
 install_binary "$ARTIFACT"
+install_niri_center_rule
 
 printf '\n%bForge installed successfully.%b\n' "$GREEN$BOLD" "$RESET"
 printf '  Binary: %s\n' "$INSTALL_PATH"

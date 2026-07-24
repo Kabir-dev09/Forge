@@ -10,3 +10,4 @@ toml = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 crossbeam-channel = { workspace = true }
+serde_ignored = "0.1"

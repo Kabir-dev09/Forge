@@ -25,6 +25,8 @@ height = 600
 opacity = 0.9
 title = "Forge"
 decorations = true
+# Center once after launch on Niri; other Wayland compositors retain normal placement.
+center_on_launch = false
 padding_balance = "center"
 gap = 10
 pane_outline_width = 1.0

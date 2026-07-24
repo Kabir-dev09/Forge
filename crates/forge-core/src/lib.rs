@@ -4,6 +4,7 @@ pub mod bindings;
 pub mod cell;
 pub mod color;
 pub mod config_registry;
+mod config_validation;
 pub mod crash;
 pub mod error;
 pub mod geometry;

@@ -2224,14 +2224,16 @@ fn runtime_reload_config(
         || requested.window.height != current.window.height
         || requested.window.title != current.window.title
         || requested.window.decorations != current.window.decorations
+        || requested.window.center_on_launch != current.window.center_on_launch
     {
         tracing::warn!(
-            "Config option window size/title/decorations requires restart; keeping current values."
+            "Config option window size/title/decorations/center_on_launch requires restart; keeping current values."
         );
         requested.window.width = current.window.width;
         requested.window.height = current.window.height;
         requested.window.title = current.window.title.clone();
         requested.window.decorations = current.window.decorations;
+        requested.window.center_on_launch = current.window.center_on_launch;
     }
 
     requested
@@ -6234,6 +6236,7 @@ mod metric_tests {
         requested.font.size = current.font.size + 2.0;
         requested.shell.program = "/bin/other-shell".to_string();
         requested.window.width = current.window.width + 100;
+        requested.window.center_on_launch = true;
         requested.window.opacity = 0.42;
         requested.theme.parsed_background.r = requested.theme.parsed_background.r.wrapping_add(1);
 
@@ -6243,6 +6246,10 @@ mod metric_tests {
         assert_eq!(applied.font.size, current.font.size);
         assert_eq!(applied.shell, current.shell);
         assert_eq!(applied.window.width, current.window.width);
+        assert_eq!(
+            applied.window.center_on_launch,
+            current.window.center_on_launch
+        );
         assert_eq!(applied.window.opacity, 0.42);
         assert_ne!(
             applied.theme.parsed_background,

@@ -9,7 +9,21 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct LaunchOptions {
     pub fullscreen: bool,
+    pub config_path: Option<PathBuf>,
+    pub config_overrides: Vec<ConfigOverride>,
     pub command: Option<LaunchCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigOverride {
+    pub key: String,
+    pub value: String,
+}
+
+impl LaunchOptions {
+    pub fn has_explicit_config(&self) -> bool {
+        self.config_path.is_some() || !self.config_overrides.is_empty()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -31,6 +45,10 @@ pub enum CliError {
     UnknownArgument(OsString),
     UnexpectedArgument(OsString),
     MissingCommand,
+    MissingConfigPath,
+    DuplicateConfigPath,
+    MissingConfigOverride,
+    InvalidConfigOverride(String),
     InvalidCommand(String),
     ExecutableNotFound(String),
 }
@@ -61,6 +79,51 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Action {
             launch.fullscreen = true;
             continue;
         }
+        if argument == OsStr::new("--config") || argument == OsStr::new("-c") {
+            if launch.config_path.is_some() {
+                return Action::Error(CliError::DuplicateConfigPath);
+            }
+            let Some(path) = args.next() else {
+                return Action::Error(CliError::MissingConfigPath);
+            };
+            if path.is_empty() || is_forge_option(&path) {
+                return Action::Error(CliError::MissingConfigPath);
+            }
+            launch.config_path = Some(PathBuf::from(path));
+            continue;
+        }
+        if argument == OsStr::new("--set") {
+            let Some(assignment) = args.next() else {
+                return Action::Error(CliError::MissingConfigOverride);
+            };
+            if is_forge_option(&assignment) {
+                return Action::Error(CliError::MissingConfigOverride);
+            }
+            let assignment = match assignment.into_string() {
+                Ok(assignment) => assignment,
+                Err(_) => {
+                    return Action::Error(CliError::InvalidConfigOverride(
+                        "the assignment is not valid UTF-8".to_string(),
+                    ));
+                }
+            };
+            let Some((key, value)) = assignment.split_once('=') else {
+                return Action::Error(CliError::InvalidConfigOverride(assignment));
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if key.is_empty()
+                || value.is_empty()
+                || key.split('.').any(|segment| segment.is_empty())
+            {
+                return Action::Error(CliError::InvalidConfigOverride(assignment));
+            }
+            launch.config_overrides.push(ConfigOverride {
+                key: key.to_string(),
+                value: value.to_string(),
+            });
+            continue;
+        }
         if argument == OsStr::new("--execute") || argument == OsStr::new("-e") {
             let command_arguments: Vec<_> = args.collect();
             return match parse_launch_command(command_arguments) {
@@ -75,6 +138,24 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Action {
     }
 
     Action::Terminal(launch)
+}
+
+fn is_forge_option(argument: &OsStr) -> bool {
+    matches!(
+        argument.to_str(),
+        Some(
+            "--help"
+                | "-h"
+                | "--version"
+                | "-v"
+                | "--fullscreen"
+                | "--config"
+                | "-c"
+                | "--set"
+                | "--execute"
+                | "-e"
+        )
+    )
 }
 
 fn parse_launch_command(arguments: Vec<OsString>) -> Result<LaunchCommand, CliError> {
@@ -236,6 +317,20 @@ pub fn exit_with_error(error: CliError) -> ! {
     std::process::exit(execute(Action::Error(error)))
 }
 
+pub fn exit_with_config_error(error: &dyn std::fmt::Display) -> ! {
+    let styled = styling_enabled(&io::stderr());
+    let (reset, bold, red) = if styled {
+        ("\x1b[0m", "\x1b[1m", "\x1b[31m")
+    } else {
+        ("", "", "")
+    };
+    let _ = writeln!(
+        io::stderr().lock(),
+        "{bold}{red}forge: error:{reset} {error}"
+    );
+    std::process::exit(2)
+}
+
 fn styling_enabled(stream: &impl IsTerminal) -> bool {
     stream.is_terminal()
         && std::env::var_os("NO_COLOR").is_none()
@@ -294,13 +389,35 @@ fn render_help(styled: bool) -> String {
     );
     let _ = writeln!(
         output,
+        "  {green}-c, --config{reset} <PATH>     Use a specific configuration file"
+    );
+    let _ = writeln!(
+        output,
+        "      {green}--set{reset} <KEY>=<VALUE> Override a configuration value; repeatable"
+    );
+    let _ = writeln!(
+        output,
         "  {green}-e, --execute{reset} <PROGRAM> Launch a program with all remaining arguments\n"
+    );
+    let _ = writeln!(
+        output,
+        "{dim}Relative configuration paths use the current working directory.{reset}\n"
     );
     let _ = writeln!(output, "{bold}{heading}Examples:{reset}");
     let _ = writeln!(output, "  forge -e fish");
     let _ = writeln!(output, "  forge -e nvim README.md");
     let _ = writeln!(output, "  forge --execute \"cargo run --release\"");
     let _ = writeln!(output, "  forge --fullscreen -e btop");
+    let _ = writeln!(output, "  forge --config gaming.toml");
+    let _ = writeln!(output, "  forge --set font.size=15");
+    let _ = writeln!(
+        output,
+        "  forge --set 'font.family=\"Fira Code\"' --set window.opacity=0.9"
+    );
+    let _ = writeln!(
+        output,
+        "  forge -c coding.toml --set font.size=15 -e nvim README.md"
+    );
     output
 }
 
@@ -318,6 +435,14 @@ fn render_error(error: &CliError, styled: bool) -> String {
             format!("unexpected argument '{}'", argument.to_string_lossy())
         }
         CliError::MissingCommand => "-e/--execute requires a program".to_string(),
+        CliError::MissingConfigPath => "--config requires a file path".to_string(),
+        CliError::DuplicateConfigPath => "--config may only be specified once".to_string(),
+        CliError::MissingConfigOverride => {
+            "--set requires an assignment in the form <key>=<value>".to_string()
+        }
+        CliError::InvalidConfigOverride(assignment) => {
+            format!("invalid configuration override '{assignment}'; expected <key>=<value>")
+        }
         CliError::InvalidCommand(reason) => format!("invalid command: {reason}"),
         CliError::ExecutableNotFound(program) => {
             format!("executable '{program}' was not found or is not executable")
@@ -408,6 +533,84 @@ mod tests {
     }
 
     #[test]
+    fn config_aliases_select_the_same_path() {
+        let Action::Terminal(short) = parse_strs(&["-c", "gaming.toml"]) else {
+            panic!("expected terminal launch")
+        };
+        let Action::Terminal(long) = parse_strs(&["--config", "gaming.toml"]) else {
+            panic!("expected terminal launch")
+        };
+        assert_eq!(short.config_path, long.config_path);
+        assert_eq!(short.config_path, Some(PathBuf::from("gaming.toml")));
+    }
+
+    #[test]
+    fn config_overrides_are_collected_in_order() {
+        let Action::Terminal(options) = parse_strs(&[
+            "--set",
+            "font.size=14",
+            "--set",
+            "font.family=\"Fira Code\"",
+        ]) else {
+            panic!("expected terminal launch")
+        };
+        assert_eq!(
+            options.config_overrides,
+            [
+                ConfigOverride {
+                    key: "font.size".to_string(),
+                    value: "14".to_string(),
+                },
+                ConfigOverride {
+                    key: "font.family".to_string(),
+                    value: "\"Fira Code\"".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn config_options_stop_at_execute_boundary() {
+        let (options, command) = command(parse_strs(&[
+            "--config",
+            "coding.toml",
+            "--set",
+            "font.size=15",
+            "-e",
+            "nvim",
+            "--set",
+            "child=value",
+        ]));
+        assert_eq!(options.config_path, Some(PathBuf::from("coding.toml")));
+        assert_eq!(options.config_overrides.len(), 1);
+        assert_eq!(command.args, ["--set", "child=value"]);
+    }
+
+    #[test]
+    fn invalid_config_arguments_are_rejected() {
+        assert_eq!(
+            parse_strs(&["--config"]),
+            Action::Error(CliError::MissingConfigPath)
+        );
+        assert_eq!(
+            parse_strs(&["-c", "a.toml", "--config", "b.toml"]),
+            Action::Error(CliError::DuplicateConfigPath)
+        );
+        assert_eq!(
+            parse_strs(&["--set"]),
+            Action::Error(CliError::MissingConfigOverride)
+        );
+        assert!(matches!(
+            parse_strs(&["--set", "font.size"]),
+            Action::Error(CliError::InvalidConfigOverride(_))
+        ));
+        assert!(matches!(
+            parse_strs(&["--set", "=14"]),
+            Action::Error(CliError::InvalidConfigOverride(_))
+        ));
+    }
+
+    #[test]
     fn malformed_quoted_commands_are_rejected() {
         assert!(matches!(
             parse_strs(&["-e", "nvim \"unterminated"]),
@@ -432,6 +635,8 @@ mod tests {
         let help = render_help(false);
         assert!(!help.contains('\x1b'));
         assert!(help.contains("-e, --execute"));
+        assert!(help.contains("-c, --config"));
+        assert!(help.contains("--set"));
         assert!(help.contains("forge --fullscreen -e btop"));
         assert!(help.contains("forge --execute \"cargo run --release\""));
     }

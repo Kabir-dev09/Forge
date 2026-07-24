@@ -28,13 +28,14 @@ impl WaylandWindow {
         qh: &QueueHandle<WaylandState>,
         initial_size: Size,
         title: &str,
+        app_id: &str,
     ) -> Result<Self> {
         let surface = compositor.create_surface(qh, ());
         let xdg_surface = xdg_wm_base.get_xdg_surface(&surface, qh, ());
         let xdg_toplevel = xdg_surface.get_toplevel(qh, ());
 
         xdg_toplevel.set_title(title.to_string());
-        xdg_toplevel.set_app_id("dev.forge.terminal".to_string());
+        xdg_toplevel.set_app_id(app_id.to_string());
 
         let decoration = if let Some(mgr) = decoration_manager {
             let decor = mgr.get_toplevel_decoration(&xdg_toplevel, qh, ());

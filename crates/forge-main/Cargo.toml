@@ -23,6 +23,8 @@ memmap2 = { workspace = true }
 wayland-backend = { version = "0.3.15", features = ["client_system"] }
 libc = "0.2.186"
 dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 crossbeam-channel = { workspace = true }
 wayland-protocols-plasma = { version = "0.3.12", features = ["client", "wayland-client"] }
 rayon = "1.12.0"

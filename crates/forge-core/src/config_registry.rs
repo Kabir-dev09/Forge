@@ -9,6 +9,8 @@ pub enum ConfigError {
     InvalidColor { path: String, value: String },
     InvalidKeybinding { key: String, action: String, reason: String },
     InvalidEnvVar { value: String },
+    OutOfRange { path: String, value: String, expected: String },
+    InvalidValue { path: String, value: String, reason: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -17,6 +19,8 @@ impl fmt::Display for ConfigError {
             Self::InvalidColor { path, value } => write!(f, "Invalid color at {}: {}", path, value),
             Self::InvalidKeybinding { key, action, reason } => write!(f, "Invalid keybinding {}={} ({})", key, action, reason),
             Self::InvalidEnvVar { value } => write!(f, "Invalid environment variable format (expected KEY=VALUE): {}", value),
+            Self::OutOfRange { path, value, expected } => write!(f, "{} must be {}, but received {}", path, expected, value),
+            Self::InvalidValue { path, value, reason } => write!(f, "Invalid value for {}: {} ({})", path, value, reason),
         }
     }
 }
@@ -30,6 +34,7 @@ pub struct EarlyWindowConfig {
     pub height: u32,
     pub opacity: f32,
     pub decorations: bool,
+    pub center_on_launch: bool,
 }
 
 impl Default for EarlyWindowConfig {
@@ -39,6 +44,7 @@ impl Default for EarlyWindowConfig {
             height: 600,
             opacity: 1.0,
             decorations: true,
+            center_on_launch: false,
         }
     }
 }
@@ -236,6 +242,7 @@ impl Default for PaddingConfig {
 pub struct WindowConfig {
     pub width: u32,
     pub height: u32,
+    pub center_on_launch: bool,
     pub padding: PaddingConfig,
     pub pane_padding: PaddingConfig,
     pub center_grid: bool, // replacing padding_balance
@@ -251,6 +258,7 @@ impl Default for WindowConfig {
         Self {
             width: 800,
             height: 600,
+            center_on_launch: false,
             padding: PaddingConfig::default(),
             pane_padding: PaddingConfig {
                 top: 0,
@@ -1077,6 +1085,15 @@ impl ForgeConfig {
 mod tests {
     use super::*;
     use crate::bindings::modifiers;
+
+    #[test]
+    fn center_on_launch_is_disabled_by_default_and_available_to_early_config() {
+        assert!(!ForgeConfig::default().window.center_on_launch);
+
+        let early: EarlyStartupConfig =
+            toml::from_str("[window]\ncenter_on_launch = true\n").unwrap();
+        assert!(early.window.center_on_launch);
+    }
 
     #[test]
     fn default_ctrl_shift_d_docks_floating_pane() {

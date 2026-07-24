@@ -33,3 +33,14 @@ fn test_all_sixteen_ansi_array_entries_load_in_order() {
         );
     }
 }
+
+#[test]
+fn window_center_on_launch_defaults_off_and_parses_boolean() {
+    let default_config: forge_core::config_registry::ForgeConfig =
+        toml::from_str(include_str!("default_config.toml")).unwrap();
+    assert!(!default_config.window.center_on_launch);
+
+    let enabled: forge_core::config_registry::ForgeConfig =
+        toml::from_str("[window]\ncenter_on_launch = true\n").unwrap();
+    assert!(enabled.window.center_on_launch);
+}

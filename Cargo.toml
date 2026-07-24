@@ -35,3 +35,4 @@ unicode-width = { version = "0.1" }
 vte = { version = "0.13" }
 crossbeam-channel = { version = "0.5" }
 dirs = "5.0"
+serde_json = "1.0"

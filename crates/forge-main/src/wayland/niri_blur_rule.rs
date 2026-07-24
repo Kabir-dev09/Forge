@@ -1,3 +1,4 @@
+use super::launch_position::CENTERED_FORGE_APP_ID;
 use forge_core::config_registry::BlurConfig;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -6,17 +7,21 @@ use std::path::Path;
 const FORGE_APP_ID: &str = "dev.forge.terminal";
 const MANAGED_RULE_BEGIN: &str = "// Forge terminal compositor blur rule";
 const MANAGED_RULE_END: &str = "// End Forge terminal compositor blur rule";
+const CENTER_RULE_BEGIN: &str = "// Forge terminal centered-launch rule";
+const CENTER_RULE_END: &str = "// End Forge terminal centered-launch rule";
+const CENTERED_APP_ID_REGEX: &str = r"dev\.forge\.terminal\.centered";
 
-pub fn ensure_rule_after_launch(config: &BlurConfig) {
-    if !config.enabled || !is_niri_session() {
+pub fn ensure_rules_after_launch(blur: &BlurConfig, center_on_launch: bool) {
+    if (!blur.enabled && !center_on_launch) || !is_niri_session() {
         return;
     }
 
+    let ensure_blur = blur.enabled;
     std::thread::Builder::new()
-        .name("forge-niri-blur-rule".to_string())
-        .spawn(|| {
-            if let Err(err) = ensure_rule_in_default_config() {
-                tracing::debug!(?err, "Unable to ensure Niri blur window-rule");
+        .name("forge-niri-rules".to_string())
+        .spawn(move || {
+            if let Err(err) = ensure_rules_in_default_config(ensure_blur, center_on_launch) {
+                tracing::debug!(?err, "Unable to ensure Forge's Niri window rules");
             }
         })
         .ok();
@@ -34,11 +39,18 @@ fn env_contains_niri(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn ensure_rule_in_default_config() -> std::io::Result<()> {
+fn ensure_rules_in_default_config(blur: bool, center_on_launch: bool) -> std::io::Result<()> {
     let Some(config_dir) = dirs::config_dir() else {
         return Ok(());
     };
-    ensure_rule_in_file(&config_dir.join("niri/config.kdl"))
+    let path = config_dir.join("niri/config.kdl");
+    if blur {
+        ensure_rule_in_file(&path)?;
+    }
+    if center_on_launch {
+        ensure_center_rule_in_file(&path)?;
+    }
+    Ok(())
 }
 
 fn ensure_rule_in_file(path: &Path) -> std::io::Result<()> {
@@ -69,6 +81,34 @@ fn has_forge_blur_rule(contents: &str) -> bool {
         block.contains(FORGE_APP_ID)
             && block.contains("background-effect")
             && block.contains("blur true")
+    })
+}
+
+fn ensure_center_rule_in_file(path: &Path) -> std::io::Result<()> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    if has_center_rule(&contents) {
+        return Ok(());
+    }
+
+    let separator = if contents.ends_with('\n') { "" } else { "\n" };
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    file.write_all(separator.as_bytes())?;
+    file.write_all(center_rule().as_bytes())
+}
+
+fn has_center_rule(contents: &str) -> bool {
+    if contents.contains(CENTER_RULE_BEGIN) && contents.contains(CENTER_RULE_END) {
+        return true;
+    }
+
+    window_rule_blocks(contents).any(|block| {
+        (block.contains(CENTERED_FORGE_APP_ID) || block.contains(CENTERED_APP_ID_REGEX))
+            && block.contains("open-floating true")
     })
 }
 
@@ -120,6 +160,18 @@ window-rule {{
 }}
 {MANAGED_RULE_END}
 "#
+    )
+}
+
+fn center_rule() -> String {
+    format!(
+        r##"{CENTER_RULE_BEGIN}
+window-rule {{
+    match app-id=r#"^dev\.forge\.terminal\.centered$"#
+    open-floating true
+}}
+{CENTER_RULE_END}
+"##
     )
 }
 
@@ -190,6 +242,30 @@ window-rule {
 
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents.matches(FORGE_APP_ID).count(), 1);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn centered_launch_rule_opens_only_the_dedicated_app_id_as_floating() {
+        let rule = center_rule();
+
+        assert!(rule.contains(r"^dev\.forge\.terminal\.centered$"));
+        assert!(rule.contains("open-floating true"));
+        assert!(!rule.contains(&format!("^{FORGE_APP_ID}$")));
+    }
+
+    #[test]
+    fn appends_centered_launch_rule_once() {
+        let path = temp_config_path();
+        fs::write(&path, "window-rule {\n    match app-id=\"other\"\n}\n").unwrap();
+
+        ensure_center_rule_in_file(&path).unwrap();
+        ensure_center_rule_in_file(&path).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.matches(CENTER_RULE_BEGIN).count(), 1);
+        assert!(has_center_rule(&contents));
 
         let _ = fs::remove_file(path);
     }

@@ -26,11 +26,19 @@ fn main() {
             cli::exit_with_error(error);
         }
     }
+    let prepared_config = if launch_options.has_explicit_config() {
+        match prepare_explicit_config(&launch_options) {
+            Ok(config) => Some(config),
+            Err(error) => cli::exit_with_config_error(&error),
+        }
+    } else {
+        None
+    };
 
     init_logging();
     forge_core::crash::install_panic_handler();
 
-    let result = std::panic::catch_unwind(|| run(launch_options));
+    let result = std::panic::catch_unwind(|| run(launch_options, prepared_config));
 
     match result {
         Ok(Ok(())) => {}
@@ -45,6 +53,98 @@ fn main() {
     }
 }
 
+struct PreparedConfig {
+    source: forge_config::actor::ConfigSource,
+    config: forge_core::config_registry::ForgeConfig,
+    early: forge_core::config_registry::EarlyStartupConfig,
+}
+
+fn default_config_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_default()
+        .join("forge/config.toml")
+}
+
+fn prepare_explicit_config(
+    options: &cli::LaunchOptions,
+) -> Result<PreparedConfig, forge_config::imports::ConfigLoadError> {
+    let custom_path = options.config_path.is_some();
+    let path = match options.config_path.as_ref() {
+        Some(path) if path.is_absolute() => path.clone(),
+        Some(path) => std::env::current_dir()
+            .map_err(|source| forge_config::imports::ConfigLoadError::Io {
+                path: std::path::PathBuf::from("."),
+                source,
+            })?
+            .join(path),
+        None => default_config_path(),
+    };
+    let source = forge_config::actor::ConfigSource {
+        path,
+        overrides: options
+            .config_overrides
+            .iter()
+            .map(|config_override| forge_config::imports::ConfigOverride {
+                key: config_override.key.clone(),
+                value: config_override.value.clone(),
+            })
+            .collect(),
+        strict: custom_path,
+        create_if_missing: !custom_path,
+    };
+    let config = forge_config::actor::load_config_source(&source)?;
+    let early = forge_core::config_registry::EarlyStartupConfig {
+        window: forge_core::config_registry::EarlyWindowConfig {
+            width: config.window.width,
+            height: config.window.height,
+            opacity: config.window.opacity,
+            decorations: config.window.decorations,
+            center_on_launch: config.window.center_on_launch,
+        },
+        theme: forge_core::config_registry::EarlyThemeConfig {
+            background: config.theme.background.clone(),
+        },
+    };
+    Ok(PreparedConfig {
+        source,
+        config,
+        early,
+    })
+}
+
+#[cfg(test)]
+mod startup_config_tests {
+    use super::*;
+
+    #[test]
+    fn cli_center_override_reaches_early_window_with_configured_size() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-center-config-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "[window]\nwidth = 1024\nheight = 720\ncenter_on_launch = false\n",
+        )
+        .unwrap();
+        let options = cli::LaunchOptions {
+            config_path: Some(path.clone()),
+            config_overrides: vec![cli::ConfigOverride {
+                key: "window.center_on_launch".to_string(),
+                value: "true".to_string(),
+            }],
+            ..cli::LaunchOptions::default()
+        };
+
+        let prepared = prepare_explicit_config(&options).unwrap();
+
+        assert!(prepared.early.window.center_on_launch);
+        assert_eq!(prepared.early.window.width, 1024);
+        assert_eq!(prepared.early.window.height, 720);
+        std::fs::remove_file(path).ok();
+    }
+}
+
 mod cli;
 pub mod confirm_modal;
 pub mod context_menu;
@@ -55,9 +155,14 @@ pub mod sidebar;
 pub mod statusbar;
 pub mod wayland;
 
-fn run(launch_options: cli::LaunchOptions) -> forge_core::Result<()> {
+fn run(
+    launch_options: cli::LaunchOptions,
+    prepared_config: Option<PreparedConfig>,
+) -> forge_core::Result<()> {
     let cli::LaunchOptions {
         fullscreen,
+        config_path: _,
+        config_overrides: _,
         command,
     } = launch_options;
     tracing::info!("Forge starting...");
@@ -65,13 +170,23 @@ fn run(launch_options: cli::LaunchOptions) -> forge_core::Result<()> {
 
     // --- Config Actor (Spawn Early in background) ---
     let t_config = std::time::Instant::now();
-    let config_path = dirs::config_dir()
-        .unwrap_or_default()
-        .join("forge/config.toml");
+    let config_path = default_config_path();
 
-    let config_handle = {
+    let (config_handle, prepared_early_config) = {
         let _span = tracing::debug_span!("startup.spawn_config_actor").entered();
-        forge_config::actor::spawn_config_actor(config_path.clone())
+        match prepared_config {
+            Some(prepared) => (
+                forge_config::actor::spawn_config_actor_with_initial(
+                    prepared.source,
+                    prepared.config,
+                ),
+                Some(prepared.early),
+            ),
+            None => (
+                forge_config::actor::spawn_config_actor(config_path.clone()),
+                None,
+            ),
+        }
     };
     tracing::debug!(
         "[PROFILER] TOML Config Actor Spawn took: {:?}",
@@ -80,10 +195,10 @@ fn run(launch_options: cli::LaunchOptions) -> forge_core::Result<()> {
 
     // --- Fast-path startup ---
     let t_fast_path = std::time::Instant::now();
-    let early_config = {
+    let early_config = prepared_early_config.unwrap_or_else(|| {
         let _span = tracing::debug_span!("startup.read_early_config").entered();
         forge_core::config_registry::EarlyStartupConfig::load(&config_path)
-    };
+    });
 
     // --- Wayland Connection ---
     let (mut wayland_state, mut event_queue) = {
@@ -96,6 +211,10 @@ fn run(launch_options: cli::LaunchOptions) -> forge_core::Result<()> {
         width: early_config.window.width,
         height: early_config.window.height,
     };
+    let app_id = crate::wayland::launch_position::window_app_id(
+        early_config.window.center_on_launch,
+        fullscreen,
+    );
 
     let window = {
         let _span = tracing::debug_span!(
@@ -111,6 +230,7 @@ fn run(launch_options: cli::LaunchOptions) -> forge_core::Result<()> {
             &event_queue.handle(),
             initial_size,
             "Forge",
+            app_id,
         )?
     };
 
@@ -185,6 +305,12 @@ fn run(launch_options: cli::LaunchOptions) -> forge_core::Result<()> {
         t_fast_path.elapsed()
     );
 
+    crate::wayland::launch_position::center_window_once(
+        early_config.window.center_on_launch,
+        fullscreen,
+        app_id,
+    );
+
     // Wait for the background config actor to finish reading config.toml
     // (This usually completes instantly because it was spawned at the very beginning)
     let mut config = {
@@ -217,7 +343,10 @@ fn run(launch_options: cli::LaunchOptions) -> forge_core::Result<()> {
             tracing::debug!(?blur_status, "Initial Wayland blur state applied");
         }
     }
-    crate::wayland::niri_blur_rule::ensure_rule_after_launch(&config.blur);
+    crate::wayland::niri_blur_rule::ensure_rules_after_launch(
+        &config.blur,
+        config.window.center_on_launch,
+    );
 
     let wl_display_ptr =
         wayland_backend::client::Backend::display_ptr(&wayland_state.conn.backend())
