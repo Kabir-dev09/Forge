@@ -380,6 +380,12 @@ pub struct ShellConfig {
     pub env: Vec<String>,
     #[serde(skip)]
     pub parsed_env: Vec<(String, String)>,
+    #[serde(skip, default = "default_shell_integration")]
+    pub shell_integration: bool,
+}
+
+fn default_shell_integration() -> bool {
+    true
 }
 
 impl Default for ShellConfig {
@@ -390,6 +396,7 @@ impl Default for ShellConfig {
             args: Vec::new(),
             env: Vec::new(),
             parsed_env: Vec::new(),
+            shell_integration: true,
         }
     }
 }

@@ -72,38 +72,43 @@ impl Pty {
 
         let mut env_map = std::collections::HashMap::new();
 
-        if let Ok(dir) = ensure_integration_scripts() {
-            let prog = shell.program.as_str();
-            if prog.ends_with("bash") {
-                let init_path = dir.join("bash-init.sh");
-                let init_script = format!(
-                    "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi\nsource {}",
-                    dir.join("bash.sh").display()
-                );
-                std::fs::write(&init_path, init_script).ok();
+        if shell.shell_integration {
+            if let Ok(dir) = ensure_integration_scripts() {
+                let prog = shell.program.as_str();
+                if prog.ends_with("bash") {
+                    let init_path = dir.join("bash-init.sh");
+                    let init_script = format!(
+                        "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi\nsource {}",
+                        dir.join("bash.sh").display()
+                    );
+                    std::fs::write(&init_path, init_script).ok();
 
-                args.push(CString::new("--rcfile").unwrap());
-                args.push(CString::new(init_path.to_string_lossy().to_string()).unwrap());
-            } else if prog.ends_with("zsh") {
-                let init_path = dir.join(".zshrc");
-                let init_script = format!(
-                    "ZDOTDIR=\"${{OLD_ZDOTDIR:-$HOME}}\"\nif [ -f \"$ZDOTDIR/.zshrc\" ]; then\n    source \"$ZDOTDIR/.zshrc\"\nfi\nsource \"{}\"\n",
-                    dir.join("zsh.sh").display()
-                );
-                std::fs::write(&init_path, init_script).ok();
-                env_map.insert(
-                    "OLD_ZDOTDIR".to_string(),
-                    std::env::var("ZDOTDIR").unwrap_or_else(|_| "".to_string()),
-                );
-                env_map.insert("ZDOTDIR".to_string(), dir.to_string_lossy().to_string());
-            } else if prog.ends_with("fish") {
-                args.push(CString::new("--init-command").unwrap());
-                args.push(
-                    CString::new(format!("source {}", dir.join("fish.fish").display())).unwrap(),
-                );
-            } else if prog.ends_with("nu") {
-                args.push(CString::new("-e").unwrap());
-                args.push(CString::new(format!("source {}", dir.join("nu.nu").display())).unwrap());
+                    args.push(CString::new("--rcfile").unwrap());
+                    args.push(CString::new(init_path.to_string_lossy().to_string()).unwrap());
+                } else if prog.ends_with("zsh") {
+                    let init_path = dir.join(".zshrc");
+                    let init_script = format!(
+                        "ZDOTDIR=\"${{OLD_ZDOTDIR:-$HOME}}\"\nif [ -f \"$ZDOTDIR/.zshrc\" ]; then\n    source \"$ZDOTDIR/.zshrc\"\nfi\nsource \"{}\"\n",
+                        dir.join("zsh.sh").display()
+                    );
+                    std::fs::write(&init_path, init_script).ok();
+                    env_map.insert(
+                        "OLD_ZDOTDIR".to_string(),
+                        std::env::var("ZDOTDIR").unwrap_or_else(|_| "".to_string()),
+                    );
+                    env_map.insert("ZDOTDIR".to_string(), dir.to_string_lossy().to_string());
+                } else if prog.ends_with("fish") {
+                    args.push(CString::new("--init-command").unwrap());
+                    args.push(
+                        CString::new(format!("source {}", dir.join("fish.fish").display()))
+                            .unwrap(),
+                    );
+                } else if prog.ends_with("nu") {
+                    args.push(CString::new("-e").unwrap());
+                    args.push(
+                        CString::new(format!("source {}", dir.join("nu.nu").display())).unwrap(),
+                    );
+                }
             }
         }
 

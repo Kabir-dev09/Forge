@@ -17,15 +17,20 @@ fn init_logging() {
 }
 
 fn main() {
-    let cli_action = cli::parse_env();
-    if cli_action != cli::Action::Terminal {
-        std::process::exit(cli::execute(cli_action));
+    let launch_options = match cli::parse_env() {
+        cli::Action::Terminal(options) => options,
+        action => std::process::exit(cli::execute(action)),
+    };
+    if let Some(command) = launch_options.command.as_ref() {
+        if let Err(error) = cli::validate_command(command) {
+            cli::exit_with_error(error);
+        }
     }
 
     init_logging();
     forge_core::crash::install_panic_handler();
 
-    let result = std::panic::catch_unwind(run);
+    let result = std::panic::catch_unwind(|| run(launch_options));
 
     match result {
         Ok(Ok(())) => {}
@@ -50,7 +55,11 @@ pub mod sidebar;
 pub mod statusbar;
 pub mod wayland;
 
-fn run() -> forge_core::Result<()> {
+fn run(launch_options: cli::LaunchOptions) -> forge_core::Result<()> {
+    let cli::LaunchOptions {
+        fullscreen,
+        command,
+    } = launch_options;
     tracing::info!("Forge starting...");
     let total_start = std::time::Instant::now();
 
@@ -104,6 +113,12 @@ fn run() -> forge_core::Result<()> {
             "Forge",
         )?
     };
+
+    if fullscreen {
+        window.xdg_toplevel.set_fullscreen(None);
+        window.surface.commit();
+        wayland_state.is_fullscreen = true;
+    }
 
     wayland_state.window = Some(window);
 
@@ -172,7 +187,7 @@ fn run() -> forge_core::Result<()> {
 
     // Wait for the background config actor to finish reading config.toml
     // (This usually completes instantly because it was spawned at the very beginning)
-    let config = {
+    let mut config = {
         let _span = tracing::debug_span!("startup.receive_initial_config").entered();
         config_handle
             .rx
@@ -180,6 +195,11 @@ fn run() -> forge_core::Result<()> {
             .map(|u| u.config)
             .unwrap_or_default()
     };
+    if let Some(command) = command {
+        config.shell.program = command.program;
+        config.shell.args = command.args;
+        config.shell.shell_integration = false;
+    }
     tracing::info!("Configuration loaded.");
 
     {
