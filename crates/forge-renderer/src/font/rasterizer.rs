@@ -106,7 +106,11 @@ impl FontRasterizer {
     pub fn parsed_font(&self) -> &Font {
         self.font.get_or_init(|| {
             Font::from_bytes(self.bytes.as_ref(), FontSettings::default())
-                .expect("font bytes were validated when their atlas cache was created")
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "Failed to parse font bytes, falling back to bundled font");
+                    Font::from_bytes(super::builtin::regular(), FontSettings::default())
+                        .expect("bundled font must parse")
+                })
         })
     }
 

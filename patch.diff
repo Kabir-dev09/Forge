@@ -1,0 +1,16 @@
+--- crates/forge-main/src/wayland/connection.rs
++++ crates/forge-main/src/wayland/connection.rs
+@@ -190,6 +190,14 @@
+ 
+     Ok((state, event_queue))
+ }
++
++impl WaylandState {
++    pub fn is_shift_pressed(&self) -> bool {
++        self.xkb_state.as_ref().map_or(false, |state| {
++            state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE)
++        })
++    }
++}
+ 
+ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandState {

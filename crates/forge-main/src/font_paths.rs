@@ -77,9 +77,12 @@ pub fn resolve_font_files(config: &FontConfig) -> Option<FontFiles> {
 }
 
 pub fn load_font_data(config: &FontConfig) -> Result<FontData> {
-    let files = resolve_font_files(config).ok_or_else(|| {
-        ForgeError::Other(format!("font family '{}' was not found", config.family))
-    })?;
+    let files = resolve_font_files(config).unwrap_or_else(|| {
+        tracing::warn!("Font family '{}' was not found, falling back to embedded font", config.family);
+        let mut fallback_config = config.clone();
+        fallback_config.family = "builtin".to_string();
+        resolve_font_files(&fallback_config).expect("builtin font must resolve")
+    });
     let regular_bytes = LoadedFontBytes::read(&files.regular)?;
     let bold_bytes = load_optional_bytes(files.bold.as_ref());
     let italic_bytes = load_optional_bytes(files.italic.as_ref());
@@ -311,7 +314,7 @@ fn fontconfig_match_family(family: &str, style: &str) -> Option<PathBuf> {
     let requested = normalize_family(family);
     let matched = matched_family.split(',').any(|candidate| {
         let candidate = normalize_family(candidate);
-        candidate == requested || candidate.contains(&requested) || requested.contains(&candidate)
+        candidate == requested || candidate.starts_with(&requested)
     });
     if !matched {
         tracing::warn!(

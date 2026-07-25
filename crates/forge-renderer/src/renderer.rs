@@ -1385,6 +1385,9 @@ impl Renderer {
                 false, // Full build in fast time since rasterization is already done
             )?;
 
+            unsafe { self.device.device_wait_idle() }
+                .map_err(|e| forge_core::ForgeError::Vulkan(e.to_string()))?;
+
             // Destroy old texture properly
             self.atlas_texture.destroy(&self.device);
 
