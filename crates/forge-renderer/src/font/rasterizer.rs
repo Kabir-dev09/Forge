@@ -3,8 +3,11 @@ use forge_core::{ForgeError, Result};
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+use std::sync::Arc;
+
+#[derive(Clone)]
 pub struct FontRasterizer {
-    font: OnceLock<Font>,
+    font: Arc<OnceLock<Font>>,
     identity: u64,
     pub cell_width: u32,
     pub cell_height: u32,
@@ -56,7 +59,7 @@ impl FontRasterizer {
         let cell_height = line_metrics.new_line_size.ceil() as u32;
         let baseline = line_metrics.ascent.ceil() as u32;
 
-        let parsed = OnceLock::new();
+        let parsed = Arc::new(OnceLock::new());
         let _ = parsed.set(font);
         Ok(Self {
             font: parsed,
@@ -94,7 +97,7 @@ impl FontRasterizer {
     ) -> Self {
         let identity = font_identity(bytes.as_ref());
         Self {
-            font: OnceLock::new(),
+            font: Arc::new(OnceLock::new()),
             identity,
             cell_width,
             cell_height,
@@ -112,6 +115,15 @@ impl FontRasterizer {
                         .expect("bundled font must parse")
                 })
         })
+    }
+
+    /// Parses the face ahead of dynamic glyph rasterization.
+    ///
+    /// Cached atlases provide metrics without parsing the font. Callers that
+    /// enable runtime glyph insertion can prepare that one-time work off the
+    /// render thread.
+    pub fn prepare_dynamic_rasterization(&self) {
+        let _ = self.parsed_font();
     }
 
     pub fn rasterize_char(&self, c: char, px_size: f32) -> (fontdue::Metrics, Vec<u8>) {
@@ -144,4 +156,23 @@ pub(crate) fn font_identity(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_rasterization_can_be_prepared_before_first_glyph() {
+        let rasterizer = FontRasterizer::from_static_bytes_with_metrics(
+            super::super::builtin::regular(),
+            8,
+            16,
+            12,
+        );
+
+        assert!(!rasterizer.is_parsed());
+        rasterizer.prepare_dynamic_rasterization();
+        assert!(rasterizer.is_parsed());
+    }
 }

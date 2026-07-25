@@ -157,6 +157,30 @@ pub fn load_font_data(config: &FontConfig) -> Result<FontData> {
         .map(|bytes| bytes.into_lazy_rasterizer(metrics))
         .collect();
 
+    // A cached atlas deliberately leaves FontDue uninitialized. Ligatures can
+    // still create shaped glyph IDs at runtime, so perform that one-time parse
+    // here on the existing font-loading thread instead of stalling rendering.
+    if config.ligatures.enabled {
+        let r_reg = regular.clone();
+        let r_bold = bold.clone();
+        let r_italic = italic.clone();
+        let r_bold_italic = bold_italic.clone();
+        std::thread::spawn(move || {
+            let _span = tracing::info_span!("ligature_warmup").entered();
+            r_reg.prepare_dynamic_rasterization();
+            if let Some(rasterizer) = r_bold {
+                rasterizer.prepare_dynamic_rasterization();
+            }
+            if let Some(rasterizer) = r_italic {
+                rasterizer.prepare_dynamic_rasterization();
+            }
+            if let Some(rasterizer) = r_bold_italic {
+                rasterizer.prepare_dynamic_rasterization();
+            }
+            tracing::debug!("Background ligature parsing complete");
+        });
+    }
+
     Ok(FontData {
         regular,
         bold,
