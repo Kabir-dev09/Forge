@@ -67,6 +67,9 @@ scroll_multiplier = 3.0
 
 [shell]
 # program defaults to $SHELL when omitted.
+# Disable to skip Forge's CWD and command-lifecycle hooks. Command completion
+# indicators are disabled; CWD metadata requires native OSC 7 shell support.
+integration_enabled = true
 args = []
 env = []
 

@@ -39,14 +39,17 @@ pub struct LigatureToken {
     pub style: LigatureStyleKey,
 }
 
-pub fn row_has_ligature_candidate(row: &[Cell]) -> bool {
+fn chars_have_ligature_candidate(chars: impl Iterator<Item = char>) -> bool {
     let mut previous_trigger = false;
+    let mut previous_char = '\0';
+    let mut previous_previous_char = '\0';
     let mut w_run = 0usize;
 
-    for cell in row {
-        let c = cell.c;
+    for c in chars {
         if c == '\0' {
             previous_trigger = false;
+            previous_char = '\0';
+            previous_previous_char = '\0';
             w_run = 0;
             continue;
         }
@@ -61,16 +64,22 @@ pub fn row_has_ligature_candidate(row: &[Cell]) -> bool {
         }
 
         let is_trigger = CANDIDATE_CHARS.contains(&c);
-        if is_trigger && previous_trigger {
+        let is_home_path_prefix = previous_char == '~'
+            && c == '/'
+            && (previous_previous_char == '\0' || previous_previous_char.is_whitespace());
+        if is_trigger && previous_trigger && !is_home_path_prefix {
             return true;
         }
         previous_trigger = is_trigger;
-        if !is_trigger && c != 'w' {
-            previous_trigger = false;
-        }
+        previous_previous_char = previous_char;
+        previous_char = c;
     }
 
     false
+}
+
+pub fn row_has_ligature_candidate(row: &[Cell]) -> bool {
+    chars_have_ligature_candidate(row.iter().map(|cell| cell.c))
 }
 
 pub fn tokenize_ligature_candidates(
@@ -154,28 +163,7 @@ fn flush_token(
 }
 
 fn row_has_ligature_text_candidate(text: &str) -> bool {
-    let mut previous_trigger = false;
-    let mut w_run = 0usize;
-    for c in text.chars() {
-        if c == 'w' {
-            w_run += 1;
-            if w_run >= 3 {
-                return true;
-            }
-        } else {
-            w_run = 0;
-        }
-
-        let is_trigger = CANDIDATE_CHARS.contains(&c);
-        if is_trigger && previous_trigger {
-            return true;
-        }
-        previous_trigger = is_trigger;
-        if !is_trigger && c != 'w' {
-            previous_trigger = false;
-        }
-    }
-    false
+    chars_have_ligature_candidate(text.chars())
 }
 
 fn selection_contains_cell(selection: Option<SelectionRange>, row: usize, col: usize) -> bool {
@@ -292,6 +280,24 @@ mod tests {
             Cell::wide_placeholder(),
             cell('>')
         ]));
+    }
+
+    #[test]
+    fn scanner_ignores_home_path_prefix_without_hiding_later_operators() {
+        assert!(!row_has_ligature_candidate(&row("~/PROJECTS")));
+        assert!(!row_has_ligature_candidate(&row("prompt ~/Downloads")));
+        assert!(row_has_ligature_candidate(&row("~/project->branch")));
+        assert!(row_has_ligature_candidate(&row("prefix~/suffix")));
+        assert!(row_has_ligature_candidate(&row("~>")));
+    }
+
+    #[test]
+    fn tokenizer_does_not_shape_home_path_prefix() {
+        assert!(tokenize_ligature_candidates(&row("~/PROJECTS"), 64, None, None, 0).is_empty());
+
+        let tokens = tokenize_ligature_candidates(&row("~/project->branch"), 64, None, None, 0);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].text, "~/project->branch");
     }
 
     #[test]

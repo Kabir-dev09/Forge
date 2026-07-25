@@ -386,14 +386,9 @@ pub struct ShellConfig {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<String>,
+    pub integration_enabled: bool,
     #[serde(skip)]
     pub parsed_env: Vec<(String, String)>,
-    #[serde(skip, default = "default_shell_integration")]
-    pub shell_integration: bool,
-}
-
-fn default_shell_integration() -> bool {
-    true
 }
 
 impl Default for ShellConfig {
@@ -403,8 +398,8 @@ impl Default for ShellConfig {
             program,
             args: Vec::new(),
             env: Vec::new(),
+            integration_enabled: true,
             parsed_env: Vec::new(),
-            shell_integration: true,
         }
     }
 }
@@ -1085,6 +1080,18 @@ impl ForgeConfig {
 mod tests {
     use super::*;
     use crate::bindings::modifiers;
+
+    #[test]
+    fn shell_integration_defaults_enabled_and_parses_boolean() {
+        assert!(ForgeConfig::default().shell.integration_enabled);
+
+        let omitted: ForgeConfig = toml::from_str("[shell]\n").unwrap();
+        assert!(omitted.shell.integration_enabled);
+
+        let config: ForgeConfig =
+            toml::from_str("[shell]\nintegration_enabled = false\n").unwrap();
+        assert!(!config.shell.integration_enabled);
+    }
 
     #[test]
     fn center_on_launch_is_disabled_by_default_and_available_to_early_config() {

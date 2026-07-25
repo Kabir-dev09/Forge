@@ -44,3 +44,14 @@ fn window_center_on_launch_defaults_off_and_parses_boolean() {
         toml::from_str("[window]\ncenter_on_launch = true\n").unwrap();
     assert!(enabled.window.center_on_launch);
 }
+
+#[test]
+fn shell_integration_is_enabled_by_default_and_can_be_disabled() {
+    let default_config: forge_core::config_registry::ForgeConfig =
+        toml::from_str(include_str!("default_config.toml")).unwrap();
+    assert!(default_config.shell.integration_enabled);
+
+    let disabled: forge_core::config_registry::ForgeConfig =
+        toml::from_str("[shell]\nintegration_enabled = false\n").unwrap();
+    assert!(!disabled.shell.integration_enabled);
+}

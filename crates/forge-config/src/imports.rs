@@ -526,6 +526,10 @@ mod tests {
                     value: "true".to_string(),
                 },
                 ConfigOverride {
+                    key: "shell.integration_enabled".to_string(),
+                    value: "false".to_string(),
+                },
+                ConfigOverride {
                     key: "font.family".to_string(),
                     value: "\"Fira Code\"".to_string(),
                 },
@@ -542,6 +546,7 @@ mod tests {
         assert_eq!(config.window.opacity, 0.85);
         assert!(config.window.center_on_launch);
         assert!(config.cursor.trail.enabled);
+        assert!(!config.shell.integration_enabled);
         assert_eq!(config.font.family, "Fira Code");
         assert_eq!(config.font.ligatures.features, ["liga", "calt"]);
         std::fs::remove_dir_all(dir).ok();

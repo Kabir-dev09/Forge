@@ -8,6 +8,51 @@ use nix::unistd::{close, dup2, execvpe, fork, setsid, ForkResult};
 use std::ffi::CString;
 use std::os::unix::io::{AsRawFd, OwnedFd};
 
+fn apply_shell_integration(
+    shell: &ShellConfig,
+    args: &mut Vec<CString>,
+    env_map: &mut std::collections::HashMap<String, String>,
+) {
+    if !shell.integration_enabled {
+        return;
+    }
+
+    let Ok(dir) = ensure_integration_scripts() else {
+        return;
+    };
+
+    let prog = shell.program.as_str();
+    if prog.ends_with("bash") {
+        let init_path = dir.join("bash-init.sh");
+        let init_script = format!(
+            "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi\nsource {}",
+            dir.join("bash.sh").display()
+        );
+        std::fs::write(&init_path, init_script).ok();
+
+        args.push(CString::new("--rcfile").unwrap());
+        args.push(CString::new(init_path.to_string_lossy().to_string()).unwrap());
+    } else if prog.ends_with("zsh") {
+        let init_path = dir.join(".zshrc");
+        let init_script = format!(
+            "ZDOTDIR=\"${{OLD_ZDOTDIR:-$HOME}}\"\nif [ -f \"$ZDOTDIR/.zshrc\" ]; then\n    source \"$ZDOTDIR/.zshrc\"\nfi\nsource \"{}\"\n",
+            dir.join("zsh.sh").display()
+        );
+        std::fs::write(&init_path, init_script).ok();
+        env_map.insert(
+            "OLD_ZDOTDIR".to_string(),
+            std::env::var("ZDOTDIR").unwrap_or_else(|_| "".to_string()),
+        );
+        env_map.insert("ZDOTDIR".to_string(), dir.to_string_lossy().to_string());
+    } else if prog.ends_with("fish") {
+        args.push(CString::new("--init-command").unwrap());
+        args.push(CString::new(format!("source {}", dir.join("fish.fish").display())).unwrap());
+    } else if prog.ends_with("nu") {
+        args.push(CString::new("-e").unwrap());
+        args.push(CString::new(format!("source {}", dir.join("nu.nu").display())).unwrap());
+    }
+}
+
 fn ensure_integration_scripts() -> std::io::Result<std::path::PathBuf> {
     let mut dir =
         std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()));
@@ -72,45 +117,7 @@ impl Pty {
 
         let mut env_map = std::collections::HashMap::new();
 
-        if shell.shell_integration {
-            if let Ok(dir) = ensure_integration_scripts() {
-                let prog = shell.program.as_str();
-                if prog.ends_with("bash") {
-                    let init_path = dir.join("bash-init.sh");
-                    let init_script = format!(
-                        "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi\nsource {}",
-                        dir.join("bash.sh").display()
-                    );
-                    std::fs::write(&init_path, init_script).ok();
-
-                    args.push(CString::new("--rcfile").unwrap());
-                    args.push(CString::new(init_path.to_string_lossy().to_string()).unwrap());
-                } else if prog.ends_with("zsh") {
-                    let init_path = dir.join(".zshrc");
-                    let init_script = format!(
-                        "ZDOTDIR=\"${{OLD_ZDOTDIR:-$HOME}}\"\nif [ -f \"$ZDOTDIR/.zshrc\" ]; then\n    source \"$ZDOTDIR/.zshrc\"\nfi\nsource \"{}\"\n",
-                        dir.join("zsh.sh").display()
-                    );
-                    std::fs::write(&init_path, init_script).ok();
-                    env_map.insert(
-                        "OLD_ZDOTDIR".to_string(),
-                        std::env::var("ZDOTDIR").unwrap_or_else(|_| "".to_string()),
-                    );
-                    env_map.insert("ZDOTDIR".to_string(), dir.to_string_lossy().to_string());
-                } else if prog.ends_with("fish") {
-                    args.push(CString::new("--init-command").unwrap());
-                    args.push(
-                        CString::new(format!("source {}", dir.join("fish.fish").display()))
-                            .unwrap(),
-                    );
-                } else if prog.ends_with("nu") {
-                    args.push(CString::new("-e").unwrap());
-                    args.push(
-                        CString::new(format!("source {}", dir.join("nu.nu").display())).unwrap(),
-                    );
-                }
-            }
-        }
+        apply_shell_integration(shell, &mut args, &mut env_map);
 
         args.extend(base_args);
 
@@ -280,10 +287,29 @@ mod tests {
     use forge_core::config_registry::ShellConfig;
 
     #[test]
-    fn spawn_echo_and_read() {
+    fn disabled_integration_is_a_no_op_for_supported_shells() {
+        for program in ["/bin/bash", "/bin/zsh", "/usr/bin/fish", "/usr/bin/nu"] {
+            let shell = ShellConfig {
+                program: program.to_string(),
+                integration_enabled: false,
+                ..ShellConfig::default()
+            };
+            let mut args = vec![CString::new(program).unwrap()];
+            let mut env = std::collections::HashMap::new();
+
+            apply_shell_integration(&shell, &mut args, &mut env);
+
+            assert_eq!(args, [CString::new(program).unwrap()]);
+            assert!(env.is_empty());
+        }
+    }
+
+    #[test]
+    fn disabled_integration_still_spawns_configured_program() {
         let shell = ShellConfig {
             program: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "echo hello; exit 0".to_string()],
+            integration_enabled: false,
             ..ShellConfig::default()
         };
         let winsize = Winsize {

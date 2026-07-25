@@ -1769,6 +1769,13 @@ fn command_completion_tracking_enabled(
     )
 }
 
+fn command_completion_tracking_enabled_for_config(
+    config: &forge_core::config_registry::ForgeConfig,
+) -> bool {
+    config.shell.integration_enabled
+        && command_completion_tracking_enabled(&config.command_completion_indicator)
+}
+
 fn pane_zoomed_for_indicator(app_data: &AppData, pane_id: crate::mux::PaneId) -> bool {
     app_data.tab_manager.tabs.iter().any(|tab| {
         tab.mux.is_zoomed() && tab.mux.visible_pane_ids().first().copied() == Some(pane_id)
@@ -2333,7 +2340,7 @@ pub fn run_event_loop(
         pane_runtime,
         pane_io: crate::mux::PaneIoRegistry::new(
             loop_signal,
-            command_completion_tracking_enabled(&config.command_completion_indicator),
+            command_completion_tracking_enabled_for_config(&config),
         )?,
         command_completion_indicators: std::collections::HashMap::new(),
         command_completion_generation: 0,
@@ -3585,10 +3592,8 @@ pub fn run_event_loop(
                         renderer.set_cursor_trail_config(&app_data.config.cursor.trail);
                     }
                 }
-                if changes.command_completion_indicator {
-                    let enabled = command_completion_tracking_enabled(
-                        &app_data.config.command_completion_indicator,
-                    );
+                if changes.command_completion_indicator || changes.shell {
+                    let enabled = command_completion_tracking_enabled_for_config(&app_data.config);
                     app_data.pane_io.set_command_completion_tracking(enabled);
                     if !enabled {
                         app_data.command_completion_indicators.clear();
@@ -6527,6 +6532,15 @@ mod metric_tests {
 
         assert_eq!(success, theme.parsed_ansi_colors[2]);
         assert_eq!(failure, theme.parsed_ansi_colors[1]);
+    }
+
+    #[test]
+    fn shell_integration_controls_command_completion_tracking() {
+        let mut config = forge_core::config_registry::ForgeConfig::default();
+        assert!(command_completion_tracking_enabled_for_config(&config));
+
+        config.shell.integration_enabled = false;
+        assert!(!command_completion_tracking_enabled_for_config(&config));
     }
 
     #[test]

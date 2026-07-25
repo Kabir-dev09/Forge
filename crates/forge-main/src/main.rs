@@ -324,7 +324,7 @@ fn run(
     if let Some(command) = command {
         config.shell.program = command.program;
         config.shell.args = command.args;
-        config.shell.shell_integration = false;
+        config.shell.integration_enabled = false;
     }
     tracing::info!("Configuration loaded.");
 

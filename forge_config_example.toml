@@ -60,6 +60,8 @@ scroll_multiplier = 3.0
 
 [shell]
 program = "/bin/fish"
+# Disabling skips Forge's scripts and command-completion tracking.
+integration_enabled = true
 args = []
 
 [shell.env]

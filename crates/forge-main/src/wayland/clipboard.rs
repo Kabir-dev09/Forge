@@ -70,6 +70,15 @@ fn preferred_mime(current: Option<ClipboardMime>, offered: &str) -> Option<Clipb
     }
 }
 
+fn update_current_offer_mime(
+    current: &mut Option<ClipboardMime>,
+    offered: &str,
+    paste_pending: bool,
+) -> bool {
+    *current = preferred_mime(*current, offered);
+    paste_pending && current.is_some()
+}
+
 pub struct ClipboardManager {
     pub manager: WlDataDeviceManager,
     pub device: Option<WlDataDevice>,
@@ -165,13 +174,12 @@ impl ClipboardManager {
                 }
             });
             true
-        } else if self.current_offer.is_none() {
-            // The initial selection arrives asynchronously after get_data_device.
-            self.pending_paste = true;
-            false
         } else {
-            self.pending_paste = false;
-            tracing::warn!("Clipboard selection does not advertise a supported text format");
+            // Both the initial selection and its MIME announcements are asynchronous.
+            // wayland-client may dispatch `selection` before the newly-created
+            // wl_data_offer's `offer` events, so keep the request pending until both
+            // pieces of state are available.
+            self.pending_paste = true;
             false
         }
     }
@@ -258,7 +266,7 @@ impl Dispatch<WlDataDevice, ()> for WaylandState {
                         clip.owned_text = None;
                     }
                     clip.pending_offers.clear();
-                    if clip.pending_paste {
+                    if clip.pending_paste && clip.current_mime.is_some() {
                         state.needs_flush |= clip.request_paste();
                     }
                 }
@@ -283,7 +291,19 @@ impl Dispatch<WlDataOffer, ()> for WaylandState {
     ) {
         if let wayland_client::protocol::wl_data_offer::Event::Offer { mime_type } = event {
             if let Some(clip) = &mut state.clipboard {
-                if let Some(pending) = clip
+                if clip
+                    .current_offer
+                    .as_ref()
+                    .is_some_and(|current| current.id() == offer.id())
+                {
+                    if update_current_offer_mime(
+                        &mut clip.current_mime,
+                        &mime_type,
+                        clip.pending_paste,
+                    ) {
+                        state.needs_flush |= clip.request_paste();
+                    }
+                } else if let Some(pending) = clip
                     .pending_offers
                     .iter_mut()
                     .find(|pending| pending.offer.id() == offer.id())
@@ -330,6 +350,30 @@ mod tests {
     #[test]
     fn clipboard_mime_selection_ignores_non_text_formats() {
         assert_eq!(preferred_mime(None, "image/png"), None);
+    }
+
+    #[test]
+    fn pending_initial_paste_resumes_when_selected_offer_mime_arrives_late() {
+        let mut current_mime = None;
+
+        assert!(update_current_offer_mime(
+            &mut current_mime,
+            "text/plain;charset=utf-8",
+            true,
+        ));
+        assert_eq!(current_mime, Some(ClipboardMime::Utf8Text));
+    }
+
+    #[test]
+    fn late_non_text_offer_does_not_resume_pending_paste() {
+        let mut current_mime = None;
+
+        assert!(!update_current_offer_mime(
+            &mut current_mime,
+            "image/png",
+            true,
+        ));
+        assert_eq!(current_mime, None);
     }
 
     #[test]
