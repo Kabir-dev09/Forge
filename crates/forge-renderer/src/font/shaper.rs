@@ -174,7 +174,7 @@ fn shape_uncached(
         });
     }
 
-    if shaped_run_is_useful(&key.text, &glyphs, active_rasterizer) {
+    if shaped_run_is_useful(&key.text, &glyphs, &face) {
         Some(ShaperCacheEntry::Positive(ShapedRun { glyphs, char_count }))
     } else {
         Some(ShaperCacheEntry::Negative)
@@ -188,7 +188,7 @@ fn parse_features(features: &[String]) -> Vec<Feature> {
         .collect()
 }
 
-fn shaped_run_is_useful(text: &str, glyphs: &[ShapedGlyph], rasterizer: &FontRasterizer) -> bool {
+fn shaped_run_is_useful(text: &str, glyphs: &[ShapedGlyph], face: &Face<'_>) -> bool {
     let char_count = text.chars().count();
     if char_count < 2 {
         return false;
@@ -202,7 +202,7 @@ fn shaped_run_is_useful(text: &str, glyphs: &[ShapedGlyph], rasterizer: &FontRas
 
     text.chars()
         .zip(glyphs.iter())
-        .any(|(c, glyph)| rasterizer.glyph_index(c) != glyph.glyph_id)
+        .any(|(c, glyph)| face.glyph_index(c).map_or(0, |glyph_id| glyph_id.0) != glyph.glyph_id)
 }
 
 impl LigatureStyleKey {
@@ -231,6 +231,15 @@ mod tests {
             16.0,
         )
         .expect("bundled test font should load")
+    }
+
+    fn lazy_rasterizer() -> FontRasterizer {
+        FontRasterizer::from_static_bytes_with_metrics(
+            include_bytes!("../../../../assets/fonts/JetBrainsMono-Regular.ttf"),
+            10,
+            20,
+            16,
+        )
     }
 
     fn style() -> LigatureStyleKey {
@@ -289,6 +298,39 @@ mod tests {
             ShaperCacheEntry::Negative
         ));
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn shaping_does_not_initialize_lazy_fontdue_rasterizer() {
+        let rasterizer = lazy_rasterizer();
+        let mut cache = ShaperCache::new(64);
+
+        assert!(!rasterizer.is_parsed());
+        assert!(matches!(
+            cache.shape_run(
+                key_with_rasterizer("---------------", &["liga", "calt"], &rasterizer),
+                &rasterizer,
+                None,
+                None,
+                None,
+                16.0,
+            ),
+            ShaperCacheEntry::Negative
+        ));
+        assert!(!rasterizer.is_parsed());
+
+        assert!(matches!(
+            cache.shape_run(
+                key_with_rasterizer("!=", &["liga", "calt"], &rasterizer),
+                &rasterizer,
+                None,
+                None,
+                None,
+                16.0,
+            ),
+            ShaperCacheEntry::Positive(_)
+        ));
+        assert!(!rasterizer.is_parsed());
     }
 
     #[test]

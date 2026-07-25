@@ -129,6 +129,11 @@ impl FontRasterizer {
     pub fn glyph_index(&self, c: char) -> u16 {
         self.parsed_font().lookup_glyph_index(c)
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_parsed(&self) -> bool {
+        self.font.get().is_some()
+    }
 }
 
 /// Stable identity shared by atlas caches, shaping keys, and rasterizers.
