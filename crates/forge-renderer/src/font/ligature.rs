@@ -70,7 +70,10 @@ fn chars_have_ligature_candidate(chars: impl Iterator<Item = char>) -> bool {
         if is_trigger && previous_trigger && !is_home_path_prefix {
             return true;
         }
-        previous_trigger = is_trigger;
+        // `~/` is a path prefix, not an operator. Treat the complete pair as a
+        // boundary so the slash cannot combine with a following dot in paths
+        // such as `~/.config`.
+        previous_trigger = is_trigger && !is_home_path_prefix;
         previous_previous_char = previous_char;
         previous_char = c;
     }
@@ -286,6 +289,9 @@ mod tests {
     fn scanner_ignores_home_path_prefix_without_hiding_later_operators() {
         assert!(!row_has_ligature_candidate(&row("~/PROJECTS")));
         assert!(!row_has_ligature_candidate(&row("prompt ~/Downloads")));
+        assert!(!row_has_ligature_candidate(&row(
+            "kabir@archlinux ~/.config>"
+        )));
         assert!(row_has_ligature_candidate(&row("~/project->branch")));
         assert!(row_has_ligature_candidate(&row("prefix~/suffix")));
         assert!(row_has_ligature_candidate(&row("~>")));
@@ -294,6 +300,14 @@ mod tests {
     #[test]
     fn tokenizer_does_not_shape_home_path_prefix() {
         assert!(tokenize_ligature_candidates(&row("~/PROJECTS"), 64, None, None, 0).is_empty());
+        assert!(tokenize_ligature_candidates(
+            &row("kabir@archlinux ~/.config>"),
+            64,
+            None,
+            None,
+            0,
+        )
+        .is_empty());
 
         let tokens = tokenize_ligature_candidates(&row("~/project->branch"), 64, None, None, 0);
         assert_eq!(tokens.len(), 1);

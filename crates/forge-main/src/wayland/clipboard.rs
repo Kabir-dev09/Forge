@@ -112,6 +112,13 @@ impl ClipboardManager {
         self.device = Some(self.manager.get_data_device(seat, qh, ()));
     }
 
+    pub fn clear_received_selection(&mut self) {
+        self.current_offer = None;
+        self.current_mime = None;
+        self.pending_offers.clear();
+        self.pending_paste = false;
+    }
+
     /// Installs a new Wayland selection source. The return value tells the caller
     /// whether the connection has protocol requests waiting to be flushed.
     pub fn set_clipboard(

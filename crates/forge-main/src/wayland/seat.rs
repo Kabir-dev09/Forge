@@ -487,6 +487,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
             wl_keyboard::Event::Leave { .. } => {
                 state.is_activated = false;
                 state.repeating_key = None;
+                if let Some(clipboard) = state.clipboard.as_mut() {
+                    clipboard.clear_received_selection();
+                }
             }
             _ => {}
         }
