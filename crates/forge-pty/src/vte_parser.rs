@@ -47,9 +47,14 @@ impl<'a> Perform for TerminalPerformer<'a> {
         }
     }
 
-    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         *self.parser_is_ground = false;
-        tracing::trace!("hook");
+        
+        // DECRQSS (Request Selection or Setting)
+        if action == 'q' && intermediates == [b'$'] {
+            // Reply with "invalid" to avoid timeouts for unsupported settings requests (like SGR 'm')
+            self.responses.extend_from_slice(b"\x1bP0$r\x1b\\");
+        }
     }
 
     fn put(&mut self, _byte: u8) {
@@ -125,6 +130,23 @@ impl<'a> Perform for TerminalPerformer<'a> {
                         }
                         _ => {}
                     }
+                }
+            }
+            b"10" | b"11" => {
+                if params.len() > 1 && params[1] == b"?" {
+                    let is_bg = params[0] == b"11";
+                    let color = if is_bg {
+                        self.buffer.default_bg
+                    } else {
+                        self.buffer.default_fg
+                    };
+                    // format: \x1b]11;rgb:RRRR/GGGG/BBBB\x1b\\
+                    let r16 = ((color.r as u16) << 8) | (color.r as u16);
+                    let g16 = ((color.g as u16) << 8) | (color.g as u16);
+                    let b16 = ((color.b as u16) << 8) | (color.b as u16);
+                    let code = if is_bg { 11 } else { 10 };
+                    let response = format!("\x1b]{};rgb:{:04x}/{:04x}/{:04x}\x1b\\", code, r16, g16, b16);
+                    self.responses.extend_from_slice(response.as_bytes());
                 }
             }
             _ => tracing::trace!("osc_dispatch {:?}", params),
@@ -207,7 +229,10 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 }
             }
             'n' => {
-                if p0 == 6 {
+                if p0 == 5 {
+                    // Device Status Report (DSR) - Operating Status
+                    self.responses.extend_from_slice(b"\x1b[0n");
+                } else if p0 == 6 {
                     // Device Status Report (DSR) - report cursor position
                     // Format: ESC [ <row> ; <col> R (1-indexed)
                     let row = self.buffer.cursor.row + 1;
@@ -226,6 +251,34 @@ impl<'a> Perform for TerminalPerformer<'a> {
                         "Unhandled CSI private 'p' with intermediates: {:?}",
                         intermediates
                     );
+                }
+            }
+            't' => {
+                let p0 = get_param_or(params, 0, 0);
+                match p0 {
+                    14 => {
+                        // Report text area size in pixels.
+                        // We use a dummy estimate (16x8 cell size) since pixel size isn't strictly tracked in the parser.
+                        let height = self.buffer.rows() * 16;
+                        let width = self.buffer.cols() * 8;
+                        let response = format!("\x1b[4;{};{}t", height, width);
+                        self.responses.extend_from_slice(response.as_bytes());
+                    }
+                    16 => {
+                        // Report character cell size in pixels.
+                        let response = "\x1b[6;16;8t".to_string();
+                        self.responses.extend_from_slice(response.as_bytes());
+                    }
+                    18 => {
+                        // Report text area size in characters.
+                        let height = self.buffer.rows();
+                        let width = self.buffer.cols();
+                        let response = format!("\x1b[8;{};{}t", height, width);
+                        self.responses.extend_from_slice(response.as_bytes());
+                    }
+                    _ => {
+                        tracing::trace!("Unhandled CSI 't' param: {}", p0);
+                    }
                 }
             }
             'h' | 'l' => handle_mode(params, intermediates, action, self.buffer),
