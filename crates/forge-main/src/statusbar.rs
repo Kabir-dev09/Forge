@@ -62,8 +62,9 @@ mod tests {
                 zoom_indicator: "(Z)".to_string(),
                 left_edge: String::new(),
                 right_edge: String::new(),
-                active: None,
-                inactive: None,
+                separator: String::new(),
+                active: Box::new(None),
+                inactive: Box::new(None),
             }],
             ..StatusbarConfig::default()
         };
@@ -96,8 +97,9 @@ mod tests {
                 zoom_indicator: "(Z)".to_string(),
                 left_edge: String::new(),
                 right_edge: String::new(),
-                active: None,
-                inactive: None,
+                separator: String::new(),
+                active: Box::new(None),
+                inactive: Box::new(None),
             }],
             ..StatusbarConfig::default()
         };
@@ -125,11 +127,13 @@ mod tests {
                 zoom_indicator: String::new(),
                 left_edge: "".to_string(),
                 right_edge: "".to_string(),
-                active: Some(forge_core::config_registry::StatusbarStyle {
+                separator: String::new(),
+                active: Box::new(Some(forge_core::config_registry::StatusbarStyle {
                     fg: Some("#111111".to_string()),
                     bg: Some("#89B4FA".to_string()),
-                }),
-                inactive: None,
+                    ..Default::default()
+                })),
+                inactive: Box::new(None),
             }],
             ..StatusbarConfig::default()
         };
@@ -170,6 +174,58 @@ pub fn parse_hex_color(hex: &str) -> Option<Color> {
     }
 }
 
+fn push_styled_text(
+    text: &str,
+    default_fg: Color,
+    bg: Color,
+    flags: u8,
+    action: Option<String>,
+    out: &mut Vec<(Cell, Option<String>)>,
+) {
+    let mut current_fg = default_fg;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            let mut tag = String::new();
+            let mut is_tag = false;
+            let mut clone_chars = chars.clone();
+            for tc in clone_chars.by_ref() {
+                if tc == '>' {
+                    is_tag = true;
+                    break;
+                }
+                tag.push(tc);
+                if tag.len() > 10 {
+                    break;
+                }
+            }
+            if is_tag {
+                if tag == "/" || tag.to_lowercase() == "reset" {
+                    current_fg = default_fg;
+                    chars = clone_chars;
+                    continue;
+                } else if tag.starts_with('#') {
+                    if let Some(color) = parse_hex_color(&tag) {
+                        current_fg = color;
+                        chars = clone_chars;
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        out.push((
+            Cell {
+                c,
+                fg: current_fg,
+                bg,
+                flags,
+            },
+            action.clone(),
+        ));
+    }
+}
+
 impl StatusBarState {
     pub fn new() -> Self {
         Self::default()
@@ -199,69 +255,60 @@ impl StatusBarState {
             let mut out = Vec::new();
             for item in items {
                 match item {
-                    StatusbarItem::Tabs { format, zoom_indicator, left_edge, right_edge, active, inactive } => {
-                        for tab in tabs.iter() {
+                    StatusbarItem::Tabs { format, zoom_indicator, left_edge, right_edge, separator, active, inactive } => {
+                        for (i, tab) in tabs.iter().enumerate() {
                             let is_active = tab.index == active_tab;
-                            let style = if is_active {
-                                active
-                            } else {
-                                inactive
-                            };
-
+                            let style = if is_active { active } else { inactive };
+                            let action_str = std::format!("SwitchTab{}", tab.index + 1);
+                            let is_hovered = self.hovered_action.as_ref() == Some(&action_str);
+                            let mut current_format = format.as_str();
+                            let mut current_zoom = zoom_indicator.as_str();
+                            let mut current_left = left_edge.as_str();
+                            let mut current_right = right_edge.as_str();
+                            let mut current_separator = separator.as_str();
+                            
                             let mut c_bg = bg_color;
                             let mut c_fg = fg_color;
-                            if let Some(st) = style {
+                            if let Some(st) = &**style {
                                 if let Some(bg) = &st.bg {
                                     c_bg = parse_hex_color(bg).unwrap_or(bg_color);
                                 }
                                 if let Some(fg) = &st.fg {
                                     c_fg = parse_hex_color(fg).unwrap_or(fg_color);
                                 }
+                                if let Some(f) = &st.format { current_format = f; }
+                                if let Some(z) = &st.zoom_indicator { current_zoom = z; }
+                                if let Some(l) = &st.left_edge { current_left = l; }
+                                if let Some(r) = &st.right_edge { current_right = r; }
+                                if let Some(s) = &st.separator { current_separator = s; }
+                            }
+
+                            if is_hovered && self.hover_opacity > 0.01 {
+                                let blend = self.hover_opacity * 0.35;
+                                let r = (c_bg.r as f32 * (1.0 - blend) + 255.0 * blend) as u8;
+                                let g = (c_bg.g as f32 * (1.0 - blend) + 255.0 * blend) as u8;
+                                let b = (c_bg.b as f32 * (1.0 - blend) + 255.0 * blend) as u8;
+                                let a = if c_bg.a == 0 { (255.0 * blend) as u8 } else { c_bg.a };
+                                c_bg = Color { r, g, b, a };
                             }
 
                             let zoom = if tab.is_zoomed {
-                                zoom_indicator.as_str()
+                                current_zoom
                             } else {
                                 ""
                             };
                             let index = (tab.index + 1).to_string();
-                            let text_val = format
+                            let text_val = current_format
                                 .replace("{index}", &index)
                                 .replace("{title}", &tab.title)
                                 .replace("{zoom}", zoom);
                             let action = Some(std::format!("SwitchTab{}", tab.index + 1));
-                            for ch in left_edge.chars() {
-                                out.push((
-                                    Cell {
-                                        c: ch,
-                                        fg: c_bg,
-                                        bg: bg_color,
-                                        flags: 0,
-                                    },
-                                    action.clone(),
-                                ));
-                            }
-                            for ch in text_val.chars() {
-                                out.push((
-                                    Cell {
-                                        c: ch,
-                                        fg: c_fg,
-                                        bg: c_bg,
-                                        flags: 0,
-                                    },
-                                    action.clone(),
-                                ));
-                            }
-                            for ch in right_edge.chars() {
-                                out.push((
-                                    Cell {
-                                        c: ch,
-                                        fg: c_bg,
-                                        bg: bg_color,
-                                        flags: 0,
-                                    },
-                                    action.clone(),
-                                ));
+                            push_styled_text(current_left, c_bg, bg_color, 0, action.clone(), &mut out);
+                            push_styled_text(&text_val, c_fg, c_bg, 0, action.clone(), &mut out);
+                            push_styled_text(current_right, c_bg, bg_color, 0, action.clone(), &mut out);
+                            
+                            if i < tabs.len() - 1 {
+                                push_styled_text(current_separator, fg_color, bg_color, 0, None, &mut out);
                             }
                         }
                     }
@@ -288,17 +335,7 @@ impl StatusBarState {
                         if bold.unwrap_or(false) {
                             flags |= Cell::FLAG_BOLD;
                         }
-                        for ch in resolved.chars() {
-                            out.push((
-                                Cell {
-                                    c: ch,
-                                    fg: c_fg,
-                                    bg: c_bg,
-                                    flags,
-                                },
-                                action.clone(),
-                            ));
-                        }
+                        push_styled_text(&resolved, c_fg, c_bg, flags, action.clone(), &mut out);
                     }
                 }
             }

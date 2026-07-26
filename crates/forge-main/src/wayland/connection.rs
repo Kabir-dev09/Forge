@@ -57,9 +57,9 @@ pub struct WaylandState {
     pub pointer_serial: u32,
     pub pointer_button_serial: u32,
     pub cursor_hidden: bool,
-    pub is_hovering_edge: bool,
     pub hide_mouse_when_typing: bool,
-    pub is_alt_buffer: bool,
+    pub current_cursor_shape: Option<wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape>,
+    pub force_cursor_update: bool,
     pub clipboard: Option<crate::wayland::clipboard::ClipboardManager>,
     pub frame_ready: bool,
     pub frame_callback_pending: bool,
@@ -159,9 +159,9 @@ pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
         pointer_serial: 0,
         pointer_button_serial: 0,
         cursor_hidden: false,
-        is_hovering_edge: false,
         hide_mouse_when_typing: true,
-        is_alt_buffer: false,
+        current_cursor_shape: None,
+        force_cursor_update: false,
         clipboard: None,
         frame_ready: true,
         frame_callback_pending: false,
@@ -193,7 +193,7 @@ pub fn connect_wayland() -> Result<(WaylandState, EventQueue<WaylandState>)> {
 
 impl WaylandState {
     pub fn is_shift_pressed(&self) -> bool {
-        self.xkb_state.as_ref().map_or(false, |state| {
+        self.xkb_state.as_ref().is_some_and(|state| {
             state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE)
         })
     }

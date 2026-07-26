@@ -570,11 +570,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     state.cursor_hidden = false;
                     if let Some(shape_manager) = &state.globals.cursor_shape_manager {
                         let device = shape_manager.get_pointer(_pointer, _qh, ());
-                        let shape = if state.is_hovering_edge || state.is_alt_buffer {
-                            wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
-                        } else {
+                        let shape = state.current_cursor_shape.unwrap_or(
                             wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Text
-                        };
+                        );
                         device.set_shape(state.pointer_serial, shape);
                         device.destroy();
                     }

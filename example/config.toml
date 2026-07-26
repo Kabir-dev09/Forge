@@ -3,7 +3,6 @@
 
 [font]
 # family = "JetBrains Mono"
-# family = "FiraCode Nerd Font Mono"
 size = 16.0
 nerd_fonts = true
 
@@ -16,18 +15,16 @@ cache_entries = 4096
 
 [window]
 width = 800
-height = 600
-opacity = 0.95
+height = 700
+opacity = 0.90
 title = "Forge"
 decorations = true
-# Center once after launch on Niri; other Wayland compositors retain normal placement.
-center_on_launch = false
 center_grid = true
 gap = 10
 pane_outline_width = 1.0
 
 [window.padding]
-top = 8
+top = 2
 bottom = 8
 left = 8
 right = 8
@@ -56,19 +53,21 @@ scroll_multiplier = 3.0
 program = "fish"
 args = []
 env = []
+integration_enabled = true
 
 [behavior]
 copy_on_select = true
-hide_mouse_when_typing = false
+hide_mouse_when_typing = true
 disable_default_keybindings = false
 
 [cursor.trail]
+segmented = true
 enabled = true
 fast_decay_ms = 100
 slow_decay_ms = 400
 minimum_distance_x = 2
-minimum_distance_y = 2
-trigger_delay_ms = 50
+minimum_distance_y = 1
+trigger_delay_ms = 20
 color = "cursor"
 
 [panes]
@@ -117,25 +116,65 @@ ansi_colors = [
 enabled = true
 position = "top"
 placement = "absolute"
-bg_color = "#181825"
+bg_color = "transparent"
 fg_color = "#cdd6f4"
 
 [[statusbar.left]]
-type = "tabs"
-format = " {index}{zoom} "
-zoom_indicator = "()"
-
-[statusbar.left.active]
-fg = "#1e1e2e"
-bg = "#89b4fa"
-
-[statusbar.left.inactive]
-fg = "#a6adc8"
+type = "text"
+text = ""
+fg = "#313244"
+bg = "transparent"
 
 [[statusbar.left]]
 type = "text"
-text = " + "
-action = "NewTab"
+text = " Forge "
+bg = "#313244"
+fg = "#f9e2af"
+bold = true
+
+[[statusbar.left]]
+type = "text"
+text = ""
+fg = "#313244"
+bg = "transparent"
+
+[[statusbar.center]]
+type = "tabs"
+format = "{index}<#f38ba8>:</>{title}{zoom}"
+zoom_indicator = "()"
+left_edge = ""
+right_edge = ""
+separator = " "
+
+[statusbar.center.active]
+fg = "#cdd6f4"
+bg = "#313244"
+
+[statusbar.center.inactive]
+fg = "#cdd6f4"
+bg = "transparent"
+format = "{index}<#cba6f7>:</>{title}{zoom}"
+left_edge = ""
+right_edge = ""
+
+[[statusbar.right]]
+type = "text"
+text = ""
+fg = "#313244"
+bg = "transparent"
+
+[[statusbar.right]]
+type = "text"
+text = " Local "
+bg = "#313244"
+fg = "#94e2d5"
+bold = true
+
+[[statusbar.right]]
+type = "text"
+text = ""
+fg = "#313244"
+bg = "transparent"
 
 [statusbar.auto_hide]
 enabled = false

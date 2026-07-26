@@ -688,11 +688,14 @@ pub enum StatusbarItem {
         left_edge: String,
         #[serde(default)]
         right_edge: String,
-        active: Option<StatusbarStyle>,
-        inactive: Option<StatusbarStyle>,
+        #[serde(default = "default_tabs_separator")]
+        separator: String,
+        active: Box<Option<StatusbarStyle>>,
+        inactive: Box<Option<StatusbarStyle>>,
     },
 }
 
+fn default_tabs_separator() -> String { String::new() }
 fn default_tabs_format() -> String { " {index}{zoom} ".to_string() }
 fn default_tabs_zoom() -> String { "()".to_string() }
 
@@ -701,6 +704,11 @@ fn default_tabs_zoom() -> String { "()".to_string() }
 pub struct StatusbarStyle {
     pub fg: Option<String>,
     pub bg: Option<String>,
+    pub format: Option<String>,
+    pub zoom_indicator: Option<String>,
+    pub left_edge: Option<String>,
+    pub right_edge: Option<String>,
+    pub separator: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -730,14 +738,17 @@ impl Default for StatusbarConfig {
                     zoom_indicator: default_tabs_zoom(),
                     left_edge: String::new(),
                     right_edge: String::new(),
-                    active: Some(StatusbarStyle {
+                    separator: default_tabs_separator(),
+                    active: Box::new(Some(StatusbarStyle {
                         fg: Some("#1E1E2E".to_string()),
                         bg: Some("#89B4FA".to_string()),
-                    }),
-                    inactive: Some(StatusbarStyle {
+                        ..Default::default()
+                    })),
+                    inactive: Box::new(Some(StatusbarStyle {
                         fg: Some("#A6ADC8".to_string()),
                         bg: None,
-                    }),
+                        ..Default::default()
+                    })),
                 },
                 StatusbarItem::Text {
                     text: " + ".to_string(),

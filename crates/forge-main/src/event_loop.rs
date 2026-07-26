@@ -260,6 +260,7 @@ pub struct AppData {
     pub last_layout_rects:
         std::collections::HashMap<crate::mux::PaneId, (crate::mux::PaneRect, crate::mux::PaneRect)>,
     pub closing_panes: Vec<ClosingPane>,
+    pub was_alt_buffer: bool,
 }
 
 impl AsMut<WaylandState> for AppData {
@@ -2387,6 +2388,7 @@ pub fn run_event_loop(
         last_snapshot_ids: std::collections::HashMap::new(),
         last_visible_gen: u64::MAX,
         force_immediate_render: false,
+        was_alt_buffer: false,
         hovered_split: None,
         dragging_split: None,
         hovered_scrolling_resize: None,
@@ -2667,8 +2669,8 @@ pub fn run_event_loop(
             .snapshot
             .load()
             .use_alt_buffer;
-        if app_data.wayland_state.is_alt_buffer != use_alt_buffer {
-            app_data.wayland_state.is_alt_buffer = use_alt_buffer;
+        if app_data.was_alt_buffer != use_alt_buffer {
+            app_data.was_alt_buffer = use_alt_buffer;
             if use_alt_buffer {
                 let had_scrollbar_state = app_data.is_hovering_edge
                     || app_data.is_dragging_scrollbar
@@ -3741,6 +3743,9 @@ pub fn run_event_loop(
 
             match evt {
                 PointerEvent::Enter { x, y } | PointerEvent::Motion { x, y } => {
+                    if matches!(evt, PointerEvent::Enter { .. }) {
+                        app_data.wayland_state.force_cursor_update = true;
+                    }
                     let mut needs_redraw = false;
                     let now = std::time::Instant::now();
                     let scrollbar_available = !use_alt && scrollback_lines > 0;
@@ -3849,68 +3854,24 @@ pub fn run_event_loop(
                             app_data.statusbar.hovered_is_square = action == "NewTab";
                         }
 
-                        app_data.statusbar.hovered_action = new_hovered_action;
+                        if new_hovered_action != app_data.statusbar.hovered_action {
+                            app_data.statusbar.hovered_action = new_hovered_action;
+                            if let Some(metrics) = app_data.cached_grid_metrics {
+                                app_data.update_statusbar(metrics.sb_cols);
+                            }
+                        }
+                        
                         app_data.statusbar.hovered_region = new_hovered_region;
                         needs_redraw = true;
                     }
 
-                    let mut hovering_context_menu = false;
                     let (cell_w, cell_h, _, _) = pointer_layout_metrics(&app_data);
                     if let Some(cm) = &mut app_data.context_menu {
                         if let Some(window) = app_data.wayland_state.window.as_ref() {
                             let win_w = window.size.width as f64;
                             let win_h = window.size.height as f64;
-                            if cm.contains(x, y, win_w, win_h, cell_w, cell_h) {
-                                hovering_context_menu = true;
-                            }
                             if cm.update_hover(x, y, win_w, win_h, cell_w, cell_h) {
                                 needs_redraw = true;
-                            }
-                        }
-                    }
-
-                    if needs_redraw {
-                        if let Some(pointer) = &app_data.wayland_state.pointer {
-                            if let Some(shape_manager) =
-                                &app_data.wayland_state.globals.cursor_shape_manager
-                            {
-                                let device =
-                                    shape_manager.get_pointer(pointer, &app_data.queue_handle, ());
-                                let shape = if new_hovering
-                                    || hovering_statusbar
-                                    || hovering_context_menu
-                                {
-                                    wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
-                                } else if let Some(handle) = app_data
-                                    .dragging_scrolling_resize
-                                    .as_ref()
-                                    .map(|drag| drag.handle)
-                                    .or(app_data.hovered_scrolling_resize)
-                                {
-                                    match handle.axis {
-                                        crate::mux::state::SplitAxis::Vertical => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::ColResize,
-                                        crate::mux::state::SplitAxis::Horizontal => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::RowResize,
-                                    }
-                                } else if let Some(border) =
-                                    app_data.dragging_split.as_ref().or_else(|| {
-                                        app_data.hovered_split.and_then(|i| {
-                                            app_data.tab_manager.active_mux().last_borders.get(i)
-                                        })
-                                    })
-                                {
-                                    match border.axis {
-                                        crate::mux::state::SplitAxis::Vertical => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::ColResize,
-                                        crate::mux::state::SplitAxis::Horizontal => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::RowResize,
-                                    }
-                                } else {
-                                    if use_alt {
-                                        wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
-                                    } else {
-                                        wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Text
-                                    }
-                                };
-                                device.set_shape(app_data.wayland_state.pointer_serial, shape);
-                                device.destroy();
                             }
                         }
                     }
@@ -5045,7 +5006,7 @@ pub fn run_event_loop(
                     scrollbar_state = None;
                 }
 
-                let mut statusbar_hover = None;
+                let statusbar_hover = None;
                 let mut needs_statusbar_hover_redraw = false;
 
                 if app_data.config.statusbar.enabled && !modal_blank_screen {
@@ -5074,31 +5035,21 @@ pub fn run_event_loop(
                     } else {
                         app_data.statusbar.hover_opacity = target_opacity;
                     }
-
-                    if app_data.statusbar.hover_opacity > 0.01 {
-                        if let Some((start_col, end_col)) = app_data.statusbar.hovered_region {
-                            let orig_x = metrics.sb_x as f32
-                                + (start_col as f64 * metrics.effective_cell_w) as f32;
-                            let orig_w =
-                                ((end_col - start_col) as f64 * metrics.effective_cell_w) as f32;
-                            let size = metrics.effective_cell_h as f32;
-
-                            let (x, width) = if app_data.statusbar.hovered_is_square {
-                                (orig_x + (orig_w - size) / 2.0, size)
-                            } else {
-                                (orig_x, orig_w)
-                            };
-
-                            statusbar_hover =
-                                Some(forge_renderer::grid_tessellator::StatusbarHoverRenderData {
-                                    x,
-                                    y: metrics.sb_y as f32,
-                                    width,
-                                    height: size,
-                                    opacity: app_data.statusbar.hover_opacity,
-                                    color: app_data.cached_statusbar_hover_color,
-                                });
-                        }
+                    
+                    if needs_statusbar_hover_redraw {
+                        let tabs: Vec<crate::statusbar::StatusbarTab> = app_data
+                            .tab_manager
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, tab)| crate::statusbar::StatusbarTab {
+                                index: i,
+                                title: format!("Tab {}", i + 1),
+                                is_zoomed: tab.mux.is_zoomed(),
+                            })
+                            .collect();
+                        let active_tab = app_data.tab_manager.active_tab_index;
+                        app_data.statusbar.rebuild(&app_data.config.statusbar, metrics.sb_cols, &tabs, active_tab);
                     }
                 }
 
@@ -6066,6 +6017,56 @@ pub fn run_event_loop(
                     || cursor_trail_still_active
                 {
                     app_data.loop_signal.clone().wakeup();
+                }
+            }
+        }
+
+        if let Some(pointer) = &app_data.wayland_state.pointer {
+            if let Some(shape_manager) = &app_data.wayland_state.globals.cursor_shape_manager {
+                let mut hovering_context_menu = false;
+                let (cell_w, cell_h, _, _) = pointer_layout_metrics(&app_data);
+                if let Some(cm) = &app_data.context_menu {
+                    if let Some(window) = app_data.wayland_state.window.as_ref() {
+                        if cm.contains(app_data.pointer_x, app_data.pointer_y, window.size.width as f64, window.size.height as f64, cell_w, cell_h) {
+                            hovering_context_menu = true;
+                        }
+                    }
+                }
+
+                let shape = if app_data.is_hovering_edge || app_data.is_hovering_statusbar || hovering_context_menu {
+                    wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
+                } else if let Some(handle) = app_data
+                    .dragging_scrolling_resize
+                    .as_ref()
+                    .map(|drag| drag.handle)
+                    .or(app_data.hovered_scrolling_resize)
+                {
+                    match handle.axis {
+                        crate::mux::state::SplitAxis::Vertical => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::ColResize,
+                        crate::mux::state::SplitAxis::Horizontal => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::RowResize,
+                    }
+                } else if let Some(border) = app_data.dragging_split.as_ref().or_else(|| {
+                    app_data.hovered_split.and_then(|i| app_data.tab_manager.active_mux().last_borders.get(i))
+                }) {
+                    match border.axis {
+                        crate::mux::state::SplitAxis::Vertical => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::ColResize,
+                        crate::mux::state::SplitAxis::Horizontal => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::RowResize,
+                    }
+                } else {
+                    if app_data.was_alt_buffer {
+                        wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
+                    } else {
+                        wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Text
+                    }
+                };
+
+                if app_data.wayland_state.force_cursor_update || app_data.wayland_state.current_cursor_shape != Some(shape) {
+                    let device = shape_manager.get_pointer(pointer, &app_data.queue_handle, ());
+                    device.set_shape(app_data.wayland_state.pointer_serial, shape);
+                    device.destroy();
+                    app_data.wayland_state.current_cursor_shape = Some(shape);
+                    app_data.wayland_state.force_cursor_update = false;
+                    app_data.wayland_state.needs_flush = true;
                 }
             }
         }
