@@ -3,6 +3,7 @@ pub mod layout;
 pub mod pane;
 pub mod runtime;
 pub mod scrolling;
+pub mod spawn;
 pub mod state;
 pub mod tab;
 
@@ -23,6 +24,7 @@ pub use scrolling::{
     ScrollingResizeDrag, ScrollingResizeHandle, VirtualPaneRect, VisiblePaneCache,
     VisibleScrollingPane,
 };
+pub use spawn::{PtySpawnCompletion, PtySpawnRequest, PtySpawnService};
 pub use state::{
     LayoutNode, MuxState, PaneLayoutChange, PanePointTarget, RelayoutError, RemovePaneResult,
     SplitAxis, SplitPaneError,

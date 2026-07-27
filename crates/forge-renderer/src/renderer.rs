@@ -40,6 +40,11 @@ fn estimate_vertex_capacity(width: u32, height: u32, cell_width: u32, cell_heigh
     (cols * rows * VERTICES_PER_CELL_BUDGET + EXTRA_VERTEX_BUDGET).max(MIN_VERTEX_CAPACITY)
 }
 
+fn initial_pane_tessellator_cells(grid: &[&[forge_core::cell::Cell]]) -> usize {
+    let grid_cells = grid.iter().map(|row| row.len()).sum::<usize>();
+    grid_cells.saturating_add(EXTRA_VERTEX_BUDGET.div_ceil(12))
+}
+
 fn align_device_size(value: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::DeviceSize {
     debug_assert!(alignment.is_power_of_two());
     (value + alignment - 1) & !(alignment - 1)
@@ -2418,7 +2423,9 @@ impl Renderer {
                 let tessellator = self
                     .pane_tessellators
                     .entry(pane.pane_id)
-                    .or_insert_with(|| GridTessellator::new(self.max_vertices / 12));
+                    .or_insert_with(|| {
+                        GridTessellator::new(initial_pane_tessellator_cells(pane.grid))
+                    });
                 tessellator.tessellate(
                     pane.grid,
                     pane.dirty_generations,
@@ -3190,6 +3197,17 @@ mod tests {
         assert_eq!(
             vertex_buffer_size(max_vertices),
             vertex_region_size(max_vertices) * MAX_FRAMES_IN_FLIGHT as vk::DeviceSize
+        );
+    }
+
+    #[test]
+    fn pane_tessellator_capacity_tracks_its_grid_instead_of_global_maximum() {
+        let rows = vec![vec![forge_core::cell::Cell::default(); 80]; 24];
+        let grid: Vec<&[forge_core::cell::Cell]> = rows.iter().map(Vec::as_slice).collect();
+
+        assert_eq!(
+            initial_pane_tessellator_cells(&grid),
+            80 * 24 + EXTRA_VERTEX_BUDGET.div_ceil(12)
         );
     }
 

@@ -19,6 +19,17 @@ pub struct StatusBarState {
     pub hovered_region: Option<(usize, usize)>,
     pub hovered_is_square: bool,
     pub hover_opacity: f32,
+    last_rebuild: Option<StatusbarRebuildState>,
+}
+
+#[derive(Clone)]
+struct StatusbarRebuildState {
+    cols: usize,
+    active_tab: usize,
+    tabs_signature: u64,
+    generation: u64,
+    hovered_action: Option<String>,
+    hover_opacity_bits: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +50,7 @@ impl Default for StatusBarState {
             hovered_region: None,
             hovered_is_square: false,
             hover_opacity: 0.0,
+            last_rebuild: None,
         }
     }
 }
@@ -153,6 +165,24 @@ mod tests {
         assert_eq!(state.cells[1].bg, parse_hex_color("#89B4FA").unwrap());
     }
 
+    #[test]
+    fn unchanged_statusbar_model_reuses_previous_build() {
+        let config = StatusbarConfig::default();
+        let tabs = vec![StatusbarTab {
+            index: 0,
+            title: "Tab 1".to_string(),
+            is_zoomed: false,
+        }];
+        let mut state = StatusBarState::default();
+
+        assert!(state.needs_rebuild(80, 0, 1));
+        state.rebuild(&config, 80, &tabs, 0);
+        state.record_rebuild(80, 0, 1);
+        assert!(!state.needs_rebuild(80, 0, 1));
+
+        state.set_var("dir", "/tmp");
+        assert!(state.needs_rebuild(80, 0, 1));
+    }
 }
 
 pub fn parse_hex_color(hex: &str) -> Option<Color> {
@@ -249,6 +279,39 @@ impl StatusBarState {
         if self.vars.get(key).map(|s| s.as_str()) != Some(value) {
             self.vars.insert(key.to_string(), value.to_string());
             self.generation = self.generation.wrapping_add(1);
+        }
+    }
+
+    pub fn needs_rebuild(&self, cols: usize, active_tab: usize, tabs_signature: u64) -> bool {
+        self.last_rebuild.as_ref().is_none_or(|last| {
+            last.cols != cols
+                || last.active_tab != active_tab
+                || last.tabs_signature != tabs_signature
+                || last.generation != self.generation
+                || last.hovered_action != self.hovered_action
+                || last.hover_opacity_bits != self.hover_opacity.to_bits()
+        })
+    }
+
+    pub fn record_rebuild(&mut self, cols: usize, active_tab: usize, tabs_signature: u64) {
+        if let Some(last) = self.last_rebuild.as_mut() {
+            if last.hovered_action != self.hovered_action {
+                last.hovered_action = self.hovered_action.clone();
+            }
+            last.cols = cols;
+            last.active_tab = active_tab;
+            last.tabs_signature = tabs_signature;
+            last.generation = self.generation;
+            last.hover_opacity_bits = self.hover_opacity.to_bits();
+        } else {
+            self.last_rebuild = Some(StatusbarRebuildState {
+                cols,
+                active_tab,
+                tabs_signature,
+                generation: self.generation,
+                hovered_action: self.hovered_action.clone(),
+                hover_opacity_bits: self.hover_opacity.to_bits(),
+            });
         }
     }
 

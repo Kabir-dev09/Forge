@@ -76,16 +76,14 @@ impl TabManager {
 
     /// Allocate a globally unique pane ID (unique across all tabs).
     pub fn alloc_pane_id(&mut self) -> super::pane::PaneId {
-        // Also scan all tabs to ensure no collision.
-        let max_used = self
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.mux.panes.keys())
-            .map(|pid| pid.get())
-            .max()
-            .unwrap_or(0);
-        let id = self.next_global_pane_id.max(max_used + 1);
+        let id = self.next_global_pane_id;
         self.next_global_pane_id = id.saturating_add(1);
+        debug_assert!(
+            self.tabs
+                .iter()
+                .all(|tab| !tab.mux.panes.contains_key(&super::pane::PaneId::new(id))),
+            "global pane ID allocator produced a duplicate"
+        );
         super::pane::PaneId::new(id)
     }
 
@@ -300,6 +298,15 @@ mod tests {
         assert_eq!(mgr.find_tab_for_pane(PaneId::new(200)), Some(2));
         // Non-existent pane
         assert_eq!(mgr.find_tab_for_pane(PaneId::new(999)), None);
+    }
+
+    #[test]
+    fn pane_id_allocation_advances_without_rescanning_tabs() {
+        let mut mgr = TabManager::new(make_mux(10));
+        mgr.create_tab(make_mux(100));
+
+        assert_eq!(mgr.alloc_pane_id(), PaneId::new(101));
+        assert_eq!(mgr.alloc_pane_id(), PaneId::new(102));
     }
 
     #[test]

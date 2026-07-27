@@ -19,6 +19,7 @@ use super::PaneId;
 pub const PTY_READ_BUFFER_SIZE: usize = 128 * 1024; // 128KB per read call
 pub const MAX_PTY_READ_ITERATIONS_PER_EVENT: usize = 64; // drain burst aggressively
 pub const MAX_PTY_READ_BYTES_PER_EVENT: usize = 4 * 1024 * 1024; // 4MB per wakeup event
+const MAX_PENDING_PANE_WRITE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneIoStatus {
@@ -102,12 +103,11 @@ impl calloop::EventSource for DynamicPtySource {
     where
         C: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
     {
-        self.inner
-            .process_events(readiness, token, |ready, file| {
-                use std::os::unix::io::AsRawFd;
-                let mut fd = file.as_raw_fd();
-                callback(ready, &mut fd)
-            })
+        self.inner.process_events(readiness, token, |ready, file| {
+            use std::os::unix::io::AsRawFd;
+            let mut fd = file.as_raw_fd();
+            callback(ready, &mut fd)
+        })
     }
 
     fn register(
@@ -137,7 +137,13 @@ impl calloop::EventSource for DynamicPtySource {
 // Tests stay beside command-normalization helpers while the runtime implementation follows.
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{normalize_command_program_name, selected_text};
+    use std::collections::HashMap;
+
+    use super::{
+        normalize_command_program_name, queue_pending_pane_write, selected_text,
+        MAX_PENDING_PANE_WRITE_BYTES,
+    };
+    use crate::mux::PaneId;
 
     #[test]
     fn command_program_name_extracts_basename() {
@@ -198,6 +204,22 @@ mod tests {
         screen.clear_selection();
         assert_eq!(selected_text(&screen), None);
     }
+
+    #[test]
+    fn pending_pane_input_is_bounded_and_keeps_earliest_bytes() {
+        let pane_id = PaneId::new(7);
+        let mut pending = HashMap::new();
+        queue_pending_pane_write(&mut pending, pane_id, b"first");
+        queue_pending_pane_write(
+            &mut pending,
+            pane_id,
+            &vec![b'x'; MAX_PENDING_PANE_WRITE_BYTES],
+        );
+
+        let buffered = pending.get(&pane_id).unwrap();
+        assert_eq!(buffered.len(), MAX_PENDING_PANE_WRITE_BYTES);
+        assert_eq!(&buffered[..5], b"first");
+    }
 }
 
 pub struct PaneIoRegistry {
@@ -217,6 +239,7 @@ pub struct PaneIoRegistry {
 
 struct WorkerState {
     panes: HashMap<PaneId, PaneState>,
+    pending_pane_writes: HashMap<PaneId, Vec<u8>>,
     exited_panes: Arc<RwLock<Vec<PaneId>>>,
     // FIX 3: shared atomic so main thread can read without taking the RwLock.
     has_exited: Arc<AtomicBool>,
@@ -382,6 +405,16 @@ fn flush_pending_write(fd: RawFd, pending_write: &mut Vec<u8>) {
     }
 }
 
+fn queue_pending_pane_write(
+    pending_pane_writes: &mut HashMap<PaneId, Vec<u8>>,
+    pane_id: PaneId,
+    data: &[u8],
+) {
+    let pending = pending_pane_writes.entry(pane_id).or_default();
+    let available = MAX_PENDING_PANE_WRITE_BYTES.saturating_sub(pending.len());
+    pending.extend_from_slice(&data[..data.len().min(available)]);
+}
+
 fn selected_text(screen_buffer: &ScreenBuffer) -> Option<String> {
     screen_buffer.selection.and_then(|selection| {
         let text = screen_buffer.get_text_in_range(selection);
@@ -465,15 +498,13 @@ impl PaneIoRegistry {
                             screen_buffer,
                             snapshot,
                         } => {
-                            if let Err(e) =
-                                state.add_pane(
-                                    pane_id,
-                                    fd,
-                                    *vte_processor,
-                                    *screen_buffer,
-                                    snapshot,
-                                )
-                            {
+                            if let Err(e) = state.add_pane(
+                                pane_id,
+                                fd,
+                                *vte_processor,
+                                *screen_buffer,
+                                snapshot,
+                            ) {
                                 tracing::error!("Failed to add pane {}: {}", pane_id.get(), e);
                             }
                         }
@@ -571,6 +602,12 @@ impl PaneIoRegistry {
                                         let _ = state.loop_handle.update(&pane.token);
                                     }
                                 }
+                            } else {
+                                queue_pending_pane_write(
+                                    &mut state.pending_pane_writes,
+                                    pane_id,
+                                    &data,
+                                );
                             }
                         }
                         PtyWorkerCommand::SetVisiblePanes(panes) => {
@@ -610,6 +647,7 @@ impl PaneIoRegistry {
 
         let mut state = WorkerState {
             panes: HashMap::new(),
+            pending_pane_writes: HashMap::new(),
             exited_panes,
             has_exited: has_exited_worker,
             wakeup_signal,
@@ -731,13 +769,19 @@ impl WorkerState {
         snapshot: Arc<ArcSwap<RenderSnapshot>>,
     ) -> Result<()> {
         let raw_fd = std::os::fd::AsRawFd::as_raw_fd(&fd);
-        let interest = std::rc::Rc::new(std::cell::Cell::new(calloop::Interest::READ));
+        let mut pending_write = self
+            .pending_pane_writes
+            .remove(&pane_id)
+            .unwrap_or_default();
+        flush_pending_write(raw_fd, &mut pending_write);
+        let initial_interest = if pending_write.is_empty() {
+            calloop::Interest::READ
+        } else {
+            calloop::Interest::BOTH
+        };
+        let interest = std::rc::Rc::new(std::cell::Cell::new(initial_interest));
         let source = DynamicPtySource {
-            inner: calloop::generic::Generic::new(
-                fd,
-                calloop::Interest::READ,
-                calloop::Mode::Level,
-            ),
+            inner: calloop::generic::Generic::new(fd, initial_interest, calloop::Mode::Level),
             interest: interest.clone(),
         };
         let token = self
@@ -757,7 +801,7 @@ impl WorkerState {
                 token,
                 last_snapshot_time: std::time::Instant::now(),
                 read_buf: vec![0u8; PTY_READ_BUFFER_SIZE],
-                pending_write: Vec::new(),
+                pending_write,
                 interest,
                 fd: raw_fd,
                 command_started_at: None,
@@ -783,6 +827,7 @@ impl WorkerState {
     }
 
     fn remove_pane(&mut self, pane_id: PaneId) {
+        self.pending_pane_writes.remove(&pane_id);
         if let Some(pane) = self.panes.remove(&pane_id) {
             self.loop_handle.remove(pane.token);
         }

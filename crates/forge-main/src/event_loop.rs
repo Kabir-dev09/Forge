@@ -37,6 +37,12 @@ pub struct ClosingPane {
     pub is_floating: bool,
 }
 
+struct PendingTabSpawn {
+    tab_id: crate::mux::TabId,
+    screen_buffer: forge_pty::ScreenBuffer,
+    vte_processor: forge_pty::VteProcessor,
+}
+
 const MAX_DEFERRED_STARTUP_WORK: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -198,6 +204,9 @@ pub struct AppData {
     pub tab_manager: crate::mux::TabManager,
     pub pane_runtime: crate::mux::PaneRuntime,
     pub pane_io: crate::mux::PaneIoRegistry,
+    pty_spawn_service: Option<crate::mux::PtySpawnService>,
+    pending_tab_spawns: std::collections::HashMap<crate::mux::PaneId, PendingTabSpawn>,
+    tab_action_scratch: Vec<forge_core::bindings::Action>,
     command_completion_indicators:
         std::collections::HashMap<crate::mux::PaneId, CommandCompletionIndicator>,
     command_completion_generation: u64,
@@ -281,6 +290,272 @@ fn active_cursor_blink_enabled(app_data: &AppData) -> bool {
                     .unwrap_or(app_data.config.cursor.blink)
         })
         .unwrap_or(app_data.config.cursor.blink)
+}
+
+fn cancel_pending_tab_spawn(app_data: &mut AppData, pane_id: crate::mux::PaneId) {
+    if app_data.pending_tab_spawns.remove(&pane_id).is_some() {
+        if let Some(service) = app_data.pty_spawn_service.as_ref() {
+            service.cancel(pane_id);
+        }
+    }
+}
+
+fn publish_pending_tab_spawn_error(
+    app_data: &mut AppData,
+    pane_id: crate::mux::PaneId,
+    mut pending: PendingTabSpawn,
+    error: &str,
+) {
+    let message = format!("\r\nforge: failed to launch shell: {error}\r\n");
+    let _ = pending
+        .vte_processor
+        .process(message.as_bytes(), &mut pending.screen_buffer);
+    let snapshot = pending.screen_buffer.generate_snapshot();
+    if let Some(pane) = app_data
+        .tab_manager
+        .tabs
+        .iter()
+        .find(|tab| tab.id == pending.tab_id)
+        .and_then(|tab| tab.mux.panes.get(&pane_id))
+    {
+        pane.snapshot.store(std::sync::Arc::new(snapshot));
+    }
+    app_data.pane_io.remove_pane(pane_id);
+    app_data.force_immediate_render = true;
+    app_data.wayland_state.force_redraw = true;
+}
+
+fn process_pending_tab_spawns(app_data: &mut AppData) {
+    loop {
+        let completion = match app_data
+            .pty_spawn_service
+            .as_ref()
+            .map(crate::mux::PtySpawnService::try_recv)
+        {
+            Some(Ok(completion)) => completion,
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => break,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => break,
+        };
+        if let Some(service) = app_data.pty_spawn_service.as_ref() {
+            service.acknowledge_completion(completion.pane_id);
+        }
+
+        let Some(mut pending) = app_data.pending_tab_spawns.remove(&completion.pane_id) else {
+            if let Ok(pty) = completion.result {
+                if let Some(service) = app_data.pty_spawn_service.as_ref() {
+                    service.dispose(pty);
+                }
+            }
+            continue;
+        };
+
+        let Some(tab_index) = app_data
+            .tab_manager
+            .tabs
+            .iter()
+            .position(|tab| tab.id == pending.tab_id)
+        else {
+            if let Ok(pty) = completion.result {
+                if let Some(service) = app_data.pty_spawn_service.as_ref() {
+                    service.dispose(pty);
+                }
+            }
+            continue;
+        };
+        let Some(grid_size) = app_data.tab_manager.tabs[tab_index]
+            .mux
+            .panes
+            .get(&completion.pane_id)
+            .map(|pane| pane.grid_size)
+        else {
+            if let Ok(pty) = completion.result {
+                if let Some(service) = app_data.pty_spawn_service.as_ref() {
+                    service.dispose(pty);
+                }
+            }
+            continue;
+        };
+
+        let mut pty = match completion.result {
+            Ok(pty) => pty,
+            Err(error) => {
+                publish_pending_tab_spawn_error(app_data, completion.pane_id, pending, &error);
+                continue;
+            }
+        };
+
+        if pending.screen_buffer.cols() != grid_size.cols
+            || pending.screen_buffer.rows() != grid_size.rows
+        {
+            pending
+                .screen_buffer
+                .resize_reflow(grid_size.cols, grid_size.rows);
+        }
+        if let Some(metrics) = app_data.cached_grid_metrics {
+            let px_w = (grid_size.cols as f64 * metrics.effective_cell_w) as u16;
+            let px_h = (grid_size.rows as f64 * metrics.effective_cell_h) as u16;
+            let _ = pty.resize(grid_size.cols as u16, grid_size.rows as u16, px_w, px_h);
+        }
+
+        let fd = match pty.master_fd.try_clone() {
+            Ok(fd) => fd,
+            Err(error) => {
+                if let Some(service) = app_data.pty_spawn_service.as_ref() {
+                    service.dispose(pty);
+                }
+                publish_pending_tab_spawn_error(
+                    app_data,
+                    completion.pane_id,
+                    pending,
+                    &error.to_string(),
+                );
+                continue;
+            }
+        };
+        let snapshot = app_data.tab_manager.tabs[tab_index]
+            .mux
+            .panes
+            .get(&completion.pane_id)
+            .expect("pending pane disappeared during spawn completion")
+            .snapshot
+            .clone();
+        snapshot.store(std::sync::Arc::new(
+            pending.screen_buffer.generate_snapshot(),
+        ));
+        app_data.tab_manager.tabs[tab_index]
+            .mux
+            .panes
+            .get_mut(&completion.pane_id)
+            .expect("pending pane disappeared during spawn completion")
+            .pty = Some(pty);
+
+        if let Err(error) = app_data.pane_io.register_pane(
+            completion.pane_id,
+            fd,
+            pending.vte_processor,
+            pending.screen_buffer,
+            snapshot,
+        ) {
+            tracing::error!(pane_id = completion.pane_id.get(), %error, "Failed to register spawned tab PTY");
+        }
+        app_data
+            .pane_io
+            .visible_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn start_pending_new_tab(app_data: &mut AppData) -> std::result::Result<(), String> {
+    let grid_metrics = app_data
+        .cached_grid_metrics
+        .ok_or_else(|| "grid metrics are not ready".to_string())?;
+    let cols = grid_metrics.cols;
+    let rows = grid_metrics.rows;
+    let metrics = pointer_layout_metrics(app_data);
+    let working_directory =
+        active_pane_working_directory(app_data, app_data.config.shell.inherit_cwd_for_new_tabs);
+
+    if app_data.pty_spawn_service.is_none() {
+        app_data.pty_spawn_service = Some(
+            crate::mux::PtySpawnService::new(
+                app_data.config.shell.clone(),
+                app_data.loop_signal.clone(),
+            )
+            .map_err(|error| format!("failed to start PTY spawn service: {error}"))?,
+        );
+    }
+
+    let mut screen_buffer = forge_pty::ScreenBuffer::new(
+        cols,
+        rows,
+        app_data.config.scrollback.lines.unwrap_or(100_000),
+        app_data.config.theme.parsed_foreground,
+        app_data.config.theme.parsed_background,
+    );
+    screen_buffer.palette = app_data.config.theme.parsed_ansi_colors;
+    let vte_processor = forge_pty::VteProcessor::new();
+    let snapshot = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        screen_buffer.generate_snapshot(),
+    ));
+    let pane_id = app_data.tab_manager.alloc_pane_id();
+    let mut new_mux = crate::mux::MuxState::with_pending_single_pane_id(
+        pane_id,
+        snapshot,
+        crate::mux::GridSize::new(cols, rows),
+    );
+    let startup_content_rect = crate::mux::PaneRect::new(
+        metrics.2 as f32,
+        metrics.3 as f32,
+        (cols as f64 * metrics.0) as f32,
+        (rows as f64 * metrics.1) as f32,
+    );
+    if let Err(error) = new_mux.relayout(crate::mux::LayoutParams::new(
+        startup_content_rect,
+        metrics.0 as f32,
+        metrics.1 as f32,
+        app_data.config.window.gap as f32,
+        app_data.effective_pane_padding(),
+    )) {
+        tracing::warn!(?error, "New pending tab mux relayout failed");
+    }
+
+    let tab_id = app_data.tab_manager.create_tab(new_mux);
+    if let Some(scrolling) = app_data.pane_runtime.scrolling_mut() {
+        scrolling.add_tab_from_tiling(
+            app_data.tab_manager.active_tab(),
+            cols,
+            rows,
+            app_data.config.panes.scroll_animation_duration_ms,
+        );
+    }
+    app_data.pending_tab_spawns.insert(
+        pane_id,
+        PendingTabSpawn {
+            tab_id,
+            screen_buffer,
+            vte_processor,
+        },
+    );
+
+    let mut winsize = forge_pty::pty::size_to_winsize(
+        app_data
+            .wayland_state
+            .window
+            .as_ref()
+            .expect("window must exist while creating a tab")
+            .size,
+        1,
+        1,
+    );
+    winsize.ws_col = cols as u16;
+    winsize.ws_row = rows as u16;
+    winsize.ws_xpixel = (cols as f64 * metrics.0) as u16;
+    winsize.ws_ypixel = (rows as f64 * metrics.1) as u16;
+    let request = crate::mux::PtySpawnRequest {
+        pane_id,
+        winsize,
+        working_directory,
+    };
+    if let Err(error) = app_data
+        .pty_spawn_service
+        .as_ref()
+        .expect("spawn service was initialized")
+        .spawn(request)
+    {
+        let pending = app_data
+            .pending_tab_spawns
+            .remove(&pane_id)
+            .expect("pending tab state must exist before spawn request");
+        publish_pending_tab_spawn_error(app_data, pane_id, pending, &error);
+    }
+
+    app_data
+        .pane_io
+        .visible_gen
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    app_data.force_immediate_render = true;
+    app_data.wayland_state.force_redraw = true;
+    Ok(())
 }
 
 fn reported_working_directory(
@@ -438,19 +713,6 @@ impl AppData {
             return;
         }
 
-        let tabs: Vec<crate::statusbar::StatusbarTab> = self
-            .tab_manager
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(i, tab)| crate::statusbar::StatusbarTab {
-                index: i,
-                title: format!("Tab {}", i + 1),
-                is_zoomed: tab.mux.is_zoomed(),
-            })
-            .collect();
-        let active_tab = self.tab_manager.active_tab_index;
-
         let active_pane = self.tab_manager.active_mux().active_pane;
         if let Some(pane) = self.tab_manager.active_mux().panes.get(&active_pane) {
             let snap = pane.snapshot.load();
@@ -462,8 +724,38 @@ impl AppData {
             }
         }
 
+        let active_tab = self.tab_manager.active_tab_index;
+        let tabs_signature = self.tab_manager.tabs.iter().enumerate().fold(
+            self.tab_manager.tabs.len() as u64,
+            |signature, (index, tab)| {
+                signature.rotate_left(7)
+                    ^ ((index as u64 + 1) << 1)
+                    ^ u64::from(tab.mux.is_zoomed())
+            },
+        );
+        if !self
+            .statusbar
+            .needs_rebuild(sb_cols, active_tab, tabs_signature)
+        {
+            return;
+        }
+
+        let tabs: Vec<crate::statusbar::StatusbarTab> = self
+            .tab_manager
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| crate::statusbar::StatusbarTab {
+                index: i,
+                title: format!("Tab {}", i + 1),
+                is_zoomed: tab.mux.is_zoomed(),
+            })
+            .collect();
+
         self.statusbar
             .rebuild(&self.config.statusbar, sb_cols, &tabs, active_tab);
+        self.statusbar
+            .record_rebuild(sb_cols, active_tab, tabs_signature);
     }
 }
 
@@ -1013,6 +1305,7 @@ pub fn close_pane(app_data: &mut AppData, pane_id: crate::mux::PaneId) {
 }
 
 fn execute_close_pane(app_data: &mut AppData, pane_id: crate::mux::PaneId) {
+    cancel_pending_tab_spawn(app_data, pane_id);
     app_data.command_completion_indicators.remove(&pane_id);
     app_data.pane_io.remove_pane(pane_id);
     app_data.context_menu = None;
@@ -1160,6 +1453,7 @@ fn close_tab(app_data: &mut AppData, tab_id: crate::mux::TabId) {
         .copied()
         .collect();
     for pane_id in pane_ids {
+        cancel_pending_tab_spawn(app_data, pane_id);
         app_data.command_completion_indicators.remove(&pane_id);
         app_data.pane_io.remove_pane(pane_id);
     }
@@ -2412,6 +2706,9 @@ pub fn run_event_loop(
             loop_signal,
             command_completion_tracking_enabled_for_config(&config),
         )?,
+        pty_spawn_service: None,
+        pending_tab_spawns: std::collections::HashMap::new(),
+        tab_action_scratch: Vec::new(),
         command_completion_indicators: std::collections::HashMap::new(),
         command_completion_generation: 0,
         selection_copies_in_flight: 0,
@@ -2507,6 +2804,7 @@ pub fn run_event_loop(
         .unwrap();
 
     while app_data.wayland_state.running {
+        process_pending_tab_spawns(&mut app_data);
         process_command_completion_events(&mut app_data);
         expire_command_completion_indicators(&mut app_data, std::time::Instant::now());
 
@@ -2711,9 +3009,11 @@ pub fn run_event_loop(
         {
             timeout = Some(timeout.map_or(indicator_timeout, |t| t.min(indicator_timeout)));
         }
-        if let Some(trail_timeout) = app_data.renderer.as_ref().and_then(|renderer| {
-            renderer.cursor_trail_next_wakeup(std::time::Instant::now())
-        }) {
+        if let Some(trail_timeout) = app_data
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.cursor_trail_next_wakeup(std::time::Instant::now()))
+        {
             timeout = Some(timeout.map_or(trail_timeout, |t| t.min(trail_timeout)));
         }
         if redraw_can_run_immediately(
@@ -3086,23 +3386,24 @@ pub fn run_event_loop(
         if !app_data.startup_geometry_ready
             && !app_data.wayland_state.pending_tab_actions.is_empty()
         {
-            let actions: Vec<_> = app_data
-                .wayland_state
-                .pending_tab_actions
-                .drain(..)
-                .collect();
-            for action in actions {
+            let mut actions = std::mem::take(&mut app_data.tab_action_scratch);
+            std::mem::swap(
+                &mut actions,
+                &mut app_data.wayland_state.pending_tab_actions,
+            );
+            for action in actions.drain(..) {
                 defer_startup_work(&mut app_data, DeferredStartupWork::Action(action));
             }
+            app_data.tab_action_scratch = actions;
         }
 
         if !app_data.wayland_state.pending_tab_actions.is_empty() {
-            let actions: Vec<_> = app_data
-                .wayland_state
-                .pending_tab_actions
-                .drain(..)
-                .collect();
-            for action in actions {
+            let mut actions = std::mem::take(&mut app_data.tab_action_scratch);
+            std::mem::swap(
+                &mut actions,
+                &mut app_data.wayland_state.pending_tab_actions,
+            );
+            for action in actions.drain(..) {
                 match action {
                     forge_core::bindings::Action::Copy => {
                         // Process after queued pointer events so drag-selection updates are
@@ -3112,110 +3413,8 @@ pub fn run_event_loop(
                         request_clipboard_paste(&mut app_data);
                     }
                     forge_core::bindings::Action::NewTab => {
-                        let grid_metrics =
-                            app_data.cached_grid_metrics.expect("grid metrics missing");
-                        let cols = grid_metrics.cols;
-                        let rows = grid_metrics.rows;
-
-                        let mut winsize = forge_pty::pty::size_to_winsize(
-                            app_data.wayland_state.window.as_ref().unwrap().size,
-                            1,
-                            1,
-                        );
-                        let metrics = pointer_layout_metrics(&app_data);
-                        winsize.ws_col = cols as u16;
-                        winsize.ws_row = rows as u16;
-                        winsize.ws_xpixel = (cols as f64 * metrics.0) as u16;
-                        winsize.ws_ypixel = (rows as f64 * metrics.1) as u16;
-                        let working_directory = active_pane_working_directory(
-                            &app_data,
-                            app_data.config.shell.inherit_cwd_for_new_tabs,
-                        );
-
-                        match forge_pty::Pty::spawn_in_dir(
-                            &app_data.config.shell,
-                            winsize,
-                            working_directory.as_deref(),
-                        ) {
-                            Ok(pty) => {
-                                let mut screen_buffer = forge_pty::ScreenBuffer::new(
-                                    cols,
-                                    rows,
-                                    app_data.config.scrollback.lines.unwrap_or(100_000),
-                                    app_data.config.theme.parsed_foreground,
-                                    app_data.config.theme.parsed_background,
-                                );
-                                screen_buffer.palette = app_data.config.theme.parsed_ansi_colors;
-                                let vte_processor = forge_pty::VteProcessor::new();
-                                let snapshot =
-                                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-                                        screen_buffer.generate_snapshot(),
-                                    ));
-
-                                let new_pane_id = app_data.tab_manager.alloc_pane_id();
-                                let mut new_mux = crate::mux::MuxState::with_single_pane_id(
-                                    new_pane_id,
-                                    pty,
-                                    snapshot.clone(),
-                                    crate::mux::GridSize::new(cols, rows),
-                                );
-
-                                let startup_content_rect = crate::mux::PaneRect::new(
-                                    metrics.2 as f32,
-                                    metrics.3 as f32,
-                                    (cols as f64 * metrics.0) as f32,
-                                    (rows as f64 * metrics.1) as f32,
-                                );
-                                if let Err(err) = new_mux.relayout(crate::mux::LayoutParams::new(
-                                    startup_content_rect,
-                                    metrics.0 as f32,
-                                    metrics.1 as f32,
-                                    app_data.config.window.gap as f32,
-                                    app_data.effective_pane_padding(),
-                                )) {
-                                    tracing::warn!(?err, "New tab mux relayout failed");
-                                }
-
-                                let active_pane = new_mux.active_pane;
-                                let fd_clone = new_mux
-                                    .panes
-                                    .get(&active_pane)
-                                    .unwrap()
-                                    .pty
-                                    .as_ref()
-                                    .unwrap()
-                                    .master_fd
-                                    .try_clone()
-                                    .unwrap();
-
-                                app_data.tab_manager.create_tab(new_mux);
-                                if let Some(scrolling) = app_data.pane_runtime.scrolling_mut() {
-                                    scrolling.add_tab_from_tiling(
-                                        app_data.tab_manager.active_tab(),
-                                        cols,
-                                        rows,
-                                        app_data.config.panes.scroll_animation_duration_ms,
-                                    );
-                                }
-                                app_data
-                                    .pane_io
-                                    .register_pane(
-                                        active_pane,
-                                        fd_clone,
-                                        vte_processor,
-                                        screen_buffer,
-                                        snapshot,
-                                    )
-                                    .unwrap();
-                                // Bump gen so the worker learns about the new pane on next tick.
-                                app_data
-                                    .pane_io
-                                    .visible_gen
-                                    .fetch_add(1, std::sync::atomic::Ordering::Release);
-                                app_data.force_immediate_render = true;
-                                app_data.wayland_state.force_redraw = true;
-                            }
-                            Err(e) => tracing::error!("Failed to spawn PTY for new tab: {}", e),
+                        if let Err(error) = start_pending_new_tab(&mut app_data) {
+                            tracing::error!(%error, "Failed to create pending tab");
                         }
                     }
                     forge_core::bindings::Action::CloseTab => {
@@ -3583,6 +3782,7 @@ pub fn run_event_loop(
                     _ => {}
                 }
             }
+            app_data.tab_action_scratch = actions;
         }
 
         if !app_data.wayland_state.running {
@@ -3960,7 +4160,7 @@ pub fn run_event_loop(
                                 app_data.update_statusbar(metrics.sb_cols);
                             }
                         }
-                        
+
                         app_data.statusbar.hovered_region = new_hovered_region;
                         needs_redraw = true;
                     }
@@ -4447,11 +4647,8 @@ pub fn run_event_loop(
                             app_data.force_immediate_render = true;
                             app_data.wayland_state.force_redraw = true;
 
-                            if let Some(pane) = app_data
-                                .tab_manager
-                                .active_mux()
-                                .panes
-                                .get(&pane_id)
+                            if let Some(pane) =
+                                app_data.tab_manager.active_mux().panes.get(&pane_id)
                             {
                                 let snapshot = pane.snapshot.load();
                                 mouse_tracking_enabled = snapshot.mouse_tracking_enabled;
@@ -4671,7 +4868,8 @@ pub fn run_event_loop(
                     if mouse_tracking_enabled {
                         let (cell_w, cell_h, _pad_x, _pad_y) = pointer_layout_metrics(&app_data);
                         let active_pane = app_data.active_pane_id();
-                        let Some(active_rect) = pointer_rect_for_pane(&app_data, active_pane) else {
+                        let Some(active_rect) = pointer_rect_for_pane(&app_data, active_pane)
+                        else {
                             continue;
                         };
 
@@ -5145,20 +5343,28 @@ pub fn run_event_loop(
                                 ((end_col - start_col) as f64 * metrics.effective_cell_w) as f32;
                             let size = metrics.effective_cell_h as f32;
 
-                            statusbar_hover = Some(
-                                forge_renderer::grid_tessellator::StatusbarHoverRenderData {
+                            statusbar_hover =
+                                Some(forge_renderer::grid_tessellator::StatusbarHoverRenderData {
                                     x: region_x + (region_width - size) * 0.5,
                                     y: metrics.sb_y as f32,
                                     width: size,
                                     height: size,
                                     opacity: app_data.statusbar.hover_opacity,
                                     color: app_data.cached_statusbar_hover_color,
-                                },
-                            );
+                                });
                         }
                     }
-                    
+
                     if needs_statusbar_hover_redraw {
+                        let active_tab = app_data.tab_manager.active_tab_index;
+                        let tabs_signature = app_data.tab_manager.tabs.iter().enumerate().fold(
+                            app_data.tab_manager.tabs.len() as u64,
+                            |signature, (index, tab)| {
+                                signature.rotate_left(7)
+                                    ^ ((index as u64 + 1) << 1)
+                                    ^ u64::from(tab.mux.is_zoomed())
+                            },
+                        );
                         let tabs: Vec<crate::statusbar::StatusbarTab> = app_data
                             .tab_manager
                             .tabs
@@ -5170,8 +5376,17 @@ pub fn run_event_loop(
                                 is_zoomed: tab.mux.is_zoomed(),
                             })
                             .collect();
-                        let active_tab = app_data.tab_manager.active_tab_index;
-                        app_data.statusbar.rebuild(&app_data.config.statusbar, metrics.sb_cols, &tabs, active_tab);
+                        app_data.statusbar.rebuild(
+                            &app_data.config.statusbar,
+                            metrics.sb_cols,
+                            &tabs,
+                            active_tab,
+                        );
+                        app_data.statusbar.record_rebuild(
+                            metrics.sb_cols,
+                            active_tab,
+                            tabs_signature,
+                        );
                     }
                 }
 
@@ -6028,12 +6243,10 @@ pub fn run_event_loop(
                                 metrics.effective_cell_w as f32,
                                 metrics.effective_cell_h as f32,
                             ) {
-                                dividers.push(
-                                    forge_renderer::renderer::SplitBorderRenderInput {
-                                        rect,
-                                        color: [0.3, 0.3, 0.3, 1.0],
-                                    },
-                                );
+                                dividers.push(forge_renderer::renderer::SplitBorderRenderInput {
+                                    rect,
+                                    color: [0.3, 0.3, 0.3, 1.0],
+                                });
                             }
                         }
                     }
@@ -6134,9 +6347,10 @@ pub fn run_event_loop(
                     }
                     crate::mux::PaneRuntime::Tiling => false,
                 };
-                let cursor_trail_still_active = app_data.renderer.as_ref().is_some_and(|renderer| {
-                    renderer.cursor_trail_wants_redraw(std::time::Instant::now())
-                });
+                let cursor_trail_still_active =
+                    app_data.renderer.as_ref().is_some_and(|renderer| {
+                        renderer.cursor_trail_wants_redraw(std::time::Instant::now())
+                    });
                 let alternate_buffer_animation_still_active = app_data
                     .renderer
                     .as_ref()
@@ -6165,13 +6379,23 @@ pub fn run_event_loop(
                 let (cell_w, cell_h, _, _) = pointer_layout_metrics(&app_data);
                 if let Some(cm) = &app_data.context_menu {
                     if let Some(window) = app_data.wayland_state.window.as_ref() {
-                        if cm.contains(app_data.pointer_x, app_data.pointer_y, window.size.width as f64, window.size.height as f64, cell_w, cell_h) {
+                        if cm.contains(
+                            app_data.pointer_x,
+                            app_data.pointer_y,
+                            window.size.width as f64,
+                            window.size.height as f64,
+                            cell_w,
+                            cell_h,
+                        ) {
                             hovering_context_menu = true;
                         }
                     }
                 }
 
-                let shape = if app_data.is_hovering_edge || app_data.is_hovering_statusbar || hovering_context_menu {
+                let shape = if app_data.is_hovering_edge
+                    || app_data.is_hovering_statusbar
+                    || hovering_context_menu
+                {
                     wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::Default
                 } else if let Some(handle) = app_data
                     .dragging_scrolling_resize
@@ -6184,7 +6408,9 @@ pub fn run_event_loop(
                         crate::mux::state::SplitAxis::Horizontal => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::RowResize,
                     }
                 } else if let Some(border) = app_data.dragging_split.as_ref().or_else(|| {
-                    app_data.hovered_split.and_then(|i| app_data.tab_manager.active_mux().last_borders.get(i))
+                    app_data
+                        .hovered_split
+                        .and_then(|i| app_data.tab_manager.active_mux().last_borders.get(i))
                 }) {
                     match border.axis {
                         crate::mux::state::SplitAxis::Vertical => wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape::ColResize,
@@ -6198,7 +6424,9 @@ pub fn run_event_loop(
                     }
                 };
 
-                if app_data.wayland_state.force_cursor_update || app_data.wayland_state.current_cursor_shape != Some(shape) {
+                if app_data.wayland_state.force_cursor_update
+                    || app_data.wayland_state.current_cursor_shape != Some(shape)
+                {
                     let device = shape_manager.get_pointer(pointer, &app_data.queue_handle, ());
                     device.set_shape(app_data.wayland_state.pointer_serial, shape);
                     device.destroy();
@@ -6252,8 +6480,7 @@ pub fn compute_grid_metrics(
 ) -> GridMetrics {
     let sidebar_width = (sidebar_cols as f64 * native_cell_w).min((win_w - native_cell_w).max(0.0));
     let content_win_w = (win_w - sidebar_width).max(native_cell_w);
-    let avail_w =
-        (content_win_w - pad_cfg.left as f64 - pad_cfg.right as f64).max(native_cell_w);
+    let avail_w = (content_win_w - pad_cfg.left as f64 - pad_cfg.right as f64).max(native_cell_w);
     let mut avail_h = (win_h - pad_cfg.top as f64 - pad_cfg.bottom as f64).max(native_cell_h);
 
     let mut sb_y = 0.0;
@@ -7014,13 +7241,27 @@ mod metric_tests {
 
     #[test]
     fn frame_redraw_predicate_renders_for_each_dirty_source() {
-        assert!(frame_wants_redraw(true, false, false, false, false, false, false));
-        assert!(frame_wants_redraw(false, true, false, false, false, false, false));
-        assert!(frame_wants_redraw(false, false, true, false, false, false, false));
-        assert!(frame_wants_redraw(false, false, false, true, false, false, false));
-        assert!(frame_wants_redraw(false, false, false, false, true, false, false));
-        assert!(frame_wants_redraw(false, false, false, false, false, true, false));
-        assert!(frame_wants_redraw(false, false, false, false, false, false, true));
+        assert!(frame_wants_redraw(
+            true, false, false, false, false, false, false
+        ));
+        assert!(frame_wants_redraw(
+            false, true, false, false, false, false, false
+        ));
+        assert!(frame_wants_redraw(
+            false, false, true, false, false, false, false
+        ));
+        assert!(frame_wants_redraw(
+            false, false, false, true, false, false, false
+        ));
+        assert!(frame_wants_redraw(
+            false, false, false, false, true, false, false
+        ));
+        assert!(frame_wants_redraw(
+            false, false, false, false, false, true, false
+        ));
+        assert!(frame_wants_redraw(
+            false, false, false, false, false, false, true
+        ));
     }
 
     #[test]
@@ -7039,7 +7280,10 @@ mod metric_tests {
             reported_working_directory(false, Some("/home/user/project")),
             None
         );
-        assert_eq!(reported_working_directory(true, Some("relative/path")), None);
+        assert_eq!(
+            reported_working_directory(true, Some("relative/path")),
+            None
+        );
         assert_eq!(reported_working_directory(true, Some("")), None);
         assert_eq!(reported_working_directory(true, None), None);
     }

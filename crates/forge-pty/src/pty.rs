@@ -6,9 +6,13 @@ use nix::pty::{openpty, Winsize};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{close, dup2, execvpe, fork, setsid, ForkResult};
 use std::ffi::CString;
-use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::path::Path;
+use std::sync::OnceLock;
+
+static INTEGRATION_SCRIPTS_DIR: OnceLock<std::result::Result<std::path::PathBuf, String>> =
+    OnceLock::new();
 
 fn apply_shell_integration(
     shell: &ShellConfig,
@@ -30,7 +34,7 @@ fn apply_shell_integration(
             "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi\nsource {}",
             dir.join("bash.sh").display()
         );
-        std::fs::write(&init_path, init_script).ok();
+        write_if_changed(&init_path, init_script.as_bytes()).ok();
 
         args.push(CString::new("--rcfile").unwrap());
         args.push(CString::new(init_path.to_string_lossy().to_string()).unwrap());
@@ -40,7 +44,7 @@ fn apply_shell_integration(
             "ZDOTDIR=\"${{OLD_ZDOTDIR:-$HOME}}\"\nif [ -f \"$ZDOTDIR/.zshrc\" ]; then\n    source \"$ZDOTDIR/.zshrc\"\nfi\nsource \"{}\"\n",
             dir.join("zsh.sh").display()
         );
-        std::fs::write(&init_path, init_script).ok();
+        write_if_changed(&init_path, init_script.as_bytes()).ok();
         env_map.insert(
             "OLD_ZDOTDIR".to_string(),
             std::env::var("ZDOTDIR").unwrap_or_else(|_| "".to_string()),
@@ -55,7 +59,33 @@ fn apply_shell_integration(
     }
 }
 
-fn ensure_integration_scripts() -> std::io::Result<std::path::PathBuf> {
+fn write_if_changed(path: &Path, contents: &[u8]) -> std::io::Result<bool> {
+    if std::fs::read(path).is_ok_and(|existing| existing == contents) {
+        return Ok(false);
+    }
+    std::fs::write(path, contents)?;
+    Ok(true)
+}
+
+fn install_integration_scripts(dir: &Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(dir)?;
+    let scripts = [
+        ("bash.sh", include_bytes!("integration/bash.sh").as_slice()),
+        ("zsh.sh", include_bytes!("integration/zsh.sh").as_slice()),
+        (
+            "fish.fish",
+            include_bytes!("integration/fish.fish").as_slice(),
+        ),
+        ("nu.nu", include_bytes!("integration/nu.nu").as_slice()),
+    ];
+    let mut writes = 0;
+    for (name, contents) in scripts {
+        writes += usize::from(write_if_changed(&dir.join(name), contents)?);
+    }
+    Ok(writes)
+}
+
+fn integration_scripts_dir() -> std::io::Result<std::path::PathBuf> {
     let mut dir =
         std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()));
     dir.push(".local");
@@ -63,19 +93,17 @@ fn ensure_integration_scripts() -> std::io::Result<std::path::PathBuf> {
     dir.push("forge");
     dir.push("shell-integration");
 
-    std::fs::create_dir_all(&dir)?;
-
-    let bash_script = include_str!("integration/bash.sh");
-    let zsh_script = include_str!("integration/zsh.sh");
-    let fish_script = include_str!("integration/fish.fish");
-    let nu_script = include_str!("integration/nu.nu");
-
-    std::fs::write(dir.join("bash.sh"), bash_script)?;
-    std::fs::write(dir.join("zsh.sh"), zsh_script)?;
-    std::fs::write(dir.join("fish.fish"), fish_script)?;
-    std::fs::write(dir.join("nu.nu"), nu_script)?;
-
+    install_integration_scripts(&dir)?;
     Ok(dir)
+}
+
+fn ensure_integration_scripts() -> std::io::Result<&'static Path> {
+    match INTEGRATION_SCRIPTS_DIR
+        .get_or_init(|| integration_scripts_dir().map_err(|error| error.to_string()))
+    {
+        Ok(dir) => Ok(dir.as_path()),
+        Err(error) => Err(std::io::Error::other(error.clone())),
+    }
 }
 
 pub fn size_to_winsize(size: Size, cell_w: u16, cell_h: u16) -> Winsize {
@@ -91,6 +119,55 @@ pub struct Pty {
     pub master_fd: OwnedFd,
     pub child_pid: nix::unistd::Pid,
     pub size: Winsize,
+}
+
+#[derive(Clone)]
+pub struct PreparedPtyCommand {
+    program: CString,
+    args: std::sync::Arc<[CString]>,
+    envs: std::sync::Arc<[CString]>,
+}
+
+impl PreparedPtyCommand {
+    pub fn new(shell: &ShellConfig) -> Result<Self> {
+        let program = CString::new(shell.program.clone())
+            .map_err(|e| ForgeError::Pty(format!("Invalid program string: {}", e)))?;
+        let mut args = Vec::with_capacity(shell.args.len() + 3);
+        args.push(program.clone());
+
+        let mut env_map = std::collections::HashMap::new();
+        apply_shell_integration(shell, &mut args, &mut env_map);
+        for arg in &shell.args {
+            args.push(
+                CString::new(arg.clone())
+                    .map_err(|e| ForgeError::Pty(format!("Invalid arg: {}", e)))?,
+            );
+        }
+
+        for (key, value) in std::env::vars() {
+            env_map.insert(key, value);
+        }
+        env_map.insert("TERM".to_string(), "xterm-256color".to_string());
+        env_map.insert("COLORTERM".to_string(), "truecolor".to_string());
+        env_map.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+        for (key, value) in &shell.parsed_env {
+            env_map.insert(key.clone(), value.clone());
+        }
+
+        let mut envs = Vec::with_capacity(env_map.len());
+        for (key, value) in env_map {
+            envs.push(
+                CString::new(format!("{}={}", key, value))
+                    .map_err(|e| ForgeError::Pty(format!("Invalid env: {}", e)))?,
+            );
+        }
+
+        Ok(Self {
+            program,
+            args: args.into(),
+            envs: envs.into(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,8 +187,17 @@ impl Pty {
         winsize: Winsize,
         working_directory: Option<&Path>,
     ) -> Result<Self> {
-        let working_directory = working_directory.and_then(|path| {
-            match std::fs::OpenOptions::new()
+        let command = PreparedPtyCommand::new(shell)?;
+        Self::spawn_prepared_in_dir(&command, winsize, working_directory)
+    }
+
+    pub fn spawn_prepared_in_dir(
+        command: &PreparedPtyCommand,
+        winsize: Winsize,
+        working_directory: Option<&Path>,
+    ) -> Result<Self> {
+        let working_directory = working_directory.and_then(
+            |path| match std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(nix::libc::O_DIRECTORY)
                 .open(path)
@@ -125,47 +211,8 @@ impl Pty {
                     );
                     None
                 }
-            }
-        });
-        let program_cstr = CString::new(shell.program.clone())
-            .map_err(|e| ForgeError::Pty(format!("Invalid program string: {}", e)))?;
-
-        let mut args = Vec::new();
-
-        args.push(program_cstr.clone());
-
-        let mut base_args = Vec::new();
-        for arg in &shell.args {
-            base_args.push(
-                CString::new(arg.clone())
-                    .map_err(|e| ForgeError::Pty(format!("Invalid arg: {}", e)))?,
-            );
-        }
-
-        let mut env_map = std::collections::HashMap::new();
-
-        apply_shell_integration(shell, &mut args, &mut env_map);
-
-        args.extend(base_args);
-
-        for (k, v) in std::env::vars() {
-            env_map.insert(k, v);
-        }
-        env_map.insert("TERM".to_string(), "xterm-256color".to_string());
-        env_map.insert("COLORTERM".to_string(), "truecolor".to_string());
-        env_map.insert("LANG".to_string(), "en_US.UTF-8".to_string());
-        for (k, v) in &shell.parsed_env {
-            env_map.insert(k.clone(), v.clone());
-        }
-
-        let mut envs = Vec::new();
-        for (k, v) in env_map {
-            let entry = format!("{}={}", k, v);
-            envs.push(
-                CString::new(entry).map_err(|e| ForgeError::Pty(format!("Invalid env: {}", e)))?,
-            );
-        }
-
+            },
+        );
         let pty_res =
             openpty(None, None).map_err(|e| ForgeError::Pty(format!("openpty failed: {}", e)))?;
 
@@ -237,7 +284,7 @@ impl Pty {
                     }
                 }
 
-                let _ = execvpe(&program_cstr, &args, &envs);
+                let _ = execvpe(&command.program, &command.args, &command.envs);
                 unsafe {
                     nix::libc::_exit(1);
                 }
@@ -272,7 +319,10 @@ impl Pty {
                 Ok(n) if n > 0 => written += n,
                 Ok(_) => return Err(ForgeError::Pty("Write returned 0".to_string())),
                 Err(nix::errno::Errno::EAGAIN) => {
-                    let pfd = nix::poll::PollFd::new(std::os::fd::AsFd::as_fd(&self.master_fd), nix::poll::PollFlags::POLLOUT);
+                    let pfd = nix::poll::PollFd::new(
+                        std::os::fd::AsFd::as_fd(&self.master_fd),
+                        nix::poll::PollFlags::POLLOUT,
+                    );
                     let _ = nix::poll::poll(&mut [pfd], 1000_u16);
                 }
                 Err(nix::errno::Errno::EIO) => {
@@ -312,12 +362,34 @@ impl Pty {
             _ => None,
         }
     }
+
+    pub fn terminate_and_reap(self) {
+        let _ = nix::sys::signal::kill(self.child_pid, nix::sys::signal::Signal::SIGKILL);
+        let _ = waitpid(self.child_pid, None);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use forge_core::config_registry::ShellConfig;
+
+    #[test]
+    fn integration_scripts_are_not_rewritten_when_unchanged() {
+        let directory = std::env::temp_dir().join(format!(
+            "forge-pty-integration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        assert_eq!(install_integration_scripts(&directory).unwrap(), 4);
+        assert_eq!(install_integration_scripts(&directory).unwrap(), 0);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn disabled_integration_is_a_no_op_for_supported_shells() {

@@ -277,6 +277,27 @@ impl MuxState {
         }
     }
 
+    pub fn with_pending_single_pane_id(
+        pane_id: PaneId,
+        snapshot: std::sync::Arc<arc_swap::ArcSwap<forge_pty::snapshot::RenderSnapshot>>,
+        grid_size: GridSize,
+    ) -> Self {
+        let pane = Pane::pending(pane_id, snapshot, grid_size);
+        let mut panes = HashMap::new();
+        panes.insert(pane_id, pane);
+
+        Self {
+            root: LayoutNode::leaf(pane_id),
+            panes,
+            floating_panes: Vec::new(),
+            active_pane: pane_id,
+            zoomed_pane: None,
+            next_pane_id: pane_id.get().saturating_add(1),
+            layout_generation: 0,
+            last_borders: Vec::new(),
+        }
+    }
+
     pub fn active_pane(&self) -> &Pane {
         self.panes
             .get(&self.active_pane)
@@ -311,7 +332,11 @@ impl MuxState {
         let removed_active = self.active_pane == pane_id;
         if removed_active {
             // Focus top-most floating pane, or fallback to first pane
-            self.active_pane = self.floating_panes.last().copied().unwrap_or_else(|| self.root.first_pane());
+            self.active_pane = self
+                .floating_panes
+                .last()
+                .copied()
+                .unwrap_or_else(|| self.root.first_pane());
         }
 
         if self.panes.is_empty() {
@@ -566,12 +591,16 @@ impl MuxState {
         Ok(pane_id)
     }
 
-    pub fn dock_floating_pane(&mut self, pane_id: PaneId, axis: SplitAxis) -> Result<(), SplitPaneError> {
+    pub fn dock_floating_pane(
+        &mut self,
+        pane_id: PaneId,
+        axis: SplitAxis,
+    ) -> Result<(), SplitPaneError> {
         if !self.floating_panes.contains(&pane_id) {
             return Ok(());
         }
         self.floating_panes.retain(|&id| id != pane_id);
-        
+
         let target_pane = if self.root.contains_pane(self.active_pane) {
             self.active_pane
         } else {
@@ -843,6 +872,19 @@ mod tests {
             last_borders: Vec::new(),
             floating_panes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn pending_single_pane_has_layout_state_without_a_pty() {
+        let pane_id = PaneId::new(42);
+        let snapshot = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            forge_pty::snapshot::RenderSnapshot::empty(80, 24),
+        ));
+        let mux = MuxState::with_pending_single_pane_id(pane_id, snapshot, GridSize::new(80, 24));
+
+        assert_eq!(mux.active_pane_id(), pane_id);
+        assert_eq!(mux.active_pane().grid_size, GridSize::new(80, 24));
+        assert!(mux.active_pane().pty.is_none());
     }
 
     fn mux_with_two_panes() -> MuxState {

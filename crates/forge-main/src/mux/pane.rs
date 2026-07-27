@@ -105,6 +105,21 @@ impl Pane {
         }
     }
 
+    pub fn pending(
+        id: PaneId,
+        snapshot: std::sync::Arc<arc_swap::ArcSwap<forge_pty::snapshot::RenderSnapshot>>,
+        grid_size: GridSize,
+    ) -> Self {
+        Self {
+            id,
+            pty: None,
+            snapshot,
+            rect: PaneRect::new(0.0, 0.0, 0.0, 0.0),
+            grid_size,
+            dirty_layout: false,
+        }
+    }
+
     #[cfg(test)]
     pub fn layout_only(id: PaneId, grid_size: GridSize) -> Self {
         let snapshot = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -114,13 +129,6 @@ impl Pane {
             ),
         ));
 
-        Self {
-            id,
-            pty: None,
-            snapshot,
-            rect: PaneRect::new(0.0, 0.0, 0.0, 0.0),
-            grid_size,
-            dirty_layout: false,
-        }
+        Self::pending(id, snapshot, grid_size)
     }
 }
