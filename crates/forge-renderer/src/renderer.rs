@@ -607,6 +607,7 @@ struct FrameVertexUploadState {
     row_ranges: Vec<RowVertexRanges>,
     row_generations: Vec<u64>,
     scrollbar_range: Option<VertexRange>,
+    cursor_range: Option<VertexRange>,
     context_menu_range: Option<VertexRange>,
     context_menu_fingerprint: u64,
     initialized: bool,
@@ -761,6 +762,12 @@ impl AlternateBufferTransition {
                     .max(self.config.incoming.duration_ms),
             )
     }
+
+
+    fn is_crossfade(&self) -> bool {
+        self.config.outgoing.effect == AlternateBufferAnimationEffect::Fade
+            && self.config.incoming.effect == AlternateBufferAnimationEffect::Fade
+    }
 }
 
 fn terminal_vertex_ranges(tessellator: &GridTessellator) -> (VertexRange, VertexRange) {
@@ -836,19 +843,21 @@ fn append_transition_range(
     scissor: vk::Rect2D,
     translation: [f32; 2],
     opacity: f32,
-) {
-    if range.count == 0 || opacity <= 0.0 {
-        return;
+) -> Option<VertexRange> {
+    if range.count == 0 {
+        return None;
     }
-    let Some(vertices) = source.get(range.start..range.start + range.count) else {
-        return;
-    };
+    let vertices = source.get(range.start..range.start + range.count)?;
     let start = target.len();
     target.extend_from_slice(vertices);
     batches.push(
         RenderDrawBatch::new(start, vertices.len(), scissor, false)
             .visual(translation, opacity.clamp(0.0, 1.0)),
     );
+    Some(VertexRange {
+        start,
+        count: vertices.len(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -893,7 +902,7 @@ fn append_alternate_buffer_transition(
     // supplied by the render pass, so fading these ranges preserves terminal
     // opacity and transparency while keeping each cell visually coherent.
     if !outgoing_visual.complete {
-        append_transition_range(
+        let _ = append_transition_range(
             target,
             batches,
             &transition.outgoing_vertices,
@@ -902,7 +911,7 @@ fn append_alternate_buffer_transition(
             outgoing_translation,
             outgoing_visual.opacity,
         );
-        append_transition_range(
+        let _ = append_transition_range(
             target,
             batches,
             &transition.outgoing_vertices,
@@ -913,7 +922,7 @@ fn append_alternate_buffer_transition(
         );
     }
 
-    append_transition_range(
+    let _ = append_transition_range(
         target,
         batches,
         &incoming.vertices,
@@ -922,7 +931,7 @@ fn append_alternate_buffer_transition(
         incoming_visual.translation,
         incoming_visual.opacity,
     );
-    append_transition_range(
+    let _ = append_transition_range(
         target,
         batches,
         &incoming.vertices,
@@ -931,6 +940,22 @@ fn append_alternate_buffer_transition(
         incoming_visual.translation,
         incoming_visual.opacity,
     );
+    if let Some(incoming_cursor) = incoming.cursor_range {
+        let (translation, opacity) = if transition.is_crossfade() {
+            ([0.0, 0.0], 1.0)
+        } else {
+            (incoming_visual.translation, incoming_visual.opacity)
+        };
+        let _ = append_transition_range(
+            target,
+            batches,
+            &incoming.vertices,
+            incoming_cursor,
+            scissor,
+            translation,
+            opacity,
+        );
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -944,6 +969,7 @@ fn plan_vertex_upload_for_state(
     vertex_count: usize,
     row_ranges: &[RowVertexRanges],
     scrollbar_range: Option<VertexRange>,
+    cursor_range: Option<VertexRange>,
     context_menu_range: Option<VertexRange>,
     context_menu_fingerprint: u64,
 ) -> VertexUploadPlan {
@@ -956,6 +982,7 @@ fn plan_vertex_upload_for_state(
         || state.row_ranges.len() != row_ranges.len()
         || state.row_generations.len() != row_ranges.len()
         || state.scrollbar_range != scrollbar_range
+        || state.cursor_range != cursor_range
         || state.context_menu_range != context_menu_range
         || state.context_menu_fingerprint != context_menu_fingerprint
     {
@@ -986,6 +1013,9 @@ fn plan_vertex_upload_for_state(
 
     if let Some(scrollbar_range) = scrollbar_range {
         ranges.push(scrollbar_range);
+    }
+    if let Some(cursor_range) = cursor_range {
+        ranges.push(cursor_range);
     }
     if let Some(context_menu_range) = context_menu_range {
         ranges.push(context_menu_range);
@@ -1059,6 +1089,7 @@ impl Renderer {
             self.tessellator.vertices.len(),
             &self.tessellator.row_ranges,
             self.tessellator.scrollbar_range,
+            self.tessellator.cursor_range,
             self.tessellator.context_menu_range,
             self.tessellator.context_menu_fingerprint,
         )
@@ -1084,6 +1115,7 @@ impl Renderer {
                 .map(|ranges| ranges.generation),
         );
         state.scrollbar_range = self.tessellator.scrollbar_range;
+        state.cursor_range = self.tessellator.cursor_range;
         state.context_menu_range = self.tessellator.context_menu_range;
         state.context_menu_fingerprint = self.tessellator.context_menu_fingerprint;
         state.initialized = true;
@@ -2320,7 +2352,10 @@ impl Renderer {
                     || pane.pane_id.is_synthetic()
                     || matches!(pane.layer, PaneRenderLayer::AfterModalDim | PaneRenderLayer::Modal)
                     || alternate_transitions.is_some_and(|animations| {
-                        animations.transitions.contains_key(&pane.pane_id)
+                        animations
+                            .transitions
+                            .get(&pane.pane_id)
+                            .is_some_and(|transition| !transition.is_crossfade())
                     })
                 {
                     return None;
@@ -2538,6 +2573,23 @@ impl Renderer {
                     self.swapchain.extent,
                     now,
                 );
+                if transition.is_crossfade()
+                    && cursor_trail_visual.is_some_and(|trail| {
+                        trail.layer == PaneRenderLayer::Normal && trail.pane_id == pane.pane_id
+                    })
+                {
+                    let start = self.tessellator.vertices.len();
+                    append_cursor_trail(
+                        &mut self.tessellator.vertices,
+                        cursor_trail_visual.unwrap(),
+                        vp_w,
+                        vp_h,
+                    );
+                    let count = self.tessellator.vertices.len() - start;
+                    if count > 0 {
+                        draw_batches.push(RenderDrawBatch::new(start, count, scissor, false));
+                    }
+                }
                 continue;
             }
             let start = self.tessellator.vertices.len();
@@ -2725,6 +2777,7 @@ impl Renderer {
                 .alternate_buffer_animations
                 .as_ref()
                 .and_then(|animations| animations.transitions.get(&pane.pane_id));
+            let mut crossfade_transition = false;
             if let Some(transition) = has_alternate_transition {
                 append_alternate_buffer_transition(
                     &mut self.tessellator.vertices,
@@ -2736,6 +2789,7 @@ impl Renderer {
                     self.swapchain.extent,
                     now,
                 );
+                crossfade_transition = transition.is_crossfade();
             } else {
                 let start = self.tessellator.vertices.len();
                 if pane.opacity < 1.0 {
@@ -2756,7 +2810,7 @@ impl Renderer {
                 }
             }
 
-            if has_alternate_transition.is_none()
+            if (has_alternate_transition.is_none() || crossfade_transition)
                 && cursor_trail_visual.is_some_and(|trail| {
                     trail.layer == PaneRenderLayer::Floating && trail.pane_id == pane.pane_id
                 })
@@ -3214,7 +3268,7 @@ mod tests {
         }];
 
         assert_eq!(
-            plan_vertex_upload_for_state(None, 12, &row_ranges, None, None, 0),
+            plan_vertex_upload_for_state(None, 12, &row_ranges, None, None, None, 0),
             VertexUploadPlan::Full
         );
     }
@@ -3246,13 +3300,14 @@ mod tests {
             row_ranges: old_ranges,
             row_generations: vec![1, 3],
             scrollbar_range: None,
+            cursor_range: None,
             context_menu_range: None,
             context_menu_fingerprint: 0,
             initialized: true,
         };
 
         assert_eq!(
-            plan_vertex_upload_for_state(Some(&state), 24, &new_ranges, None, None, 0),
+            plan_vertex_upload_for_state(Some(&state), 24, &new_ranges, None, None, None, 0),
             VertexUploadPlan::Partial(vec![new_ranges[1].bg, new_ranges[1].fg])
         );
     }
@@ -3280,13 +3335,14 @@ mod tests {
             row_ranges: old_ranges,
             row_generations: vec![1],
             scrollbar_range: None,
+            cursor_range: None,
             context_menu_range: None,
             context_menu_fingerprint: 0,
             initialized: true,
         };
 
         assert_eq!(
-            plan_vertex_upload_for_state(Some(&state), 18, &new_ranges, None, None, 0),
+            plan_vertex_upload_for_state(Some(&state), 18, &new_ranges, None, None, None, 0),
             VertexUploadPlan::Full
         );
     }
@@ -3303,6 +3359,7 @@ mod tests {
             row_ranges: row_ranges.clone(),
             row_generations: vec![1],
             scrollbar_range: None,
+            cursor_range: None,
             context_menu_range: Some(VertexRange {
                 start: 12,
                 count: 6,
@@ -3316,6 +3373,7 @@ mod tests {
                 Some(&state),
                 18,
                 &row_ranges,
+                None,
                 None,
                 Some(VertexRange {
                     start: 12,
@@ -3557,7 +3615,7 @@ mod tests {
     }
 
     #[test]
-    fn alternate_buffer_fade_applies_equally_to_cell_backgrounds_and_foreground() {
+    fn alternate_buffer_crossfade_fades_cells_but_keeps_new_cursor_cell_immediate() {
         let fade = AlternateBufferAnimationLegConfig {
             effect: AlternateBufferAnimationEffect::Fade,
             duration_ms: 100,
@@ -3566,7 +3624,7 @@ mod tests {
         let start = Instant::now();
         let rect = PaneRenderRect::new(0.0, 0.0, 100.0, 50.0);
         let transition = AlternateBufferTransition {
-            outgoing_vertices: vec![GlyphVertex::default(); 12],
+            outgoing_vertices: vec![GlyphVertex::default(); 18],
             outgoing_bg: VertexRange { start: 0, count: 6 },
             outgoing_fg: VertexRange { start: 6, count: 6 },
             captured_rect: rect,
@@ -3577,11 +3635,15 @@ mod tests {
             },
         };
         let mut incoming = GridTessellator::new(12);
-        incoming.vertices = vec![GlyphVertex::default(); 12];
+        incoming.vertices = vec![GlyphVertex::default(); 18];
         incoming.row_ranges.push(RowVertexRanges {
             bg: VertexRange { start: 0, count: 6 },
             fg: VertexRange { start: 6, count: 6 },
             generation: 1,
+        });
+        incoming.cursor_range = Some(VertexRange {
+            start: 12,
+            count: 6,
         });
         let mut vertices = Vec::new();
         let mut batches = Vec::new();
@@ -3603,10 +3665,13 @@ mod tests {
             start + Duration::from_millis(50),
         );
 
-        assert_eq!(batches.len(), 4);
+        assert_eq!(batches.len(), 5);
         assert_eq!(batches[0].opacity, batches[1].opacity);
         assert_eq!(batches[2].opacity, batches[3].opacity);
         assert!((batches[0].opacity - 0.125).abs() < 0.0001);
         assert!((batches[2].opacity - 0.875).abs() < 0.0001);
+        assert_eq!(batches[4].opacity, 1.0);
+        assert_eq!(batches[4].start, 24);
+        assert_eq!(batches[4].count, 6);
     }
 }

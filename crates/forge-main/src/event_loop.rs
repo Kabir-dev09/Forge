@@ -1397,6 +1397,52 @@ fn pointer_layout_metrics(app_data: &AppData) -> (f64, f64, f64, f64) {
     )
 }
 
+fn scrolling_pointer_rect(
+    metrics: GridMetrics,
+    virtual_rect: crate::mux::VirtualPaneRect,
+    scroll_x_cols: i32,
+    scroll_y_rows: i32,
+) -> crate::mux::PaneRect {
+    crate::mux::PaneRect::new(
+        metrics.pad_x as f32
+            + (virtual_rect.col - scroll_x_cols) as f32 * metrics.effective_cell_w as f32,
+        metrics.pad_y as f32
+            + (virtual_rect.row - scroll_y_rows) as f32 * metrics.effective_cell_h as f32,
+        virtual_rect.cols as f32 * metrics.effective_cell_w as f32,
+        virtual_rect.rows as f32 * metrics.effective_cell_h as f32,
+    )
+}
+
+fn pointer_rect_for_pane(
+    app_data: &AppData,
+    pane_id: crate::mux::PaneId,
+) -> Option<crate::mux::PaneRect> {
+    let active_mux = app_data.tab_manager.active_mux();
+    if app_data.pane_runtime.is_tiling() || active_mux.floating_panes.contains(&pane_id) {
+        return active_mux.panes.get(&pane_id).map(|pane| pane.rect);
+    }
+
+    let metrics = app_data.cached_grid_metrics?;
+    let panes = &app_data.pane_runtime.scrolling()?.active_tab()?.panes;
+    if panes.is_zoomed() && panes.active_pane() == Some(pane_id) {
+        return Some(crate::mux::PaneRect::new(
+            metrics.pad_x as f32,
+            metrics.pad_y as f32,
+            metrics.cols as f32 * metrics.effective_cell_w as f32,
+            metrics.rows as f32 * metrics.effective_cell_h as f32,
+        ));
+    }
+
+    let virtual_rect = panes.pane_rect(pane_id)?;
+    let (scroll_x_cols, scroll_y_rows) = panes.scroll_offset();
+    Some(scrolling_pointer_rect(
+        metrics,
+        virtual_rect,
+        scroll_x_cols,
+        scroll_y_rows,
+    ))
+}
+
 fn recompute_grid_metrics_for_window(app_data: &AppData) -> Option<GridMetrics> {
     let renderer = app_data.renderer.as_ref()?;
     let cell_w = renderer.cell_width as f64;
@@ -3692,7 +3738,7 @@ pub fn run_event_loop(
             }
         }
 
-        let (mouse_tracking_enabled, mouse_sgr_mode, use_alt, scrollback_lines) = {
+        let (mut mouse_tracking_enabled, mut mouse_sgr_mode, use_alt, scrollback_lines) = {
             let sb = app_data
                 .tab_manager
                 .active_mux()
@@ -4001,14 +4047,10 @@ pub fn run_event_loop(
                     }
 
                     let (cell_w, cell_h, _pad_x, _pad_y) = pointer_layout_metrics(&app_data);
-                    let active_pane = app_data.tab_manager.active_mux().active_pane;
-                    let active_rect = app_data
-                        .tab_manager
-                        .active_mux()
-                        .panes
-                        .get(&active_pane)
-                        .unwrap()
-                        .rect;
+                    let active_pane = app_data.active_pane_id();
+                    let Some(active_rect) = pointer_rect_for_pane(&app_data, active_pane) else {
+                        continue;
+                    };
 
                     let col_1 = ((x
                         - (active_rect.x as f64 + app_data.effective_pane_padding().left as f64))
@@ -4357,16 +4399,23 @@ pub fn run_event_loop(
                             }
                             app_data.force_immediate_render = true;
                             app_data.wayland_state.force_redraw = true;
+
+                            if let Some(pane) = app_data
+                                .tab_manager
+                                .active_mux()
+                                .panes
+                                .get(&pane_id)
+                            {
+                                let snapshot = pane.snapshot.load();
+                                mouse_tracking_enabled = snapshot.mouse_tracking_enabled;
+                                mouse_sgr_mode = snapshot.mouse_sgr_mode;
+                            }
                         }
                     }
 
                     let (cell_w, cell_h, _pad_x, _pad_y) = pointer_layout_metrics(&app_data);
-                    let active_pane = app_data.tab_manager.active_mux().active_pane;
-                    let active_rect = if let Some(pane) =
-                        app_data.tab_manager.active_mux().panes.get(&active_pane)
-                    {
-                        pane.rect
-                    } else {
+                    let active_pane = app_data.active_pane_id();
+                    let Some(active_rect) = pointer_rect_for_pane(&app_data, active_pane) else {
                         continue;
                     };
 
@@ -4517,12 +4566,8 @@ pub fn run_event_loop(
 
                     app_data.active_mouse_button = None;
                     let (cell_w, cell_h, _pad_x, _pad_y) = pointer_layout_metrics(&app_data);
-                    let active_pane = app_data.tab_manager.active_mux().active_pane;
-                    let active_rect = if let Some(pane) =
-                        app_data.tab_manager.active_mux().panes.get(&active_pane)
-                    {
-                        pane.rect
-                    } else {
+                    let active_pane = app_data.active_pane_id();
+                    let Some(active_rect) = pointer_rect_for_pane(&app_data, active_pane) else {
                         continue;
                     };
 
@@ -4578,14 +4623,10 @@ pub fn run_event_loop(
                     }
                     if mouse_tracking_enabled {
                         let (cell_w, cell_h, _pad_x, _pad_y) = pointer_layout_metrics(&app_data);
-                        let active_pane = app_data.tab_manager.active_mux().active_pane;
-                        let active_rect = app_data
-                            .tab_manager
-                            .active_mux()
-                            .panes
-                            .get(&active_pane)
-                            .unwrap()
-                            .rect;
+                        let active_pane = app_data.active_pane_id();
+                        let Some(active_rect) = pointer_rect_for_pane(&app_data, active_pane) else {
+                            continue;
+                        };
 
                         let col_1 = ((app_data.pointer_x
                             - (active_rect.x as f64
@@ -5017,7 +5058,7 @@ pub fn run_event_loop(
                     scrollbar_state = None;
                 }
 
-                let statusbar_hover = None;
+                let mut statusbar_hover = None;
                 let mut needs_statusbar_hover_redraw = false;
 
                 if app_data.config.statusbar.enabled && !modal_blank_screen {
@@ -5045,6 +5086,29 @@ pub fn run_event_loop(
                         needs_statusbar_hover_redraw = true;
                     } else {
                         app_data.statusbar.hover_opacity = target_opacity;
+                    }
+
+                    if app_data.statusbar.hovered_is_square
+                        && app_data.statusbar.hover_opacity > 0.01
+                    {
+                        if let Some((start_col, end_col)) = app_data.statusbar.hovered_region {
+                            let region_x = metrics.sb_x as f32
+                                + (start_col as f64 * metrics.effective_cell_w) as f32;
+                            let region_width =
+                                ((end_col - start_col) as f64 * metrics.effective_cell_w) as f32;
+                            let size = metrics.effective_cell_h as f32;
+
+                            statusbar_hover = Some(
+                                forge_renderer::grid_tessellator::StatusbarHoverRenderData {
+                                    x: region_x + (region_width - size) * 0.5,
+                                    y: metrics.sb_y as f32,
+                                    width: size,
+                                    height: size,
+                                    opacity: app_data.statusbar.hover_opacity,
+                                    color: app_data.cached_statusbar_hover_color,
+                                },
+                            );
+                        }
                     }
                     
                     if needs_statusbar_hover_redraw {
@@ -6832,6 +6896,45 @@ mod metric_tests {
         assert!(pointer_motion_has_effect(
             false, 100, false, None, None, true,
         ));
+    }
+
+    #[test]
+    fn scrolling_pointer_rect_uses_virtual_geometry_and_logical_scroll_offset() {
+        let metrics = GridMetrics {
+            cols: 100,
+            rows: 40,
+            pad_x: 5.0,
+            pad_y: 7.0,
+            effective_cell_w: 10.0,
+            effective_cell_h: 20.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            sb_enabled: false,
+            sb_y: 0.0,
+            sb_x: 0.0,
+            sb_cols: 0,
+            sidebar_cols: 0,
+            sidebar_width: 0.0,
+        };
+
+        let rect = scrolling_pointer_rect(
+            metrics,
+            crate::mux::VirtualPaneRect::new(40, 12, 30, 15),
+            10,
+            2,
+        );
+        assert_eq!(rect, crate::mux::PaneRect::new(305.0, 207.0, 300.0, 300.0));
+
+        let partially_visible = scrolling_pointer_rect(
+            metrics,
+            crate::mux::VirtualPaneRect::new(0, 0, 30, 15),
+            5,
+            3,
+        );
+        assert_eq!(
+            partially_visible,
+            crate::mux::PaneRect::new(-45.0, -53.0, 300.0, 300.0)
+        );
     }
 
     #[test]

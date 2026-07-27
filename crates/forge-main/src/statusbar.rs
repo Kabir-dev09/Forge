@@ -152,6 +152,7 @@ mod tests {
         assert_eq!(state.cells[1].c, ' ');
         assert_eq!(state.cells[1].bg, parse_hex_color("#89B4FA").unwrap());
     }
+
 }
 
 pub fn parse_hex_color(hex: &str) -> Option<Color> {
@@ -172,6 +173,19 @@ pub fn parse_hex_color(hex: &str) -> Option<Color> {
     } else {
         None
     }
+}
+
+fn blend_hover_background(base: Color, opacity: f32) -> Color {
+    let blend = opacity * 0.35;
+    let r = (base.r as f32 * (1.0 - blend) + 255.0 * blend) as u8;
+    let g = (base.g as f32 * (1.0 - blend) + 255.0 * blend) as u8;
+    let b = (base.b as f32 * (1.0 - blend) + 255.0 * blend) as u8;
+    let a = if base.a == 0 {
+        (255.0 * blend) as u8
+    } else {
+        base.a
+    };
+    Color { r, g, b, a }
 }
 
 fn push_styled_text(
@@ -284,12 +298,7 @@ impl StatusBarState {
                             }
 
                             if is_hovered && self.hover_opacity > 0.01 {
-                                let blend = self.hover_opacity * 0.35;
-                                let r = (c_bg.r as f32 * (1.0 - blend) + 255.0 * blend) as u8;
-                                let g = (c_bg.g as f32 * (1.0 - blend) + 255.0 * blend) as u8;
-                                let b = (c_bg.b as f32 * (1.0 - blend) + 255.0 * blend) as u8;
-                                let a = if c_bg.a == 0 { (255.0 * blend) as u8 } else { c_bg.a };
-                                c_bg = Color { r, g, b, a };
+                                c_bg = blend_hover_background(c_bg, self.hover_opacity);
                             }
 
                             let zoom = if tab.is_zoomed {

@@ -387,6 +387,10 @@ impl ScrollingPaneManager {
             .map(|pane| (pane.id, pane.virtual_rect))
     }
 
+    pub fn pane_rect(&self, pane_id: PaneId) -> Option<VirtualPaneRect> {
+        self.pane(pane_id).map(|pane| pane.virtual_rect)
+    }
+
     pub fn insert_transferred_pane(
         &mut self,
         mut pane: ScrollingPane,

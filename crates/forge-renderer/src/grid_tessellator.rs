@@ -11,6 +11,7 @@ use std::collections::HashSet;
 pub struct RowTessellation {
     pub bg_vertices: Vec<GlyphVertex>,
     pub fg_vertices: Vec<GlyphVertex>,
+    pub cursor_vertices: Vec<GlyphVertex>,
     pub generation: u64,
 }
 
@@ -19,6 +20,7 @@ impl RowTessellation {
         Self {
             bg_vertices: Vec::with_capacity(cols * 6),
             fg_vertices: Vec::with_capacity(cols * 6),
+            cursor_vertices: Vec::new(),
             generation: 0,
         }
     }
@@ -26,6 +28,7 @@ impl RowTessellation {
     fn prepare_for_row(&mut self, cols: usize) {
         self.bg_vertices.clear();
         self.fg_vertices.clear();
+        self.cursor_vertices.clear();
 
         reserve_capacity(&mut self.bg_vertices, cols * 6);
         reserve_capacity(&mut self.fg_vertices, cols * 6);
@@ -132,6 +135,7 @@ pub struct GridTessellator {
     pub rows: Vec<RowTessellation>,
     pub row_ranges: Vec<RowVertexRanges>,
     pub scrollbar_range: Option<VertexRange>,
+    pub cursor_range: Option<VertexRange>,
     pub context_menu_range: Option<VertexRange>,
     pub context_menu_fingerprint: u64,
     pub rebuilt_rows: Vec<usize>,
@@ -952,6 +956,7 @@ impl RowTessellation {
     fn translate_y(&mut self, delta_ndc_y: f32) {
         translate_vertices_y(&mut self.bg_vertices, delta_ndc_y);
         translate_vertices_y(&mut self.fg_vertices, delta_ndc_y);
+        translate_vertices_y(&mut self.cursor_vertices, delta_ndc_y);
         self.generation = self.generation.wrapping_add(1);
     }
 }
@@ -963,6 +968,7 @@ impl GridTessellator {
             rows: Vec::new(),
             row_ranges: Vec::new(),
             scrollbar_range: None,
+            cursor_range: None,
             context_menu_range: None,
             context_menu_fingerprint: 0,
             rebuilt_rows: Vec::new(),
@@ -991,6 +997,7 @@ impl GridTessellator {
         self.vertices.clear();
         self.row_ranges.clear();
         self.scrollbar_range = None;
+        self.cursor_range = None;
         self.context_menu_range = None;
         self.context_menu_fingerprint = 0;
         self.rebuilt_rows.clear();
@@ -1643,7 +1650,7 @@ impl GridTessellator {
                 });
 
                 let (fg_color, bg_color) = resolved_cell_colors(cell);
-                let mut fg = color_to_f32(fg_color);
+                let fg = color_to_f32(fg_color);
                 let mut bg = color_to_f32(bg_color);
 
                 // Check if in selection
@@ -1670,10 +1677,6 @@ impl GridTessellator {
                     && cursor.is_some_and(|c| col_idx == c.0 && row_idx == c.1);
                 let is_block_cursor =
                     is_cursor && cursor_style == forge_core::config_registry::CursorStyle::Block;
-                if is_block_cursor {
-                    fg = default_bg;
-                    bg = cursor_color;
-                }
 
                 let mut quad_w = cell_w;
                 if is_cursor || in_selection {
@@ -1696,7 +1699,7 @@ impl GridTessellator {
                 }
 
                 let needs_background =
-                    (bg[3] > 0.0 && bg != default_bg) || in_selection || is_block_cursor;
+                    (bg[3] > 0.0 && bg != default_bg) || in_selection;
                 if needs_background {
                     let end_x = px_x + quad_w;
                     match background_run.as_mut() {
@@ -1730,7 +1733,7 @@ impl GridTessellator {
                     let br = ndc(px_x + cell_w, px_y + cell_h);
                     let uv = [-1.0, 0.0];
                     push_quad(
-                        &mut row_tess.fg_vertices,
+                        &mut row_tess.cursor_vertices,
                         tl,
                         br,
                         uv,
@@ -1748,7 +1751,7 @@ impl GridTessellator {
                     let br = ndc(px_x + 1.0, px_y + cell_h);
                     let uv = [-1.0, 0.0];
                     push_quad(
-                        &mut row_tess.fg_vertices,
+                        &mut row_tess.cursor_vertices,
                         tl,
                         br,
                         uv,
@@ -1839,6 +1842,56 @@ impl GridTessellator {
                     let s_uv = [-1.0, 0.0];
                     push_quad(&mut row_tess.fg_vertices, s_tl, s_br, s_uv, s_uv, fg, fg);
                 }
+
+                if !suppress_foreground && is_block_cursor {
+                    let cursor_tl = ndc(px_x, px_y);
+                    let cursor_br = ndc(px_x + quad_w, px_y + cell_h);
+                    let cursor_uv = [-1.0, 0.0];
+                    push_quad(
+                        &mut row_tess.cursor_vertices,
+                        cursor_tl,
+                        cursor_br,
+                        cursor_uv,
+                        cursor_uv,
+                        cursor_color,
+                        cursor_color,
+                    );
+
+                    if c != ' ' {
+                        let needs_atlas_glyph = c.is_ascii()
+                            || !tessellate_procedural_glyph(
+                                c,
+                                px_x,
+                                px_y,
+                                cell_w,
+                                cell_h,
+                                default_bg,
+                                cursor_color,
+                                &mut row_tess.cursor_vertices,
+                                &ndc,
+                                &push_quad,
+                            );
+                        if needs_atlas_glyph {
+                            if let Some(glyph) = glyph_for(
+                                atlas,
+                                &mut self.missing_glyphs,
+                                c,
+                                FontStyle::from_flags(cell.is_bold(), cell.is_italic()),
+                            ) {
+                                push_atlas_glyph(
+                                    &mut row_tess.cursor_vertices,
+                                    c,
+                                    cell,
+                                    glyph,
+                                    px_x,
+                                    origin_y,
+                                    default_bg,
+                                    cursor_color,
+                                );
+                            }
+                        }
+                    }
+                }
             }
 
             if let Some((start_x, end_x, bg)) = background_run.take() {
@@ -1849,6 +1902,7 @@ impl GridTessellator {
 
         self.vertices.clear();
         self.scrollbar_range = None;
+        self.cursor_range = None;
         self.context_menu_range = None;
         self.context_menu_fingerprint = context_menu_fingerprint(context_menu);
 
@@ -1866,6 +1920,15 @@ impl GridTessellator {
             self.vertices.extend_from_slice(&row.fg_vertices);
             self.row_ranges[row_idx].fg = VertexRange::new(start, row.fg_vertices.len());
             self.row_ranges[row_idx].generation = row.generation;
+        }
+
+        let cursor_start = self.vertices.len();
+        for row in &self.rows {
+            self.vertices.extend_from_slice(&row.cursor_vertices);
+        }
+        let cursor_count = self.vertices.len() - cursor_start;
+        if cursor_count > 0 {
+            self.cursor_range = Some(VertexRange::new(cursor_start, cursor_count));
         }
 
         self.append_context_menu_overlay(
