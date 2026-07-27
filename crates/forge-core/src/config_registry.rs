@@ -485,6 +485,8 @@ pub struct ShellConfig {
     pub args: Vec<String>,
     pub env: Vec<String>,
     pub integration_enabled: bool,
+    pub inherit_cwd_for_new_panes: bool,
+    pub inherit_cwd_for_new_tabs: bool,
     #[serde(skip)]
     pub parsed_env: Vec<(String, String)>,
 }
@@ -497,6 +499,8 @@ impl Default for ShellConfig {
             args: Vec::new(),
             env: Vec::new(),
             integration_enabled: true,
+            inherit_cwd_for_new_panes: true,
+            inherit_cwd_for_new_tabs: false,
             parsed_env: Vec::new(),
         }
     }
@@ -1213,6 +1217,20 @@ mod tests {
         let config: ForgeConfig =
             toml::from_str("[shell]\nintegration_enabled = false\n").unwrap();
         assert!(!config.shell.integration_enabled);
+    }
+
+    #[test]
+    fn shell_cwd_inheritance_has_independent_defaults_and_parses_booleans() {
+        let defaults = ForgeConfig::default();
+        assert!(defaults.shell.inherit_cwd_for_new_panes);
+        assert!(!defaults.shell.inherit_cwd_for_new_tabs);
+
+        let config: ForgeConfig = toml::from_str(
+            "[shell]\ninherit_cwd_for_new_panes = false\ninherit_cwd_for_new_tabs = true\n",
+        )
+        .unwrap();
+        assert!(!config.shell.inherit_cwd_for_new_panes);
+        assert!(config.shell.inherit_cwd_for_new_tabs);
     }
 
     #[test]

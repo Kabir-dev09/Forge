@@ -93,6 +93,10 @@ duration_ms = 100
 # Disable to skip Forge's CWD and command-lifecycle hooks. Command completion
 # indicators are disabled; CWD metadata requires native OSC 7 shell support.
 integration_enabled = true
+# New panes inherit the active pane's OSC 7 working directory by default.
+inherit_cwd_for_new_panes = true
+# New tabs start in Forge's launch directory unless explicitly enabled.
+inherit_cwd_for_new_tabs = false
 args = []
 env = []
 

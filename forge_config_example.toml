@@ -84,6 +84,9 @@ duration_ms = 100
 program = "/bin/fish"
 # Disabling skips Forge's scripts and command-completion tracking.
 integration_enabled = true
+# Uses the active pane's OSC 7 directory when available.
+inherit_cwd_for_new_panes = true
+inherit_cwd_for_new_tabs = false
 args = []
 
 [shell.env]

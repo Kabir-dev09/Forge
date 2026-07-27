@@ -57,6 +57,21 @@ fn shell_integration_is_enabled_by_default_and_can_be_disabled() {
 }
 
 #[test]
+fn shell_cwd_inheritance_defaults_and_overrides_are_independent() {
+    let default_config: forge_core::config_registry::ForgeConfig =
+        toml::from_str(include_str!("default_config.toml")).unwrap();
+    assert!(default_config.shell.inherit_cwd_for_new_panes);
+    assert!(!default_config.shell.inherit_cwd_for_new_tabs);
+
+    let configured: forge_core::config_registry::ForgeConfig = toml::from_str(
+        "[shell]\ninherit_cwd_for_new_panes = false\ninherit_cwd_for_new_tabs = true\n",
+    )
+    .unwrap();
+    assert!(!configured.shell.inherit_cwd_for_new_panes);
+    assert!(configured.shell.inherit_cwd_for_new_tabs);
+}
+
+#[test]
 fn alternate_buffer_animations_default_off_and_parse_independent_legs() {
     use forge_core::config_registry::{
         AlternateBufferAnimationDirection as Direction, AlternateBufferAnimationEffect as Effect,

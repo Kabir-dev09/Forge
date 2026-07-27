@@ -283,6 +283,29 @@ fn active_cursor_blink_enabled(app_data: &AppData) -> bool {
         .unwrap_or(app_data.config.cursor.blink)
 }
 
+fn reported_working_directory(
+    enabled: bool,
+    current_dir: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if !enabled {
+        return None;
+    }
+    current_dir
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+fn active_pane_working_directory(app_data: &AppData, enabled: bool) -> Option<std::path::PathBuf> {
+    if !enabled {
+        return None;
+    }
+    let pane_id = app_data.active_pane_id();
+    let pane = app_data.tab_manager.active_mux().panes.get(&pane_id)?;
+    let snapshot = pane.snapshot.load();
+    reported_working_directory(true, snapshot.current_dir.as_deref())
+}
+
 impl AppData {
     pub fn active_pane_id(&self) -> crate::mux::PaneId {
         let active_mux = self.tab_manager.active_mux();
@@ -2915,8 +2938,16 @@ pub fn run_event_loop(
                 winsize.ws_row = grid_size.rows as u16;
                 winsize.ws_xpixel = (grid_size.cols as f64 * metrics.0) as u16;
                 winsize.ws_ypixel = (grid_size.rows as f64 * metrics.1) as u16;
+                let working_directory = active_pane_working_directory(
+                    &app_data,
+                    app_data.config.shell.inherit_cwd_for_new_panes,
+                );
 
-                match forge_pty::Pty::spawn(&app_data.config.shell, winsize) {
+                match forge_pty::Pty::spawn_in_dir(
+                    &app_data.config.shell,
+                    winsize,
+                    working_directory.as_deref(),
+                ) {
                     Ok(pty) => {
                         let mut screen_buffer = forge_pty::ScreenBuffer::new(
                             grid_size.cols,
@@ -3096,8 +3127,16 @@ pub fn run_event_loop(
                         winsize.ws_row = rows as u16;
                         winsize.ws_xpixel = (cols as f64 * metrics.0) as u16;
                         winsize.ws_ypixel = (rows as f64 * metrics.1) as u16;
+                        let working_directory = active_pane_working_directory(
+                            &app_data,
+                            app_data.config.shell.inherit_cwd_for_new_tabs,
+                        );
 
-                        match forge_pty::Pty::spawn(&app_data.config.shell, winsize) {
+                        match forge_pty::Pty::spawn_in_dir(
+                            &app_data.config.shell,
+                            winsize,
+                            working_directory.as_deref(),
+                        ) {
                             Ok(pty) => {
                                 let mut screen_buffer = forge_pty::ScreenBuffer::new(
                                     cols,
@@ -3369,8 +3408,16 @@ pub fn run_event_loop(
                         winsize.ws_row = rows as u16;
                         winsize.ws_xpixel = (cols as f64 * metrics.0) as u16;
                         winsize.ws_ypixel = (rows as f64 * metrics.1) as u16;
+                        let working_directory = active_pane_working_directory(
+                            &app_data,
+                            app_data.config.shell.inherit_cwd_for_new_panes,
+                        );
 
-                        match forge_pty::Pty::spawn(&app_data.config.shell, winsize) {
+                        match forge_pty::Pty::spawn_in_dir(
+                            &app_data.config.shell,
+                            winsize,
+                            working_directory.as_deref(),
+                        ) {
                             Ok(pty) => {
                                 let mut screen_buffer = forge_pty::ScreenBuffer::new(
                                     cols,
@@ -6980,5 +7027,20 @@ mod metric_tests {
     fn recreated_swapchain_frame_keeps_rows_dirty_for_new_geometry() {
         assert!(!frame_should_mark_clean(true));
         assert!(frame_should_mark_clean(false));
+    }
+
+    #[test]
+    fn cwd_inheritance_requires_enablement_and_an_absolute_reported_path() {
+        assert_eq!(
+            reported_working_directory(true, Some("/home/user/project")),
+            Some(std::path::PathBuf::from("/home/user/project"))
+        );
+        assert_eq!(
+            reported_working_directory(false, Some("/home/user/project")),
+            None
+        );
+        assert_eq!(reported_working_directory(true, Some("relative/path")), None);
+        assert_eq!(reported_working_directory(true, Some("")), None);
+        assert_eq!(reported_working_directory(true, None), None);
     }
 }

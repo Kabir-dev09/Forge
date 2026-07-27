@@ -530,6 +530,14 @@ mod tests {
                     value: "false".to_string(),
                 },
                 ConfigOverride {
+                    key: "shell.inherit_cwd_for_new_panes".to_string(),
+                    value: "false".to_string(),
+                },
+                ConfigOverride {
+                    key: "shell.inherit_cwd_for_new_tabs".to_string(),
+                    value: "true".to_string(),
+                },
+                ConfigOverride {
                     key: "font.family".to_string(),
                     value: "\"Fira Code\"".to_string(),
                 },
@@ -547,6 +555,8 @@ mod tests {
         assert!(config.window.center_on_launch);
         assert!(config.cursor.trail.enabled);
         assert!(!config.shell.integration_enabled);
+        assert!(!config.shell.inherit_cwd_for_new_panes);
+        assert!(config.shell.inherit_cwd_for_new_tabs);
         assert_eq!(config.font.family, "Fira Code");
         assert_eq!(config.font.ligatures.features, ["liga", "calt"]);
         std::fs::remove_dir_all(dir).ok();

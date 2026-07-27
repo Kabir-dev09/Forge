@@ -7,6 +7,8 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{close, dup2, execvpe, fork, setsid, ForkResult};
 use std::ffi::CString;
 use std::os::unix::io::{AsRawFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 
 fn apply_shell_integration(
     shell: &ShellConfig,
@@ -100,6 +102,31 @@ pub enum PtyReadResult {
 
 impl Pty {
     pub fn spawn(shell: &ShellConfig, winsize: Winsize) -> Result<Self> {
+        Self::spawn_in_dir(shell, winsize, None)
+    }
+
+    pub fn spawn_in_dir(
+        shell: &ShellConfig,
+        winsize: Winsize,
+        working_directory: Option<&Path>,
+    ) -> Result<Self> {
+        let working_directory = working_directory.and_then(|path| {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_DIRECTORY)
+                .open(path)
+            {
+                Ok(directory) => Some(directory),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "Unable to inherit pane working directory; using Forge's working directory"
+                    );
+                    None
+                }
+            }
+        });
         let program_cstr = CString::new(shell.program.clone())
             .map_err(|e| ForgeError::Pty(format!("Invalid program string: {}", e)))?;
 
@@ -202,6 +229,12 @@ impl Pty {
 
                 if slave_fd > 2 {
                     let _ = close(slave_fd);
+                }
+
+                if let Some(directory) = working_directory.as_ref() {
+                    unsafe {
+                        nix::libc::fchdir(directory.as_raw_fd());
+                    }
                 }
 
                 let _ = execvpe(&program_cstr, &args, &envs);
@@ -337,6 +370,50 @@ mod tests {
             total.contains("hello"),
             "Expected 'hello' in output, got: {:?}",
             total
+        );
+    }
+
+    #[test]
+    fn spawn_in_dir_sets_the_child_working_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "forge-pty-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let shell = ShellConfig {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "pwd; exit 0".to_string()],
+            integration_enabled: false,
+            ..ShellConfig::default()
+        };
+        let winsize = Winsize {
+            ws_col: 80,
+            ws_row: 24,
+            ws_xpixel: 800,
+            ws_ypixel: 480,
+        };
+        let pty = Pty::spawn_in_dir(&shell, winsize, Some(&directory)).expect("PTY spawn failed");
+
+        let mut buf = [0u8; 1024];
+        let mut output = String::new();
+        for _ in 0..100 {
+            match pty.read(&mut buf) {
+                Ok(0) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Ok(read) => output.push_str(&String::from_utf8_lossy(&buf[..read])),
+                Err(_) => break,
+            }
+        }
+        std::fs::remove_dir(&directory).ok();
+
+        assert!(
+            output.contains(directory.to_string_lossy().as_ref()),
+            "expected {:?} in child output, got {:?}",
+            directory,
+            output
         );
     }
 }
