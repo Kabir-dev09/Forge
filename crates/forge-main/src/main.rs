@@ -388,6 +388,7 @@ fn run(
     };
     renderer.set_ligature_config(config.font.ligatures.clone());
     renderer.set_cursor_trail_config(&config.cursor.trail);
+    renderer.set_alternate_buffer_animation_config(&config.alternate_buffer.animation);
     tracing::debug!(
         "[PROFILER] Vulkan Boot (Renderer::new) took: {:?}",
         t_vulkan.elapsed()

@@ -15,8 +15,10 @@ pub struct GlyphVertex {
 #[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
 pub struct PushConstants {
     pub cell_size: [f32; 2],
+    pub translation: [f32; 2],
+    pub draw_opacity: f32,
     pub config_flags: u32,
-    pub _pad: u32,
+    pub _pad: [u32; 2],
 }
 
 impl GlyphVertex {
@@ -93,7 +95,7 @@ impl Pipeline {
 
         let set_layouts = [descriptor_set_layout];
         let push_constant_ranges = [vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             offset: 0,
             size: std::mem::size_of::<PushConstants>() as u32,
         }];

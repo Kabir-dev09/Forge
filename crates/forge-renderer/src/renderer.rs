@@ -15,7 +15,14 @@ use super::{
     texture::*,
 };
 use ash::{vk, Device, Entry, Instance};
-use forge_core::{config_registry::LigatureConfig, ForgeError, Result};
+use forge_core::{
+    config_registry::{
+        AlternateBufferAnimationConfig, AlternateBufferAnimationDirection,
+        AlternateBufferAnimationEffect, AlternateBufferAnimationLegConfig,
+        AlternateBufferTransitionConfig, LigatureConfig,
+    },
+    ForgeError, Result,
+};
 use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -467,6 +474,9 @@ pub struct PaneRenderInput<'a> {
     pub scroll_id: u64,
     pub is_active: bool,
     pub overflow_indicators: PaneOverflowIndicators,
+    /// Present only for live terminal panes. Synthetic and retained lifecycle
+    /// panes must not participate in alternate-screen transitions.
+    pub alternate_buffer: Option<(u64, bool)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -602,12 +612,325 @@ struct FrameVertexUploadState {
     initialized: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct RenderDrawBatch {
     start: usize,
     count: usize,
     scissor: vk::Rect2D,
     is_opaque: bool,
+    translation: [f32; 2],
+    opacity: f32,
+}
+
+impl RenderDrawBatch {
+    fn new(start: usize, count: usize, scissor: vk::Rect2D, is_opaque: bool) -> Self {
+        Self {
+            start,
+            count,
+            scissor,
+            is_opaque,
+            translation: [0.0, 0.0],
+            opacity: 1.0,
+        }
+    }
+
+    fn visual(mut self, translation: [f32; 2], opacity: f32) -> Self {
+        self.translation = translation;
+        self.opacity = opacity;
+        self
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AlternateBufferObservation {
+    generation: u64,
+    active: bool,
+    rect: PaneRenderRect,
+}
+
+struct AlternateBufferTransition {
+    outgoing_vertices: Vec<GlyphVertex>,
+    outgoing_bg: VertexRange,
+    outgoing_fg: VertexRange,
+    captured_rect: PaneRenderRect,
+    started_at: Instant,
+    config: AlternateBufferTransitionConfig,
+}
+
+struct AlternateBufferAnimations {
+    config: AlternateBufferAnimationConfig,
+    observations: HashMap<PaneRenderId, AlternateBufferObservation>,
+    transitions: HashMap<PaneRenderId, AlternateBufferTransition>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AlternateBufferLegVisual {
+    translation: [f32; 2],
+    opacity: f32,
+    complete: bool,
+}
+
+impl AlternateBufferAnimations {
+    fn new(config: AlternateBufferAnimationConfig) -> Self {
+        Self {
+            config,
+            observations: HashMap::new(),
+            transitions: HashMap::new(),
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        panes: &[PaneRenderInput<'_>],
+        pane_tessellators: &mut HashMap<PaneRenderId, GridTessellator>,
+        active_ids: &HashSet<PaneRenderId>,
+        now: Instant,
+    ) {
+        self.observations
+            .retain(|pane_id, _| active_ids.contains(pane_id));
+        self.transitions
+            .retain(|pane_id, transition| active_ids.contains(pane_id) && !transition.complete(now));
+
+        for pane in panes {
+            let Some((generation, active)) = pane.alternate_buffer else {
+                continue;
+            };
+            let Some(previous) = self.observations.get(&pane.pane_id).copied() else {
+                self.observations.insert(
+                    pane.pane_id,
+                    AlternateBufferObservation {
+                        generation,
+                        active,
+                        rect: pane.rect,
+                    },
+                );
+                continue;
+            };
+
+            if generation != previous.generation && active != previous.active {
+                if let Some(tessellator) = pane_tessellators.get_mut(&pane.pane_id) {
+                    let (outgoing_bg, outgoing_fg) = terminal_vertex_ranges(tessellator);
+                    let outgoing_vertices = std::mem::take(&mut tessellator.vertices);
+                    if !outgoing_vertices.is_empty() {
+                        self.transitions.insert(
+                            pane.pane_id,
+                            AlternateBufferTransition {
+                                outgoing_vertices,
+                                outgoing_bg,
+                                outgoing_fg,
+                                captured_rect: previous.rect,
+                                started_at: now,
+                                config: if active {
+                                    self.config.open.clone()
+                                } else {
+                                    self.config.close.clone()
+                                },
+                            },
+                        );
+                    }
+                }
+            }
+
+            if let Some(transition) = self.transitions.get(&pane.pane_id) {
+                if (transition.captured_rect.width - pane.rect.width).abs() > 0.5
+                    || (transition.captured_rect.height - pane.rect.height).abs() > 0.5
+                {
+                    self.transitions.remove(&pane.pane_id);
+                }
+            }
+            self.observations.insert(
+                pane.pane_id,
+                AlternateBufferObservation {
+                    generation,
+                    active,
+                    rect: pane.rect,
+                },
+            );
+        }
+    }
+}
+
+impl AlternateBufferTransition {
+    fn complete(&self, now: Instant) -> bool {
+        let elapsed_ms = now.saturating_duration_since(self.started_at).as_millis() as u64;
+        elapsed_ms
+            >= u64::from(
+                self.config
+                    .outgoing
+                    .duration_ms
+                    .max(self.config.incoming.duration_ms),
+            )
+    }
+}
+
+fn terminal_vertex_ranges(tessellator: &GridTessellator) -> (VertexRange, VertexRange) {
+    fn aggregate(ranges: impl Iterator<Item = VertexRange>) -> VertexRange {
+        let mut start = usize::MAX;
+        let mut end = 0usize;
+        for range in ranges.filter(|range| range.count > 0) {
+            start = start.min(range.start);
+            end = end.max(range.start + range.count);
+        }
+        if start == usize::MAX {
+            VertexRange::default()
+        } else {
+            VertexRange {
+                start,
+                count: end - start,
+            }
+        }
+    }
+
+    (
+        aggregate(tessellator.row_ranges.iter().map(|row| row.bg)),
+        aggregate(tessellator.row_ranges.iter().map(|row| row.fg)),
+    )
+}
+
+fn alternate_buffer_leg_visual(
+    leg: &AlternateBufferAnimationLegConfig,
+    started_at: Instant,
+    now: Instant,
+    pane_rect: PaneRenderRect,
+    viewport: vk::Extent2D,
+    incoming: bool,
+) -> AlternateBufferLegVisual {
+    let elapsed = now.saturating_duration_since(started_at).as_secs_f32();
+    let duration = leg.duration_ms.max(1) as f32 / 1_000.0;
+    let linear = (elapsed / duration).clamp(0.0, 1.0);
+    let progress = 1.0 - (1.0 - linear).powi(3);
+    let complete = linear >= 1.0;
+    if leg.effect == AlternateBufferAnimationEffect::Fade {
+        return AlternateBufferLegVisual {
+            translation: [0.0, 0.0],
+            opacity: if incoming { progress } else { 1.0 - progress },
+            complete,
+        };
+    }
+
+    let amount = if incoming { 1.0 - progress } else { progress };
+    let direction = leg
+        .direction
+        .unwrap_or(AlternateBufferAnimationDirection::Right);
+    let (dx, dy) = match direction {
+        AlternateBufferAnimationDirection::Left => (-pane_rect.width * amount, 0.0),
+        AlternateBufferAnimationDirection::Right => (pane_rect.width * amount, 0.0),
+        AlternateBufferAnimationDirection::Up => (0.0, -pane_rect.height * amount),
+        AlternateBufferAnimationDirection::Down => (0.0, pane_rect.height * amount),
+    };
+    AlternateBufferLegVisual {
+        translation: [
+            2.0 * dx / viewport.width.max(1) as f32,
+            -2.0 * dy / viewport.height.max(1) as f32,
+        ],
+        opacity: 1.0,
+        complete,
+    }
+}
+
+fn append_transition_range(
+    target: &mut Vec<GlyphVertex>,
+    batches: &mut Vec<RenderDrawBatch>,
+    source: &[GlyphVertex],
+    range: VertexRange,
+    scissor: vk::Rect2D,
+    translation: [f32; 2],
+    opacity: f32,
+) {
+    if range.count == 0 || opacity <= 0.0 {
+        return;
+    }
+    let Some(vertices) = source.get(range.start..range.start + range.count) else {
+        return;
+    };
+    let start = target.len();
+    target.extend_from_slice(vertices);
+    batches.push(
+        RenderDrawBatch::new(start, vertices.len(), scissor, false)
+            .visual(translation, opacity.clamp(0.0, 1.0)),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_alternate_buffer_transition(
+    target: &mut Vec<GlyphVertex>,
+    batches: &mut Vec<RenderDrawBatch>,
+    transition: &AlternateBufferTransition,
+    incoming: &GridTessellator,
+    pane_rect: PaneRenderRect,
+    scissor: vk::Rect2D,
+    viewport: vk::Extent2D,
+    now: Instant,
+) {
+    let (incoming_bg, incoming_fg) = terminal_vertex_ranges(incoming);
+    let outgoing_visual = alternate_buffer_leg_visual(
+        &transition.config.outgoing,
+        transition.started_at,
+        now,
+        pane_rect,
+        viewport,
+        false,
+    );
+    let incoming_visual = alternate_buffer_leg_visual(
+        &transition.config.incoming,
+        transition.started_at,
+        now,
+        pane_rect,
+        viewport,
+        true,
+    );
+    let base_translation = [
+        2.0 * (pane_rect.x - transition.captured_rect.x) / viewport.width.max(1) as f32,
+        -2.0 * (pane_rect.y - transition.captured_rect.y) / viewport.height.max(1) as f32,
+    ];
+    let outgoing_translation = [
+        base_translation[0] + outgoing_visual.translation[0],
+        base_translation[1] + outgoing_visual.translation[1],
+    ];
+
+    // Background ranges contain only explicit cell fills (including inverse
+    // video, selection, and block cursors). The pane's default background is
+    // supplied by the render pass, so fading these ranges preserves terminal
+    // opacity and transparency while keeping each cell visually coherent.
+    if !outgoing_visual.complete {
+        append_transition_range(
+            target,
+            batches,
+            &transition.outgoing_vertices,
+            transition.outgoing_bg,
+            scissor,
+            outgoing_translation,
+            outgoing_visual.opacity,
+        );
+        append_transition_range(
+            target,
+            batches,
+            &transition.outgoing_vertices,
+            transition.outgoing_fg,
+            scissor,
+            outgoing_translation,
+            outgoing_visual.opacity,
+        );
+    }
+
+    append_transition_range(
+        target,
+        batches,
+        &incoming.vertices,
+        incoming_bg,
+        scissor,
+        incoming_visual.translation,
+        incoming_visual.opacity,
+    );
+    append_transition_range(
+        target,
+        batches,
+        &incoming.vertices,
+        incoming_fg,
+        scissor,
+        incoming_visual.translation,
+        incoming_visual.opacity,
+    );
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -722,6 +1045,7 @@ pub struct Renderer {
     fallback_font_rasterizers: Vec<FontRasterizer>,
     font_px_size: f32,
     cursor_trail: Option<CursorTrail>,
+    alternate_buffer_animations: Option<AlternateBufferAnimations>,
 
     pub cell_width: u32,
     pub cell_height: u32,
@@ -1000,6 +1324,21 @@ impl Renderer {
         self.cursor_trail
             .as_ref()
             .and_then(|trail| trail.next_wakeup(now))
+    }
+
+    pub fn set_alternate_buffer_animation_config(
+        &mut self,
+        config: &AlternateBufferAnimationConfig,
+    ) {
+        self.alternate_buffer_animations = config
+            .enabled
+            .then(|| AlternateBufferAnimations::new(config.clone()));
+    }
+
+    pub fn alternate_buffer_animation_wants_redraw(&self) -> bool {
+        self.alternate_buffer_animations
+            .as_ref()
+            .is_some_and(|animations| !animations.transitions.is_empty())
     }
 
     pub fn has_real_font_metrics(&self) -> bool {
@@ -1337,6 +1676,7 @@ impl Renderer {
             fallback_font_rasterizers: Vec::new(),
             font_px_size: baseline as f32,
             cursor_trail: None,
+            alternate_buffer_animations: None,
             cell_width,
             cell_height,
             baseline,
@@ -1614,13 +1954,15 @@ impl Renderer {
                 };
                 let pc = crate::pipeline::PushConstants {
                     cell_size: [effective_cell_w, effective_cell_h],
+                    translation: [0.0, 0.0],
+                    draw_opacity: 1.0,
                     config_flags,
-                    _pad: 0,
+                    _pad: [0, 0],
                 };
                 self.device.cmd_push_constants(
                     cmd,
                     self.pipeline.pipeline_layout,
-                    vk::ShaderStageFlags::FRAGMENT,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
                     bytemuck::bytes_of(&pc),
                 );
@@ -1674,6 +2016,20 @@ impl Renderer {
                                 pipeline,
                             );
                         }
+                        let pc = crate::pipeline::PushConstants {
+                            cell_size: [effective_cell_w, effective_cell_h],
+                            translation: batch.translation,
+                            draw_opacity: batch.opacity,
+                            config_flags,
+                            _pad: [0, 0],
+                        };
+                        self.device.cmd_push_constants(
+                            cmd,
+                            self.pipeline.pipeline_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            bytemuck::bytes_of(&pc),
+                        );
                         self.device.cmd_set_scissor(cmd, 0, &[batch.scissor]);
                         self.device
                             .cmd_draw(cmd, batch.count as u32, 1, batch.start as u32, 0);
@@ -1946,10 +2302,15 @@ impl Renderer {
             self.pane_tessellators
                 .retain(|pane_id, _| active_ids.contains(pane_id));
         }
+        let now = Instant::now();
+        if let Some(animations) = self.alternate_buffer_animations.as_mut() {
+            animations.prepare(panes, &mut self.pane_tessellators, &active_ids, now);
+        }
 
         let vp_w = self.swapchain.extent.width as f32;
         let vp_h = self.swapchain.extent.height as f32;
 
+        let alternate_transitions = self.alternate_buffer_animations.as_ref();
         let cursor_trail_visual = self.cursor_trail.as_mut().and_then(|trail| {
             let sample = panes.iter().find_map(|pane| {
                 // `cursor == None` is the terminal's authoritative hidden state.
@@ -1958,6 +2319,9 @@ impl Renderer {
                 if !pane.is_active
                     || pane.pane_id.is_synthetic()
                     || matches!(pane.layer, PaneRenderLayer::AfterModalDim | PaneRenderLayer::Modal)
+                    || alternate_transitions.is_some_and(|animations| {
+                        animations.transitions.contains_key(&pane.pane_id)
+                    })
                 {
                     return None;
                 }
@@ -1986,7 +2350,7 @@ impl Renderer {
                     pane_opacity: pane.opacity,
                 })
             });
-            trail.update(sample, Instant::now())
+            trail.update(sample, now)
         });
 
         let ligatures_enabled = self.ligature_config.enabled && self.font_rasterizer.is_some();
@@ -2159,6 +2523,23 @@ impl Renderer {
                 modal_batches.push((pane.pane_id, scissor));
                 continue;
             }
+            if let Some(transition) = self
+                .alternate_buffer_animations
+                .as_ref()
+                .and_then(|animations| animations.transitions.get(&pane.pane_id))
+            {
+                append_alternate_buffer_transition(
+                    &mut self.tessellator.vertices,
+                    &mut draw_batches,
+                    transition,
+                    tessellator,
+                    pane.rect,
+                    scissor,
+                    self.swapchain.extent,
+                    now,
+                );
+                continue;
+            }
             let start = self.tessellator.vertices.len();
             if pane.opacity < 1.0 {
                 let mut faded_vertices = tessellator.vertices.clone();
@@ -2176,12 +2557,7 @@ impl Renderer {
             }
             let count = self.tessellator.vertices.len() - start;
             if count > 0 {
-                draw_batches.push(RenderDrawBatch {
-                    start,
-                    count,
-                    scissor,
-                    is_opaque: false,
-                });
+                draw_batches.push(RenderDrawBatch::new(start, count, scissor, false));
             }
             if cursor_trail_visual.is_some_and(|trail| {
                 trail.layer == PaneRenderLayer::Normal && trail.pane_id == pane.pane_id
@@ -2195,12 +2571,7 @@ impl Renderer {
                 );
                 let count = self.tessellator.vertices.len() - start;
                 if count > 0 {
-                    draw_batches.push(RenderDrawBatch {
-                        start,
-                        count,
-                        scissor,
-                        is_opaque: false,
-                    });
+                    draw_batches.push(RenderDrawBatch::new(start, count, scissor, false));
                 }
             }
         }
@@ -2321,12 +2692,12 @@ impl Renderer {
         }
         let overlay_count = self.tessellator.vertices.len() - overlay_start;
         if overlay_count > 0 {
-            draw_batches.push(RenderDrawBatch {
-                start: overlay_start,
-                count: overlay_count,
-                scissor: full_scissor(self.swapchain.extent),
-                is_opaque: false,
-            });
+            draw_batches.push(RenderDrawBatch::new(
+                overlay_start,
+                overlay_count,
+                full_scissor(self.swapchain.extent),
+                false,
+            ));
         }
 
         for (pane, scissor) in floating_batches {
@@ -2347,42 +2718,49 @@ impl Renderer {
             );
             let count_bg = self.tessellator.vertices.len() - start_bg;
             if count_bg > 0 {
-                draw_batches.push(RenderDrawBatch {
-                    start: start_bg,
-                    count: count_bg,
-                    scissor,
-                    is_opaque: true,
-                });
+                draw_batches.push(RenderDrawBatch::new(start_bg, count_bg, scissor, true));
             }
 
-            let start = self.tessellator.vertices.len();
-            if pane.opacity < 1.0 {
-                let mut faded_vertices = tessellator.vertices.clone();
-                for v in &mut faded_vertices {
-                    v.fg_color[3] *= pane.opacity;
-                    v.bg_color[3] *= pane.opacity;
-                }
-                self.tessellator
-                    .vertices
-                    .extend_from_slice(&faded_vertices);
+            let has_alternate_transition = self
+                .alternate_buffer_animations
+                .as_ref()
+                .and_then(|animations| animations.transitions.get(&pane.pane_id));
+            if let Some(transition) = has_alternate_transition {
+                append_alternate_buffer_transition(
+                    &mut self.tessellator.vertices,
+                    &mut draw_batches,
+                    transition,
+                    tessellator,
+                    pane.rect,
+                    scissor,
+                    self.swapchain.extent,
+                    now,
+                );
             } else {
-                self.tessellator
-                    .vertices
-                    .extend_from_slice(&tessellator.vertices);
-            }
-            let count = self.tessellator.vertices.len() - start;
-            if count > 0 {
-                draw_batches.push(RenderDrawBatch {
-                    start,
-                    count,
-                    scissor,
-                    is_opaque: false,
-                });
+                let start = self.tessellator.vertices.len();
+                if pane.opacity < 1.0 {
+                    let mut faded_vertices = tessellator.vertices.clone();
+                    for v in &mut faded_vertices {
+                        v.fg_color[3] *= pane.opacity;
+                        v.bg_color[3] *= pane.opacity;
+                    }
+                    self.tessellator.vertices.extend_from_slice(&faded_vertices);
+                } else {
+                    self.tessellator
+                        .vertices
+                        .extend_from_slice(&tessellator.vertices);
+                }
+                let count = self.tessellator.vertices.len() - start;
+                if count > 0 {
+                    draw_batches.push(RenderDrawBatch::new(start, count, scissor, false));
+                }
             }
 
-            if cursor_trail_visual.is_some_and(|trail| {
-                trail.layer == PaneRenderLayer::Floating && trail.pane_id == pane.pane_id
-            }) {
+            if has_alternate_transition.is_none()
+                && cursor_trail_visual.is_some_and(|trail| {
+                    trail.layer == PaneRenderLayer::Floating && trail.pane_id == pane.pane_id
+                })
+            {
                 let start = self.tessellator.vertices.len();
                 append_cursor_trail(
                     &mut self.tessellator.vertices,
@@ -2392,12 +2770,7 @@ impl Renderer {
                 );
                 let count = self.tessellator.vertices.len() - start;
                 if count > 0 {
-                    draw_batches.push(RenderDrawBatch {
-                        start,
-                        count,
-                        scissor,
-                        is_opaque: false,
-                    });
+                    draw_batches.push(RenderDrawBatch::new(start, count, scissor, false));
                 }
             }
 
@@ -2441,12 +2814,12 @@ impl Renderer {
                 );
                 let count_border = self.tessellator.vertices.len() - start_border;
                 if count_border > 0 {
-                    draw_batches.push(RenderDrawBatch {
-                        start: start_border,
-                        count: count_border,
-                        scissor: full_scissor(self.swapchain.extent),
-                        is_opaque: false,
-                    });
+                    draw_batches.push(RenderDrawBatch::new(
+                        start_border,
+                        count_border,
+                        full_scissor(self.swapchain.extent),
+                        false,
+                    ));
                 }
             }
         }
@@ -2461,12 +2834,7 @@ impl Renderer {
                 .extend_from_slice(&tessellator.vertices);
             let count = self.tessellator.vertices.len() - start;
             if count > 0 {
-                draw_batches.push(RenderDrawBatch {
-                    start,
-                    count,
-                    scissor,
-                    is_opaque: false,
-                });
+                draw_batches.push(RenderDrawBatch::new(start, count, scissor, false));
             }
         }
 
@@ -2506,12 +2874,12 @@ impl Renderer {
             let chrome_count = self.tessellator.vertices.len() - chrome_start;
             if chrome_count > 0 {
                 if let Some(scissor) = popup_scissor {
-                    draw_batches.push(RenderDrawBatch {
-                        start: chrome_start,
-                        count: chrome_count,
+                    draw_batches.push(RenderDrawBatch::new(
+                        chrome_start,
+                        chrome_count,
                         scissor,
-                        is_opaque: false,
-                    });
+                        false,
+                    ));
                 }
             }
 
@@ -2551,12 +2919,12 @@ impl Renderer {
                 let text_count = self.tessellator.vertices.len() - text_start;
                 if text_count > 0 {
                     if let Some(scissor) = rect_to_scissor(text_clip, self.swapchain.extent) {
-                        draw_batches.push(RenderDrawBatch {
-                            start: text_start,
-                            count: text_count,
+                        draw_batches.push(RenderDrawBatch::new(
+                            text_start,
+                            text_count,
                             scissor,
-                            is_opaque: false,
-                        });
+                            false,
+                        ));
                     }
                 }
             }
@@ -2575,12 +2943,12 @@ impl Renderer {
         );
         let cm_count = self.tessellator.vertices.len() - cm_start;
         if cm_count > 0 {
-            draw_batches.push(RenderDrawBatch {
-                start: cm_start,
-                count: cm_count,
-                scissor: full_scissor(self.swapchain.extent),
-                is_opaque: false,
-            });
+            draw_batches.push(RenderDrawBatch::new(
+                cm_start,
+                cm_count,
+                full_scissor(self.swapchain.extent),
+                false,
+            ));
         }
 
         for key in pane_missing_glyphs
@@ -2617,6 +2985,10 @@ impl Renderer {
 
     /// Recreates the swapchain (e.g., after window resize).
     pub fn recreate_swapchain(&mut self, width: u32, height: u32) -> Result<()> {
+        if let Some(animations) = self.alternate_buffer_animations.as_mut() {
+            animations.transitions.clear();
+            animations.observations.clear();
+        }
         unsafe {
             self.device
                 .device_wait_idle()
@@ -3115,5 +3487,126 @@ mod tests {
 
         assert_eq!(len, 4);
         assert!(clipped[..len].iter().all(|point| point.x <= 8.0));
+    }
+
+    #[test]
+    fn alternate_buffer_fade_uses_cubic_progress_and_finishes_exactly() {
+        let leg = AlternateBufferAnimationLegConfig {
+            effect: AlternateBufferAnimationEffect::Fade,
+            duration_ms: 100,
+            direction: None,
+        };
+        let start = Instant::now();
+        let rect = PaneRenderRect::new(0.0, 0.0, 100.0, 50.0);
+        let viewport = vk::Extent2D {
+            width: 200,
+            height: 100,
+        };
+
+        let incoming = alternate_buffer_leg_visual(
+            &leg,
+            start,
+            start + Duration::from_millis(50),
+            rect,
+            viewport,
+            true,
+        );
+        assert!((incoming.opacity - 0.875).abs() < 0.0001);
+        assert!(!incoming.complete);
+
+        let outgoing = alternate_buffer_leg_visual(
+            &leg,
+            start,
+            start + Duration::from_millis(100),
+            rect,
+            viewport,
+            false,
+        );
+        assert_eq!(outgoing.opacity, 0.0);
+        assert!(outgoing.complete);
+    }
+
+    #[test]
+    fn alternate_buffer_scroll_starts_one_pane_away_and_converges() {
+        let leg = AlternateBufferAnimationLegConfig {
+            effect: AlternateBufferAnimationEffect::Scroll,
+            duration_ms: 120,
+            direction: Some(AlternateBufferAnimationDirection::Right),
+        };
+        let start = Instant::now();
+        let rect = PaneRenderRect::new(10.0, 20.0, 100.0, 50.0);
+        let viewport = vk::Extent2D {
+            width: 200,
+            height: 100,
+        };
+
+        let initial = alternate_buffer_leg_visual(&leg, start, start, rect, viewport, true);
+        assert_eq!(initial.translation, [1.0, 0.0]);
+        assert_eq!(initial.opacity, 1.0);
+
+        let final_visual = alternate_buffer_leg_visual(
+            &leg,
+            start,
+            start + Duration::from_millis(120),
+            rect,
+            viewport,
+            true,
+        );
+        assert_eq!(final_visual.translation, [0.0, 0.0]);
+        assert!(final_visual.complete);
+    }
+
+    #[test]
+    fn alternate_buffer_fade_applies_equally_to_cell_backgrounds_and_foreground() {
+        let fade = AlternateBufferAnimationLegConfig {
+            effect: AlternateBufferAnimationEffect::Fade,
+            duration_ms: 100,
+            direction: None,
+        };
+        let start = Instant::now();
+        let rect = PaneRenderRect::new(0.0, 0.0, 100.0, 50.0);
+        let transition = AlternateBufferTransition {
+            outgoing_vertices: vec![GlyphVertex::default(); 12],
+            outgoing_bg: VertexRange { start: 0, count: 6 },
+            outgoing_fg: VertexRange { start: 6, count: 6 },
+            captured_rect: rect,
+            started_at: start,
+            config: AlternateBufferTransitionConfig {
+                outgoing: fade.clone(),
+                incoming: fade,
+            },
+        };
+        let mut incoming = GridTessellator::new(12);
+        incoming.vertices = vec![GlyphVertex::default(); 12];
+        incoming.row_ranges.push(RowVertexRanges {
+            bg: VertexRange { start: 0, count: 6 },
+            fg: VertexRange { start: 6, count: 6 },
+            generation: 1,
+        });
+        let mut vertices = Vec::new();
+        let mut batches = Vec::new();
+
+        append_alternate_buffer_transition(
+            &mut vertices,
+            &mut batches,
+            &transition,
+            &incoming,
+            rect,
+            full_scissor(vk::Extent2D {
+                width: 100,
+                height: 50,
+            }),
+            vk::Extent2D {
+                width: 100,
+                height: 50,
+            },
+            start + Duration::from_millis(50),
+        );
+
+        assert_eq!(batches.len(), 4);
+        assert_eq!(batches[0].opacity, batches[1].opacity);
+        assert_eq!(batches[2].opacity, batches[3].opacity);
+        assert!((batches[0].opacity - 0.125).abs() < 0.0001);
+        assert!((batches[2].opacity - 0.875).abs() < 0.0001);
     }
 }

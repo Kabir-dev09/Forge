@@ -1126,6 +1126,27 @@ mod tests {
     }
 
     #[test]
+    fn alternate_screen_generation_changes_only_on_real_transitions() {
+        let mut processor = VteProcessor::new();
+        let mut buf = test_screen(10, 10);
+
+        assert_eq!(buf.alt_buffer_generation, 0);
+        processor.process(b"\x1b[?1049h", &mut buf);
+        assert_eq!(buf.alt_buffer_generation, 1);
+        assert_eq!(buf.generate_snapshot().alt_buffer_generation, 1);
+
+        processor.process(b"\x1b[?1049h", &mut buf);
+        assert_eq!(buf.alt_buffer_generation, 1);
+
+        processor.process(b"\x1b[?1049l", &mut buf);
+        assert_eq!(buf.alt_buffer_generation, 2);
+        assert_eq!(buf.generate_snapshot().alt_buffer_generation, 2);
+
+        processor.process(b"\x1b[?1049l", &mut buf);
+        assert_eq!(buf.alt_buffer_generation, 2);
+    }
+
+    #[test]
     fn terminal_resets_clear_cursor_style_override() {
         let mut processor = VteProcessor::new();
         let mut buf = test_screen(10, 10);

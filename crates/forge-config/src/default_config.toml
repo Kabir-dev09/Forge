@@ -65,6 +65,29 @@ lines = 10000
 smooth_scroll = true
 scroll_multiplier = 3.0
 
+# Alternate-screen programs switch immediately at the terminal level; these
+# optional effects animate only their rendered contents inside the pane.
+[alternate_buffer.animation]
+enabled = false
+
+[alternate_buffer.animation.open.outgoing]
+effect = "fade"
+duration_ms = 90
+
+[alternate_buffer.animation.open.incoming]
+effect = "scroll"
+duration_ms = 140
+direction = "right"
+
+[alternate_buffer.animation.close.outgoing]
+effect = "scroll"
+duration_ms = 130
+direction = "right"
+
+[alternate_buffer.animation.close.incoming]
+effect = "fade"
+duration_ms = 100
+
 [shell]
 # program defaults to $SHELL when omitted.
 # Disable to skip Forge's CWD and command-lifecycle hooks. Command completion

@@ -1,8 +1,11 @@
-use crate::config_registry::{ConfigError, ForgeConfig, LigatureConfig};
+use crate::config_registry::{
+    AlternateBufferAnimationEffect, ConfigError, ForgeConfig, LigatureConfig,
+};
 
 impl ForgeConfig {
     pub fn strict_validation_errors(&self) -> Vec<ConfigError> {
         let mut errors = Vec::new();
+        let mut missing_animation_directions = Vec::new();
         let mut range = |valid: bool, path: &str, value: String, expected: &str| {
             if !valid {
                 errors.push(ConfigError::OutOfRange {
@@ -110,6 +113,38 @@ impl ForgeConfig {
                 .to_string(),
             "between 250 and 60000",
         );
+        for (path, leg) in [
+            (
+                "alternate_buffer.animation.open.outgoing",
+                &self.alternate_buffer.animation.open.outgoing,
+            ),
+            (
+                "alternate_buffer.animation.open.incoming",
+                &self.alternate_buffer.animation.open.incoming,
+            ),
+            (
+                "alternate_buffer.animation.close.outgoing",
+                &self.alternate_buffer.animation.close.outgoing,
+            ),
+            (
+                "alternate_buffer.animation.close.incoming",
+                &self.alternate_buffer.animation.close.incoming,
+            ),
+        ] {
+            range(
+                (1..=2_000).contains(&leg.duration_ms),
+                &format!("{path}.duration_ms"),
+                leg.duration_ms.to_string(),
+                "between 1 and 2000",
+            );
+            if leg.effect == AlternateBufferAnimationEffect::Scroll && leg.direction.is_none() {
+                missing_animation_directions.push(ConfigError::InvalidValue {
+                    path: format!("{path}.direction"),
+                    value: "missing".to_string(),
+                    reason: "scroll animations require left, right, up, or down".to_string(),
+                });
+            }
+        }
         for (path, value) in [
             ("window.padding.top", self.window.padding.top),
             ("window.padding.bottom", self.window.padding.bottom),
@@ -128,6 +163,7 @@ impl ForgeConfig {
                 });
             }
         }
+        errors.extend(missing_animation_directions);
         errors
     }
 }

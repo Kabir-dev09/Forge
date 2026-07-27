@@ -186,6 +186,7 @@ pub struct ScreenBuffer {
     pub scroll_id: u64,
     pub snapshot_id: u64,
     pub use_alt_buffer: bool,
+    pub alt_buffer_generation: u64,
     saved_primary_grid: Option<VecDeque<Row>>,
     saved_primary_cursor: Option<CursorPos>,
     saved_primary_attrs: Option<(Color, Color, bool, bool, bool, bool, bool)>,
@@ -324,6 +325,7 @@ impl ScreenBuffer {
             scroll_id: 0,
             snapshot_id: 0,
             use_alt_buffer: false,
+            alt_buffer_generation: 0,
             saved_primary_grid: None,
             saved_primary_cursor: None,
             saved_primary_attrs: None,
@@ -1355,6 +1357,7 @@ impl ScreenBuffer {
     pub fn enable_alt_buffer(&mut self) {
         if !self.use_alt_buffer {
             self.use_alt_buffer = true;
+            self.alt_buffer_generation = self.alt_buffer_generation.wrapping_add(1);
             self.pending_scroll = None;
             self.scroll_id = self.scroll_id.wrapping_add(1);
             // Save primary grid and attributes
@@ -1386,6 +1389,7 @@ impl ScreenBuffer {
     pub fn disable_alt_buffer(&mut self) {
         if self.use_alt_buffer {
             self.use_alt_buffer = false;
+            self.alt_buffer_generation = self.alt_buffer_generation.wrapping_add(1);
             self.pending_scroll = None;
             self.scroll_id = self.scroll_id.wrapping_add(1);
             if let Some(mut grid) = self.saved_primary_grid.take() {
@@ -2472,6 +2476,7 @@ impl ScreenBuffer {
             cursor_blink_override: self.cursor_blink_override,
             selection: self.selection,
             use_alt_buffer: self.use_alt_buffer,
+            alt_buffer_generation: self.alt_buffer_generation,
             visible_screen_lines: rows.max(1) as f64,
             history_lines: self.scrollback_len() as f64,
             viewport_offset: self.scroll_offset as f64,

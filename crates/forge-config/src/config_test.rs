@@ -55,3 +55,70 @@ fn shell_integration_is_enabled_by_default_and_can_be_disabled() {
         toml::from_str("[shell]\nintegration_enabled = false\n").unwrap();
     assert!(!disabled.shell.integration_enabled);
 }
+
+#[test]
+fn alternate_buffer_animations_default_off_and_parse_independent_legs() {
+    use forge_core::config_registry::{
+        AlternateBufferAnimationDirection as Direction, AlternateBufferAnimationEffect as Effect,
+    };
+
+    let default_config: forge_core::config_registry::ForgeConfig =
+        toml::from_str(include_str!("default_config.toml")).unwrap();
+    assert!(!default_config.alternate_buffer.animation.enabled);
+
+    let source = r#"
+        [alternate_buffer.animation]
+        enabled = true
+
+        [alternate_buffer.animation.open.outgoing]
+        effect = "fade"
+        duration_ms = 75
+
+        [alternate_buffer.animation.open.incoming]
+        effect = "scroll"
+        duration_ms = 125
+        direction = "up"
+
+        [alternate_buffer.animation.close.outgoing]
+        effect = "scroll"
+        duration_ms = 150
+        direction = "left"
+
+        [alternate_buffer.animation.close.incoming]
+        effect = "fade"
+        duration_ms = 80
+    "#;
+    let config: forge_core::config_registry::ForgeConfig = toml::from_str(source).unwrap();
+    assert!(config.alternate_buffer.animation.enabled);
+    assert_eq!(
+        config.alternate_buffer.animation.open.outgoing.effect,
+        Effect::Fade
+    );
+    assert_eq!(
+        config.alternate_buffer.animation.open.incoming.direction,
+        Some(Direction::Up)
+    );
+    assert_eq!(
+        config.alternate_buffer.animation.close.outgoing.direction,
+        Some(Direction::Left)
+    );
+}
+
+#[test]
+fn alternate_buffer_scroll_requires_direction_in_strict_config() {
+    let config: forge_core::config_registry::ForgeConfig = toml::from_str(
+        r#"
+        [alternate_buffer.animation.open.incoming]
+        effect = "scroll"
+        duration_ms = 120
+        "#,
+    )
+    .unwrap();
+
+    let errors = config.strict_validation_errors();
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        forge_core::config_registry::ConfigError::InvalidValue { path, .. }
+            if path == "alternate_buffer.animation.open.incoming.direction"
+    )));
+}

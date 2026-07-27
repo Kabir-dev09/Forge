@@ -208,6 +208,104 @@ pub struct PanesConfig {
     pub scroll_animation_duration_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AlternateBufferAnimationEffect {
+    #[default]
+    Fade,
+    Scroll,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AlternateBufferAnimationDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AlternateBufferAnimationLegConfig {
+    pub effect: AlternateBufferAnimationEffect,
+    pub duration_ms: u32,
+    pub direction: Option<AlternateBufferAnimationDirection>,
+}
+
+impl AlternateBufferAnimationLegConfig {
+    fn fade(duration_ms: u32) -> Self {
+        Self {
+            effect: AlternateBufferAnimationEffect::Fade,
+            duration_ms,
+            direction: None,
+        }
+    }
+
+    fn scroll(duration_ms: u32, direction: AlternateBufferAnimationDirection) -> Self {
+        Self {
+            effect: AlternateBufferAnimationEffect::Scroll,
+            duration_ms,
+            direction: Some(direction),
+        }
+    }
+}
+
+impl Default for AlternateBufferAnimationLegConfig {
+    fn default() -> Self {
+        Self::fade(120)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AlternateBufferTransitionConfig {
+    pub outgoing: AlternateBufferAnimationLegConfig,
+    pub incoming: AlternateBufferAnimationLegConfig,
+}
+
+impl Default for AlternateBufferTransitionConfig {
+    fn default() -> Self {
+        Self {
+            outgoing: AlternateBufferAnimationLegConfig::fade(90),
+            incoming: AlternateBufferAnimationLegConfig::scroll(
+                140,
+                AlternateBufferAnimationDirection::Right,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AlternateBufferAnimationConfig {
+    pub enabled: bool,
+    pub open: AlternateBufferTransitionConfig,
+    pub close: AlternateBufferTransitionConfig,
+}
+
+impl Default for AlternateBufferAnimationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            open: AlternateBufferTransitionConfig::default(),
+            close: AlternateBufferTransitionConfig {
+                outgoing: AlternateBufferAnimationLegConfig::scroll(
+                    130,
+                    AlternateBufferAnimationDirection::Right,
+                ),
+                incoming: AlternateBufferAnimationLegConfig::fade(100),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AlternateBufferConfig {
+    pub animation: AlternateBufferAnimationConfig,
+}
+
 impl Default for PanesConfig {
     fn default() -> Self {
         Self {
@@ -776,6 +874,7 @@ pub struct ForgeConfig {
     pub theme: ThemeConfig,
     pub behavior: BehaviorConfig,
     pub panes: PanesConfig,
+    pub alternate_buffer: AlternateBufferConfig,
     pub render: RenderConfig,
     pub confirm_close: ConfirmCloseConfig,
     pub command_completion_indicator: CommandCompletionIndicatorConfig,
@@ -801,6 +900,7 @@ impl Default for ForgeConfig {
             theme: ThemeConfig::default(),
             behavior: BehaviorConfig::default(),
             panes: PanesConfig::default(),
+            alternate_buffer: AlternateBufferConfig::default(),
             render: RenderConfig::default(),
             confirm_close: ConfirmCloseConfig::default(),
             command_completion_indicator: CommandCompletionIndicatorConfig::default(),
@@ -980,6 +1080,17 @@ impl ForgeConfig {
             .command_completion_indicator
             .display_duration_ms
             .clamp(250, 60_000);
+        for leg in [
+            &mut self.alternate_buffer.animation.open.outgoing,
+            &mut self.alternate_buffer.animation.open.incoming,
+            &mut self.alternate_buffer.animation.close.outgoing,
+            &mut self.alternate_buffer.animation.close.incoming,
+        ] {
+            leg.duration_ms = leg.duration_ms.clamp(1, 2_000);
+            if leg.effect == AlternateBufferAnimationEffect::Scroll && leg.direction.is_none() {
+                leg.direction = Some(AlternateBufferAnimationDirection::Right);
+            }
+        }
         self.window.padding.top = self.window.padding.top.clamp(0, 100);
         self.window.padding.bottom = self.window.padding.bottom.clamp(0, 100);
         self.window.padding.left = self.window.padding.left.clamp(0, 100);

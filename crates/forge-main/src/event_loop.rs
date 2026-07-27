@@ -3594,6 +3594,13 @@ pub fn run_event_loop(
                         renderer.set_cursor_trail_config(&app_data.config.cursor.trail);
                     }
                 }
+                if changes.alternate_buffer {
+                    if let Some(renderer) = app_data.renderer.as_mut() {
+                        renderer.set_alternate_buffer_animation_config(
+                            &app_data.config.alternate_buffer.animation,
+                        );
+                    }
+                }
                 if changes.command_completion_indicator || changes.shell {
                     let enabled = command_completion_tracking_enabled_for_config(&app_data.config);
                     app_data.pane_io.set_command_completion_tracking(enabled);
@@ -4772,6 +4779,10 @@ pub fn run_event_loop(
             .renderer
             .as_ref()
             .is_some_and(|renderer| renderer.cursor_trail_wants_redraw(now));
+        let alternate_buffer_animation_wants_redraw = app_data
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.alternate_buffer_animation_wants_redraw());
 
         let wants_redraw = frame_wants_redraw(
             has_dirty_rows,
@@ -4780,7 +4791,7 @@ pub fn run_event_loop(
             scroll_animation_wants_redraw,
             pane_animation_wants_redraw,
             command_indicator_animation_wants_redraw,
-            cursor_trail_wants_redraw,
+            cursor_trail_wants_redraw || alternate_buffer_animation_wants_redraw,
         );
         // FIX #1: When force_immediate_render is set (structural event like pane close),
         // bypass the frame_ready gate entirely so we don't wait up to one full vsync.
@@ -5449,6 +5460,10 @@ pub fn run_event_loop(
                                 left: span.overflow.left,
                                 right: span.overflow.right,
                             },
+                            alternate_buffer: Some((
+                                snap.alt_buffer_generation,
+                                snap.use_alt_buffer,
+                            )),
                         });
                     }
 
@@ -5517,6 +5532,7 @@ pub fn run_event_loop(
                             is_active: false,
                             overflow_indicators:
                                 forge_renderer::renderer::PaneOverflowIndicators::default(),
+                            alternate_buffer: None,
                         });
                     }
                 }
@@ -5638,6 +5654,7 @@ pub fn run_event_loop(
                         is_active: false,
                         overflow_indicators:
                             forge_renderer::renderer::PaneOverflowIndicators::default(),
+                        alternate_buffer: None,
                     });
                 }
 
@@ -5671,6 +5688,7 @@ pub fn run_event_loop(
                         is_active: false,
                         overflow_indicators:
                             forge_renderer::renderer::PaneOverflowIndicators::default(),
+                        alternate_buffer: None,
                     });
                 }
 
@@ -5728,6 +5746,7 @@ pub fn run_event_loop(
                         is_active: false,
                         overflow_indicators:
                             forge_renderer::renderer::PaneOverflowIndicators::default(),
+                        alternate_buffer: None,
                     });
                 }
 
@@ -5804,6 +5823,7 @@ pub fn run_event_loop(
                         is_active: false,
                         overflow_indicators:
                             forge_renderer::renderer::PaneOverflowIndicators::default(),
+                        alternate_buffer: None,
                     });
                 }
 
@@ -5847,6 +5867,7 @@ pub fn run_event_loop(
                         is_active: false,
                         overflow_indicators:
                             forge_renderer::renderer::PaneOverflowIndicators::default(),
+                        alternate_buffer: None,
                     });
                 }
 
@@ -6005,16 +6026,22 @@ pub fn run_event_loop(
                 let cursor_trail_still_active = app_data.renderer.as_ref().is_some_and(|renderer| {
                     renderer.cursor_trail_wants_redraw(std::time::Instant::now())
                 });
+                let alternate_buffer_animation_still_active = app_data
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|renderer| renderer.alternate_buffer_animation_wants_redraw());
                 app_data.wayland_state.force_redraw = needs_scrollbar_redraw
                     || needs_statusbar_hover_redraw
                     || needs_recreate
                     || scroll_animation_still_active
-                    || cursor_trail_still_active;
+                    || cursor_trail_still_active
+                    || alternate_buffer_animation_still_active;
                 if needs_scrollbar_redraw
                     || needs_statusbar_hover_redraw
                     || needs_recreate
                     || scroll_animation_still_active
                     || cursor_trail_still_active
+                    || alternate_buffer_animation_still_active
                 {
                     app_data.loop_signal.clone().wakeup();
                 }

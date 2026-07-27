@@ -11,6 +11,7 @@ pub struct ConfigChangeSet {
     pub theme: bool,
     pub behavior: bool,
     pub panes: bool,
+    pub alternate_buffer: bool,
     pub render: bool,
     pub confirm_close: bool,
     pub command_completion_indicator: bool,
@@ -30,6 +31,7 @@ impl ConfigChangeSet {
             theme: true,
             behavior: true,
             panes: true,
+            alternate_buffer: true,
             render: true,
             confirm_close: true,
             command_completion_indicator: true,
@@ -49,6 +51,7 @@ impl ConfigChangeSet {
             theme: old.theme != new.theme,
             behavior: old.behavior != new.behavior,
             panes: old.panes != new.panes,
+            alternate_buffer: old.alternate_buffer != new.alternate_buffer,
             render: old.render != new.render,
             confirm_close: old.confirm_close != new.confirm_close,
             command_completion_indicator: old.command_completion_indicator
@@ -68,6 +71,7 @@ impl ConfigChangeSet {
             || self.theme
             || self.behavior
             || self.panes
+            || self.alternate_buffer
             || self.render
             || self.confirm_close
             || self.command_completion_indicator

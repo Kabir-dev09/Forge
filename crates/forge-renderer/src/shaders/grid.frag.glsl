@@ -10,7 +10,10 @@ layout(set = 0, binding = 0) uniform sampler2D glyph_atlas;
 
 layout(push_constant) uniform PushConstants {
     vec2 cell_size;
+    vec2 translation;
+    float draw_opacity;
     uint config_flags;
+    uvec2 _pad;
 } pc;
 
 void main() {
