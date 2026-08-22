@@ -10,7 +10,7 @@ Forge is a fast, hardware-accelerated terminal emulator written in Rust. It util
 - **Smart Cursor Context**: Context-aware cursor switching between I-Beam (normal mode) and Block/Pointer (alternate buffer mode for tools like `vim` and `btop`).
 
 ## Installation
-To install the Forge terminal emulator, please use the `forge-installer` provided in the latest release tag. 
+To install the Forge terminal emulator, please use the `install.sh' provided in the latest release tag. 
 You can find the latest release [here (v1.0.0)](https://github.com/Kabir-dev09/Forge/releases/tag/v1.0.0).
 
 ## Build Requirements
