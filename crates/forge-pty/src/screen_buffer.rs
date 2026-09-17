@@ -29,7 +29,7 @@ pub struct ScrollEvent {
 
 #[derive(Clone)]
 pub struct Row {
-    pub cells: Box<[Cell]>,
+    pub cells: Vec<Cell>,
     pub len: usize,
     pub wrapped: bool,
     pub reflowable: bool,
@@ -55,6 +55,28 @@ impl Scrollback {
 
     fn len(&self) -> usize {
         self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn pop_back(&mut self) -> Option<Row> {
+        if self.len == 0 {
+            return None;
+        }
+        let index = if self.len <= self.max_len && self.start == 0 {
+            self.len - 1
+        } else {
+            (self.start + self.len - 1) % self.max_len
+        };
+        let row = self.rows.remove(index);
+        self.len -= 1;
+        // Fix up start pointer if we removed from middle due to wrap around
+        if index < self.start {
+            self.start -= 1;
+        }
+        Some(row)
     }
 
     fn clear(&mut self) {
@@ -283,7 +305,7 @@ impl ScreenBuffer {
         };
         let grid = VecDeque::from(vec![
             Row {
-                cells: vec![default_cell; cols].into_boxed_slice(),
+                cells: vec![default_cell; cols],
                 len: 0,
                 wrapped: false,
                 reflowable: false,
@@ -597,7 +619,7 @@ impl ScreenBuffer {
                         self.grid.push_back(r);
                     } else {
                         self.grid.push_back(Row {
-                            cells: vec![default; self.cols].into_boxed_slice(),
+                            cells: vec![default; self.cols],
                             len: 0,
                             wrapped: false,
                             reflowable: false,
@@ -605,7 +627,7 @@ impl ScreenBuffer {
                     }
                 } else {
                     self.grid.push_back(Row {
-                        cells: vec![default; self.cols].into_boxed_slice(),
+                        cells: vec![default; self.cols],
                         len: 0,
                         wrapped: false,
                         reflowable: false,
@@ -687,7 +709,7 @@ impl ScreenBuffer {
                     self.grid.push_front(r);
                 } else {
                     self.grid.push_front(Row {
-                        cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
+                        cells: vec![self.default_cell(); self.cols],
                         len: 0,
                         wrapped: false,
                         reflowable: false,
@@ -992,9 +1014,6 @@ impl ScreenBuffer {
     }
 
     pub fn resize_reflow(&mut self, new_cols: usize, new_rows: usize) {
-        // TODO(PERF-03): resize_reflow materializes entire scrollback into memory.
-        // It should ideally reflow incrementally or retain the ring buffer structure
-        // during reflow to avoid allocating a massive Vec.
         let _span = tracing::trace_span!(
             "screen_buffer.resize_reflow",
             old_cols = self.cols,
@@ -1012,27 +1031,134 @@ impl ScreenBuffer {
         self.scroll_id = self.scroll_id.wrapping_add(1);
         self.selection = None;
 
+        if new_cols == self.cols {
+            if new_rows > self.rows {
+                let to_add = new_rows - self.rows;
+                let mut added = 0;
+                while added < to_add && !self.scrollback.is_empty() {
+                    let row = self.scrollback.pop_back().unwrap();
+                    self.grid.push_front(row);
+                    added += 1;
+                }
+                while added < to_add {
+                    self.grid.push_back(Row {
+                        cells: vec![self.default_cell(); new_cols],
+                        len: 0,
+                        wrapped: false,
+                        reflowable: false,
+                    });
+                    added += 1;
+                }
+                self.cursor.row = self.cursor.row + added;
+            } else if new_rows < self.rows {
+                let to_remove = self.rows - new_rows;
+                for _ in 0..to_remove {
+                    if let Some(row) = self.grid.pop_front() {
+                        self.scrollback.push(row);
+                    }
+                }
+                if self.cursor.row >= to_remove {
+                    self.cursor.row -= to_remove;
+                } else {
+                    self.cursor.row = 0;
+                }
+            }
+            self.rows = new_rows;
+            self.margin_top = 0;
+            self.margin_bottom = new_rows.saturating_sub(1);
+            self.dirty_generations.resize(new_rows, 1);
+            self.clean_generations.resize(new_rows, 0);
+            for g in &mut self.dirty_generations {
+                *g = g.wrapping_add(1);
+            }
+            return;
+        }
+
         let absolute_cursor_row = self.scrollback.len() + self.cursor.row;
         let cursor_col = self.cursor.col;
 
-        struct LogicalLine {
-            cells: Vec<Cell>,
-            cursor_offset: Option<usize>,
-            reflow_on_resize: bool,
-        }
+        let mut old_rows = self.scrollback.drain_to_vec();
+        let mut old_grid = std::mem::take(&mut self.grid);
+        old_rows.extend(old_grid.drain(..));
 
-        let mut logical_lines = Vec::new();
-        let mut current_line = LogicalLine {
-            cells: Vec::new(),
-            cursor_offset: None,
-            reflow_on_resize: false,
+        let mut reflowed_rows = Vec::with_capacity(old_rows.len());
+        let mut recycled_vecs = Vec::new();
+
+        let mut current_line_cells = Vec::new();
+        let mut current_cursor_offset = None;
+        let mut current_reflow_on_resize = false;
+
+        let mut flush_line = |cells: &mut Vec<Cell>, cursor_offset: Option<usize>, reflow_on_resize: bool, reflowed_rows: &mut Vec<Row>, new_cursor: &mut CursorPos, recycled_vecs: &mut Vec<Vec<Cell>>| {
+            let mut i = 0;
+            if cells.is_empty() {
+                if let Some(c_off) = cursor_offset {
+                    new_cursor.row = reflowed_rows.len();
+                    new_cursor.col = c_off;
+                }
+                let mut new_cells = recycled_vecs.pop().unwrap_or_else(|| Vec::with_capacity(new_cols));
+                new_cells.resize(new_cols, self.default_cell());
+                reflowed_rows.push(Row {
+                    cells: new_cells,
+                    len: 0,
+                    wrapped: false,
+                    reflowable: reflow_on_resize,
+                });
+                return;
+            }
+
+            if !reflow_on_resize {
+                let mut new_cells = recycled_vecs.pop().unwrap_or_else(|| Vec::with_capacity(new_cols));
+                new_cells.resize(new_cols, self.default_cell());
+                let copy_len = cells.len().min(new_cols);
+                new_cells[..copy_len].clone_from_slice(&cells[..copy_len]);
+
+                if let Some(c_off) = cursor_offset {
+                    new_cursor.row = reflowed_rows.len();
+                    new_cursor.col = c_off.min(new_cols.saturating_sub(1));
+                }
+                reflowed_rows.push(Row {
+                    cells: new_cells,
+                    len: copy_len,
+                    wrapped: false,
+                    reflowable: false,
+                });
+            } else {
+                while i < cells.len() {
+                    let chunk_len = (cells.len() - i).min(new_cols);
+                    let mut new_cells = recycled_vecs.pop().unwrap_or_else(|| Vec::with_capacity(new_cols));
+                    new_cells.resize(new_cols, self.default_cell());
+                    new_cells[..chunk_len].clone_from_slice(&cells[i..i + chunk_len]);
+
+                    if let Some(c_off) = cursor_offset {
+                        if c_off >= i && c_off < i + chunk_len {
+                            new_cursor.row = reflowed_rows.len();
+                            new_cursor.col = c_off - i;
+                        } else if c_off == cells.len() && i + chunk_len == cells.len() {
+                            if chunk_len < new_cols {
+                                new_cursor.row = reflowed_rows.len();
+                                new_cursor.col = chunk_len;
+                            } else {
+                                new_cursor.row = reflowed_rows.len() + 1;
+                                new_cursor.col = 0;
+                            }
+                        }
+                    }
+
+                    reflowed_rows.push(Row {
+                        cells: new_cells,
+                        len: chunk_len,
+                        wrapped: i + chunk_len < cells.len(),
+                        reflowable: true,
+                    });
+                    i += chunk_len;
+                }
+            }
+            cells.clear();
         };
 
-        let mut all_rows = self.scrollback.drain_to_vec();
-        let mut old_grid = std::mem::take(&mut self.grid);
-        all_rows.extend(old_grid.drain(..));
+        let mut new_cursor = CursorPos { row: 0, col: 0 };
 
-        for (r_idx, row) in all_rows.into_iter().enumerate() {
+        for (r_idx, mut row) in old_rows.into_iter().enumerate() {
             let mut keep_len = row.cells.len();
             while keep_len > 0 && row.cells[keep_len - 1].is_empty() {
                 if r_idx == absolute_cursor_row && keep_len > cursor_col {
@@ -1046,149 +1172,62 @@ impl ScreenBuffer {
             keep_len = keep_len.min(row.cells.len());
 
             if r_idx == absolute_cursor_row {
-                current_line.cursor_offset =
-                    Some(current_line.cells.len() + cursor_col.min(keep_len));
+                current_cursor_offset = Some(current_line_cells.len() + cursor_col.min(keep_len));
             }
 
-            current_line.cells.extend_from_slice(&row.cells[..keep_len]);
+            current_line_cells.extend_from_slice(&row.cells[..keep_len]);
 
             if row.wrapped || row.reflowable {
-                current_line.reflow_on_resize = true;
+                current_reflow_on_resize = true;
             }
+            
+            row.cells.clear();
+            recycled_vecs.push(row.cells);
 
             if !row.wrapped {
-                logical_lines.push(current_line);
-                current_line = LogicalLine {
-                    cells: Vec::new(),
-                    cursor_offset: None,
-                    reflow_on_resize: false,
-                };
-            }
-        }
-        if !current_line.cells.is_empty() || current_line.cursor_offset.is_some() {
-            logical_lines.push(current_line);
-        }
-
-        let mut reflowed_rows = Vec::new();
-        let mut new_cursor = CursorPos { row: 0, col: 0 };
-
-        for line in logical_lines {
-            let cells = line.cells;
-            let mut i = 0;
-            if cells.is_empty() {
-                if let Some(c_off) = line.cursor_offset {
-                    new_cursor = CursorPos {
-                        row: reflowed_rows.len(),
-                        col: c_off,
-                    };
-                }
-                reflowed_rows.push(Row {
-                    cells: vec![self.default_cell(); new_cols].into_boxed_slice(),
-                    len: 0,
-                    wrapped: false,
-                    reflowable: line.reflow_on_resize,
-                });
-                continue;
-            }
-
-            if !line.reflow_on_resize {
-                // Non-reflowable line (e.g. nushell table, program-drawn TUI output).
-                // We must NOT discard cells that lie beyond new_cols — they would be
-                // unrecoverable when the window grows back. Instead we keep the full
-                // cell slice in `row.cells` even when it is wider than new_cols.
-                // Rendering clips at the viewport boundary automatically (visible_row
-                // returns &row.cells which the tessellator reads up to `cols` cells from).
-                // On a subsequent grow the wider row is re-sliced to the larger new_cols.
-                let visible_len = cells.len().min(new_cols);
-                let full_len = cells.len().max(new_cols);
-                let mut new_cells = vec![self.default_cell(); full_len];
-                new_cells[..cells.len()].clone_from_slice(&cells);
-                let new_len = new_cells
-                    .iter()
-                    .rposition(|c| !c.is_empty())
-                    .map_or(0, |i| i + 1);
-                let new_row = Row {
-                    cells: new_cells.into_boxed_slice(),
-                    len: new_len,
-                    wrapped: false,
-                    reflowable: false,
-                };
-
-                if let Some(c_off) = line.cursor_offset {
-                    new_cursor = CursorPos {
-                        row: reflowed_rows.len(),
-                        col: c_off.min(visible_len),
-                    };
-                }
-
-                reflowed_rows.push(new_row);
-                continue;
-            }
-
-            while i < cells.len() {
-                let chunk_len = (cells.len() - i).min(new_cols);
-                let mut new_row = Row {
-                    cells: vec![self.default_cell(); new_cols].into_boxed_slice(),
-                    len: 0,
-                    wrapped: i + chunk_len < cells.len(),
-                    reflowable: line.reflow_on_resize,
-                };
-                new_row.cells[..chunk_len].clone_from_slice(&cells[i..i + chunk_len]);
-                new_row.len = new_row
-                    .cells
-                    .iter()
-                    .rposition(|c| !c.is_empty())
-                    .map_or(0, |idx| idx + 1);
-
-                if let Some(c_off) = line.cursor_offset {
-                    if (c_off >= i && c_off < i + new_cols)
-                        || (c_off == i + new_cols && i + new_cols >= cells.len())
-                    {
-                        new_cursor = CursorPos {
-                            row: reflowed_rows.len(),
-                            col: c_off - i,
-                        };
-                    }
-                }
-
-                reflowed_rows.push(new_row);
-                i += chunk_len;
+                flush_line(
+                    &mut current_line_cells,
+                    current_cursor_offset,
+                    current_reflow_on_resize,
+                    &mut reflowed_rows,
+                    &mut new_cursor,
+                    &mut recycled_vecs,
+                );
+                current_cursor_offset = None;
+                current_reflow_on_resize = false;
             }
         }
 
-        while reflowed_rows.len() > new_cursor.row + 1 {
-            if reflowed_rows
-                .last()
-                .unwrap()
-                .cells
-                .iter()
-                .all(|c| c.is_empty())
-            {
-                reflowed_rows.pop();
+        if !current_line_cells.is_empty() || current_cursor_offset.is_some() {
+            flush_line(
+                &mut current_line_cells,
+                current_cursor_offset,
+                current_reflow_on_resize,
+                &mut reflowed_rows,
+                &mut new_cursor,
+                &mut recycled_vecs,
+            );
+        }
+
+        let grid_start = reflowed_rows.len().saturating_sub(new_rows);
+        
+        for (i, row) in reflowed_rows.into_iter().enumerate() {
+            if i < grid_start {
+                self.scrollback.push(row);
             } else {
-                break;
+                self.grid.push_back(row);
             }
         }
-
-        let total_rows = reflowed_rows.len();
-        let grid_start = total_rows.saturating_sub(new_rows);
-
-        let mut new_grid_rows = Vec::new();
-        new_grid_rows.extend_from_slice(&reflowed_rows[grid_start..total_rows]);
-        while new_grid_rows.len() < new_rows {
-            new_grid_rows.push(Row {
-                cells: vec![self.default_cell(); new_cols].into_boxed_slice(),
+        
+        while self.grid.len() < new_rows {
+            self.grid.push_back(Row {
+                cells: vec![self.default_cell(); new_cols],
                 len: 0,
                 wrapped: false,
                 reflowable: false,
             });
         }
 
-        let scrollback_start = grid_start.saturating_sub(self.max_scrollback);
-        let new_scrollback = reflowed_rows[scrollback_start..grid_start].to_vec();
-
-        self.grid = VecDeque::from(new_grid_rows);
-        self.scrollback.replace_from_rows(new_scrollback);
         self.cols = new_cols;
         self.rows = new_rows;
 
@@ -1396,16 +1435,16 @@ impl ScreenBuffer {
                 grid.resize(
                     self.rows,
                     Row {
-                        cells: vec![self.default_cell(); self.cols].into_boxed_slice(),
+                        cells: vec![self.default_cell(); self.cols],
                         len: 0,
                         wrapped: false,
                         reflowable: false,
                     },
                 );
                 for row in &mut grid {
-                    let mut vec = std::mem::replace(&mut row.cells, Box::new([])).into_vec();
-                    vec.resize(self.cols, self.default_cell());
-                    row.cells = vec.into_boxed_slice();
+                    row.cells.resize(self.cols, self.default_cell());
+                    
+                    
                     row.len = row.len.min(self.cols);
                 }
                 self.grid = grid;
@@ -2491,5 +2530,100 @@ impl ScreenBuffer {
             current_command: self.current_command.clone(),
             is_command_running: self.is_command_running,
         }
+    }
+}
+
+#[cfg(test)]
+mod benches {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn bench_resize_reflow_large() {
+        let mut sb = ScreenBuffer::new(160, 40, 100_000, forge_core::color::Color::WHITE, forge_core::color::Color::BLACK);
+        
+        for _ in 0..50_000 {
+            let mut row = Row {
+                cells: vec![sb.default_cell(); 160],
+                len: 160,
+                wrapped: false,
+                reflowable: true,
+            };
+            for c in 0..160 {
+                row.cells[c].c = 'A';
+            }
+            sb.scrollback.push(row);
+        }
+        
+        let start = Instant::now();
+        sb.resize_reflow(80, 40);
+        println!("[PROFILER] resize_reflow (160 -> 80, 50k lines) took: {:?}", start.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod benches_box {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn bench_alloc() {
+        let sb = ScreenBuffer::new(160, 40, 100_000, forge_core::color::Color::WHITE, forge_core::color::Color::BLACK);
+        let start = Instant::now();
+        let mut vec = Vec::with_capacity(100_000);
+        for _ in 0..100_000 {
+            vec.push(vec![sb.default_cell(); 80]);
+        }
+        println!("[PROFILER] 100k vec![...].into_boxed_slice() took: {:?}", start.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod benches_box2 {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn bench_alloc2() {
+        let sb = ScreenBuffer::new(160, 40, 100_000, forge_core::color::Color::WHITE, forge_core::color::Color::BLACK);
+        let start = Instant::now();
+        let mut vec_result = Vec::with_capacity(100_000);
+        let source_cells = vec![sb.default_cell(); 80];
+        
+        for _ in 0..100_000 {
+            let mut v = Vec::with_capacity(80);
+            v.extend_from_slice(&source_cells);
+            // v.resize(80, sb.default_cell());
+            vec_result.push(v.into_boxed_slice());
+        }
+        println!("[PROFILER] 100k Vec::with_capacity + extend_from_slice took: {:?}", start.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod benches_grow {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn bench_resize_reflow_grow() {
+        let mut sb = ScreenBuffer::new(80, 40, 100_000, forge_core::color::Color::WHITE, forge_core::color::Color::BLACK);
+        
+        for _ in 0..100_000 {
+            let mut row = Row {
+                cells: vec![sb.default_cell(); 80],
+                len: 80,
+                wrapped: false,
+                reflowable: true,
+            };
+            for c in 0..80 {
+                row.cells[c].c = 'A';
+            }
+            sb.scrollback.push(row);
+        }
+        
+        let start = Instant::now();
+        sb.resize_reflow(160, 40);
+        println!("[PROFILER] resize_reflow (80 -> 160, 100k lines) took: {:?}", start.elapsed());
     }
 }

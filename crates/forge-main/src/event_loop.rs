@@ -3243,58 +3243,41 @@ pub fn run_event_loop(
                     app_data.config.shell.inherit_cwd_for_new_panes,
                 );
 
-                match forge_pty::Pty::spawn_in_dir(
-                    &app_data.config.shell,
-                    winsize,
-                    working_directory.as_deref(),
-                ) {
-                    Ok(pty) => {
-                        let mut screen_buffer = forge_pty::ScreenBuffer::new(
-                            grid_size.cols,
-                            grid_size.rows,
-                            app_data.config.scrollback.lines.unwrap_or(100_000),
-                            app_data.config.theme.parsed_foreground,
-                            app_data.config.theme.parsed_background,
-                        );
-                        screen_buffer.palette = app_data.config.theme.parsed_ansi_colors;
-                        let vte_processor = forge_pty::VteProcessor::new();
-                        let snapshot = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-                            screen_buffer.generate_snapshot(),
-                        ));
-
-                        let pane =
-                            crate::mux::Pane::new(next_pane_id, pty, snapshot.clone(), grid_size);
-                        let fd_clone = pane.pty.as_ref().unwrap().master_fd.try_clone().unwrap();
-
-                        let new_active_pane = if app_data.pane_runtime.is_tiling() {
-                            match app_data
-                                .tab_manager
-                                .active_mux_mut()
-                                .commit_split_active(axis, pane)
-                            {
-                                Ok(pane_id) => pane_id,
-                                Err(err) => {
-                                    tracing::warn!(?err, "Failed to split active pane");
-                                    continue;
-                                }
-                            }
-                        } else {
-                            app_data
-                                .tab_manager
-                                .active_mux_mut()
-                                .insert_detached_pane(pane)
-                        };
-
-                        app_data
-                            .pane_io
-                            .register_pane(
-                                new_active_pane,
-                                fd_clone,
-                                vte_processor,
-                                screen_buffer,
-                                snapshot,
-                            )
-                            .unwrap();
+                if app_data.pty_spawn_service.is_none() {
+                    app_data.pty_spawn_service = Some(
+                        crate::mux::PtySpawnService::new(
+                            app_data.config.shell.clone(),
+                            app_data.loop_signal.clone(),
+                        )
+                        .expect("failed to start PTY spawn service"),
+                    );
+                }
+                let mut screen_buffer = forge_pty::ScreenBuffer::new(
+                    grid_size.cols,
+                    grid_size.rows,
+                    app_data.config.scrollback.lines.unwrap_or(100_000),
+                    app_data.config.theme.parsed_foreground,
+                    app_data.config.theme.parsed_background,
+                );
+                screen_buffer.palette = app_data.config.theme.parsed_ansi_colors;
+                let vte_processor = forge_pty::VteProcessor::new();
+                let snapshot = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                    screen_buffer.generate_snapshot(),
+                ));
+                let pane = crate::mux::Pane::pending(next_pane_id, snapshot.clone(), grid_size);
+                let new_active_pane = if app_data.pane_runtime.is_tiling() {
+                    match app_data.tab_manager.active_mux_mut().commit_split_active(axis, pane) {
+                        Ok(pane_id) => pane_id,
+                        Err(err) => { tracing::warn!(?err, "Failed to split active pane"); continue; }
+                    }
+                } else {
+                    app_data.tab_manager.active_mux_mut().insert_detached_pane(pane)
+                };
+                let request = crate::mux::PtySpawnRequest { pane_id: new_active_pane, winsize, working_directory };
+                app_data.pending_tab_spawns.insert(new_active_pane, PendingTabSpawn { tab_id: app_data.tab_manager.active_tab().id, screen_buffer, vte_processor });
+                if let Some(service) = app_data.pty_spawn_service.as_ref() {
+                    if let Err(error) = service.spawn(request) { tracing::error!(?error, "Failed to spawn PTY asynchronously"); }
+                }
                         // Bumping the generator makes sure the newly registered pane gets its first snapshot drawn.
 
                         if let Some(scrolling) = app_data.pane_runtime.scrolling_mut() {
@@ -3376,9 +3359,7 @@ pub fn run_event_loop(
                         // Auto-FLIP handles Open animations in the render loop
                         app_data.force_immediate_render = true;
                         app_data.wayland_state.force_redraw = true;
-                    }
-                    Err(e) => tracing::error!("Failed to spawn PTY for split pane: {}", e),
-                }
+
             }
         }
 
