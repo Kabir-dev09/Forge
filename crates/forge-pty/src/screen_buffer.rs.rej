@@ -1,0 +1,10 @@
+--- crates/forge-pty/src/screen_buffer.rs
++++ crates/forge-pty/src/screen_buffer.rs
+@@ -1187,6 +1188,7 @@
+         }
+ 
+         self.update_selection_after_resize();
++        eprintln!("[PROFILER] resize_reflow ({} rows -> {} cols) took: {:?}", all_rows.len(), new_cols, start_time.elapsed());
+     }
+ 
+     fn update_selection_after_resize(&mut self) {

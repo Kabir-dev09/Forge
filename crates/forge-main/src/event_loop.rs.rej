@@ -1,0 +1,14 @@
+--- crates/forge-main/src/event_loop.rs
++++ crates/forge-main/src/event_loop.rs
+@@ -3307,6 +3308,11 @@
+                 if let Some(service) = app_data.pty_spawn_service.as_ref() {
+                     if let Err(error) = service.spawn(request) {
+                         tracing::error!(?error, "Failed to spawn PTY asynchronously");
+                     }
+                 }
++
++                std::fs::OpenOptions::new().create(true).append(true).open("/tmp/forge_perf.log").unwrap()
++                    .write_all(format!("pane_split dispatched in {:?}\n", _start_split.elapsed()).as_bytes())
++                    .unwrap();
++
+                 // Bumping the generator makes sure the newly registered pane gets its first snapshot drawn.

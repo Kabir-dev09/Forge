@@ -1,0 +1,45 @@
+--- crates/forge-pty/src/screen_buffer.rs
++++ crates/forge-pty/src/screen_buffer.rs
+@@ -1015,6 +1015,8 @@
+         let absolute_cursor_row = self.scrollback.len() + self.cursor.row;
+         let cursor_col = self.cursor.col;
+ 
++        let _start_time = std::time::Instant::now();
++
+         let mut all_rows = self.scrollback.drain_to_vec();
+         let mut old_grid = std::mem::take(&mut self.grid);
+         all_rows.extend(old_grid.drain(..));
+@@ -1187,6 +1189,11 @@
+         // Scroll to bottom when resized
+         self.scroll_offset = 0;
+         self.mark_all_dirty();
++        let _elapsed = _start_time.elapsed();
++        std::fs::OpenOptions::new().create(true).append(true).open("/tmp/forge_perf.log").unwrap()
++            .write_all(format!("resize_reflow: old={}x{}, new={}x{}, scrollback={}, elapsed={:?}\n", 
++                self.cols, self.rows, new_cols, new_rows, self.scrollback.len(), _elapsed).as_bytes())
++            .unwrap();
+     }
+ 
+     pub fn resize_height_only(&mut self, new_rows: usize) {
+--- crates/forge-main/src/event_loop.rs
++++ crates/forge-main/src/event_loop.rs
+@@ -3243,6 +3243,7 @@
+                     app_data.config.shell.inherit_cwd_for_new_panes,
+                 );
+ 
++                let _start_split = std::time::Instant::now();
+                 if app_data.pty_spawn_service.is_none() {
+                     app_data.pty_spawn_service = Some(
+                         crate::mux::PtySpawnService::new(
+@@ -3306,6 +3307,11 @@
+                 if let Some(service) = app_data.pty_spawn_service.as_ref() {
+                     if let Err(error) = service.spawn(request) {
+                         tracing::error!(?error, "Failed to spawn PTY asynchronously");
+                     }
+                 }
++
++                std::fs::OpenOptions::new().create(true).append(true).open("/tmp/forge_perf.log").unwrap()
++                    .write_all(format!("pane_split dispatched in {:?}\n", _start_split.elapsed()).as_bytes())
++                    .unwrap();
++
+                 // Bumping the generator makes sure the newly registered pane gets its first snapshot drawn.

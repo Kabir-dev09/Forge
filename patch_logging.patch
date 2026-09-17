@@ -1,0 +1,20 @@
+--- crates/forge-pty/src/screen_buffer.rs
++++ crates/forge-pty/src/screen_buffer.rs
+@@ -992,6 +992,7 @@
+     }
+ 
+     pub fn resize_reflow(&mut self, new_cols: usize, new_rows: usize) {
++        let start_time = std::time::Instant::now();
+         // TODO(PERF-03): resize_reflow materializes entire scrollback into memory.
+         // It should ideally reflow incrementally or retain the ring buffer structure
+         // during reflow to avoid allocating a massive Vec.
+@@ -1186,6 +1187,9 @@
+         }
+ 
+         self.update_selection_after_resize();
++        
++        let elapsed = start_time.elapsed();
++        std::fs::OpenOptions::new().create(true).append(true).open("/tmp/forge_profiler.log").unwrap().write_all(format!("[PROFILER] resize_reflow ({} rows -> {} cols) took: {:?}\n", all_rows.len(), new_cols, elapsed).as_bytes()).unwrap();
+     }
+ 
+     fn update_selection_after_resize(&mut self) {
