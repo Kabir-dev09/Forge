@@ -29,7 +29,13 @@ impl Cell {
     pub const FLAG_STRIKETHROUGH: u8 = 0b0000_1000;
     pub const FLAG_WIDE: u8 = 0b0001_0000;
     pub const FLAG_INVERSE: u8 = 0b0010_0000;
+    pub const FLAG_DIM: u8 = 0b0100_0000;
 
+    #[inline(always)]
+    #[inline(always)]
+    pub fn is_dim(&self) -> bool {
+        self.flags & Self::FLAG_DIM != 0
+    }
     #[inline(always)]
     pub fn is_bold(&self) -> bool {
         self.flags & Self::FLAG_BOLD != 0
@@ -56,6 +62,14 @@ impl Cell {
             CellWidth::Wide
         } else {
             CellWidth::Narrow
+        }
+    }
+    #[inline(always)]
+    pub fn set_dim(&mut self, val: bool) {
+        if val {
+            self.flags |= Self::FLAG_DIM;
+        } else {
+            self.flags &= !Self::FLAG_DIM;
         }
     }
     #[inline(always)]

@@ -67,7 +67,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
         tracing::trace!("unhook");
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         *self.parser_is_ground = true;
         if params.is_empty() {
             return;
@@ -145,7 +145,8 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     let g16 = ((color.g as u16) << 8) | (color.g as u16);
                     let b16 = ((color.b as u16) << 8) | (color.b as u16);
                     let code = if is_bg { 11 } else { 10 };
-                    let response = format!("\x1b]{};rgb:{:04x}/{:04x}/{:04x}\x1b\\", code, r16, g16, b16);
+                    let term = if bell_terminated { "\x07" } else { "\x1b\\" };
+                    let response = format!("\x1b]{};rgb:{:04x}/{:04x}/{:04x}{}", code, r16, g16, b16, term);
                     self.responses.extend_from_slice(response.as_bytes());
                 }
             }
@@ -478,15 +479,20 @@ fn handle_sgr(params: &Params, buffer: &mut ScreenBuffer) {
                 buffer.attr_underline = false;
                 buffer.attr_strikethrough = false;
                 buffer.attr_inverse = false;
+                buffer.attr_dim = false;
                 buffer.current_fg = buffer.default_fg;
                 buffer.current_bg = buffer.default_bg;
             }
             1 => buffer.attr_bold = true,
+            2 => buffer.attr_dim = true,
             3 => buffer.attr_italic = true,
             4 => buffer.attr_underline = true,
             7 => buffer.attr_inverse = true,
             9 => buffer.attr_strikethrough = true,
-            22 => buffer.attr_bold = false,
+            22 => {
+                buffer.attr_bold = false;
+                buffer.attr_dim = false;
+            },
             23 => buffer.attr_italic = false,
             24 => buffer.attr_underline = false,
             27 => buffer.attr_inverse = false,
