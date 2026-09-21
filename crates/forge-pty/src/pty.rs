@@ -178,23 +178,29 @@ pub enum PtyReadResult {
 }
 
 impl Pty {
-    pub fn spawn(shell: &ShellConfig, winsize: Winsize) -> Result<Self> {
-        Self::spawn_in_dir(shell, winsize, None)
+    pub fn spawn(
+        shell: &ShellConfig, 
+        winsize: Winsize, 
+        extra_envs: Option<&std::collections::HashMap<String, String>>
+    ) -> Result<Self> {
+        Self::spawn_in_dir(shell, winsize, None, extra_envs)
     }
 
     pub fn spawn_in_dir(
         shell: &ShellConfig,
         winsize: Winsize,
         working_directory: Option<&Path>,
+        extra_envs: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<Self> {
         let command = PreparedPtyCommand::new(shell)?;
-        Self::spawn_prepared_in_dir(&command, winsize, working_directory)
+        Self::spawn_prepared_in_dir(&command, winsize, working_directory, extra_envs)
     }
 
     pub fn spawn_prepared_in_dir(
         command: &PreparedPtyCommand,
         winsize: Winsize,
         working_directory: Option<&Path>,
+        extra_envs: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<Self> {
         let working_directory = working_directory.and_then(
             |path| match std::fs::OpenOptions::new()
@@ -284,7 +290,20 @@ impl Pty {
                     }
                 }
 
-                let _ = execvpe(&command.program, &command.args, &command.envs);
+                let mut merged_envs = command.envs.to_vec();
+                if let Some(extra) = extra_envs {
+                    for (k, v) in extra {
+                        if let Ok(c) = std::ffi::CString::new(format!("{}={}", k, v)) {
+                            merged_envs.push(c);
+                        }
+                    }
+                }
+                let mut f = std::fs::File::create("/tmp/forge_child_envs.txt").unwrap();
+                for e in &merged_envs {
+                    std::io::Write::write_all(&mut f, e.as_bytes()).unwrap();
+                    std::io::Write::write_all(&mut f, b"\n").unwrap();
+                }
+                let _ = execvpe(&command.program, &command.args, &merged_envs);
                 unsafe {
                     nix::libc::_exit(1);
                 }

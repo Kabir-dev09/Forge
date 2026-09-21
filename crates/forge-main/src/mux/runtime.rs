@@ -102,7 +102,10 @@ impl ScrollingTabManager {
             .tabs
             .iter()
             .map(|tab| {
-                let active_pane = tab.mux.active_pane_id();
+                                let active_pane = match &tab.content {
+                    crate::mux::tab::TabContent::Mux(mux) => mux.active_pane_id(),
+                    crate::mux::tab::TabContent::Proxy { target_pane, .. } => *target_pane,
+                };
                 let mut panes = ScrollingPaneManager::new(
                     viewport_cols.max(1),
                     viewport_rows.max(1),
@@ -140,7 +143,10 @@ impl ScrollingTabManager {
     }
 
     pub fn add_tab_from_tiling(&mut self, tab: &Tab, viewport_cols: usize, viewport_rows: usize, animation_duration_ms: u64) {
-        let active_pane = tab.mux.active_pane_id();
+                        let active_pane = match &tab.content {
+                    crate::mux::tab::TabContent::Mux(mux) => mux.active_pane_id(),
+                    crate::mux::tab::TabContent::Proxy { target_pane, .. } => *target_pane,
+                };
         let mut panes = ScrollingPaneManager::new(
             viewport_cols.max(1),
             viewport_rows.max(1),

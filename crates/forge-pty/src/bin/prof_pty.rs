@@ -31,7 +31,7 @@ fn main() {
 
     let start = Instant::now();
     for _ in 0..10 {
-        let pty = Pty::spawn_in_dir(&shell, winsize, None).unwrap();
+        let pty = Pty::spawn_in_dir(&shell, winsize, None, None).unwrap();
         pty.terminate_and_reap();
     }
     println!("Pty::spawn_in_dir (integration=false) x10: {:?}", start.elapsed());
@@ -45,7 +45,7 @@ fn main() {
 
     let start = Instant::now();
     for _ in 0..10 {
-        let pty = Pty::spawn_in_dir(&shell_integ, winsize, None).unwrap();
+        let pty = Pty::spawn_in_dir(&shell_integ, winsize, None, None).unwrap();
         pty.terminate_and_reap();
     }
     println!("Pty::spawn_in_dir (integration=true) x10: {:?}", start.elapsed());

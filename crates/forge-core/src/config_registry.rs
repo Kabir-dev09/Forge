@@ -866,6 +866,34 @@ impl Default for StatusbarConfig {
     }
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NvimHostTabBehavior {
+    Hide,
+    Dashboard,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct NvimIntegrationConfig {
+    pub host_tab_behavior: NvimHostTabBehavior,
+}
+
+impl Default for NvimIntegrationConfig {
+    fn default() -> Self {
+        Self {
+            host_tab_behavior: NvimHostTabBehavior::Hide,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct IntegrationsConfig {
+    pub nvim: NvimIntegrationConfig,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ForgeConfig {
@@ -883,6 +911,7 @@ pub struct ForgeConfig {
     pub confirm_close: ConfirmCloseConfig,
     pub command_completion_indicator: CommandCompletionIndicatorConfig,
     pub statusbar: StatusbarConfig,
+    pub integrations: IntegrationsConfig,
 
     #[serde(rename = "keybinds", alias = "keybindings")]
     pub raw_keybindings: HashMap<String, String>,
@@ -895,6 +924,7 @@ pub struct ForgeConfig {
 impl Default for ForgeConfig {
     fn default() -> Self {
         let mut config = Self {
+            integrations: IntegrationsConfig::default(),
             font: FontConfig::default(),
             window: WindowConfig::default(),
             blur: BlurConfig::default(),

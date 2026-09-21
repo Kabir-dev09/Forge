@@ -13,19 +13,65 @@ impl TabId {
     }
 }
 
+pub enum TabContent {
+    Mux(MuxState),
+    Proxy {
+        target_pane: super::pane::PaneId,
+        instance_id: String,
+        buffer_id: u32,
+    },
+}
+
 pub struct Tab {
     pub id: TabId,
-    pub mux: MuxState,
+    pub title: Option<String>,
+    pub content: TabContent,
     /// The pending window size (pixels) to apply when this tab becomes active
     /// (set when a resize event happens while this tab is inactive)
     pub pending_resize: Option<(u32, u32)>,
 }
 
 impl Tab {
+    pub fn mux(&self) -> &MuxState {
+        match &self.content {
+            TabContent::Mux(mux) => mux,
+            _ => panic!("mux() called on proxy tab without TabManager context"),
+        }
+    }
+    
+    pub fn mux_mut(&mut self) -> &mut MuxState {
+        match &mut self.content {
+            TabContent::Mux(mux) => mux,
+            _ => panic!("mux_mut() called on proxy tab without TabManager context"),
+        }
+    }
+}
+
+impl Tab {
     pub fn new(id: TabId, mux: MuxState) -> Self {
         Self {
             id,
-            mux,
+            title: None,
+            content: TabContent::Mux(mux),
+            pending_resize: None,
+        }
+    }
+
+    pub fn new_proxy(
+        id: TabId,
+        target_pane: super::pane::PaneId,
+        instance_id: String,
+        buffer_id: u32,
+        title: String,
+    ) -> Self {
+        Self {
+            id,
+            title: Some(title),
+            content: TabContent::Proxy {
+                target_pane,
+                instance_id,
+                buffer_id,
+            },
             pending_resize: None,
         }
     }
@@ -66,12 +112,35 @@ impl TabManager {
         &mut self.tabs[self.active_tab_index]
     }
 
+    pub fn mux_for_tab(&self, index: usize) -> &MuxState {
+        match &self.tabs[index].content {
+            TabContent::Mux(mux) => mux,
+            TabContent::Proxy { target_pane, .. } => self.mux_for_pane(*target_pane).unwrap(),
+        }
+    }
+
+    pub fn mux_for_tab_mut(&mut self, index: usize) -> &mut MuxState {
+        let target = match &self.tabs[index].content {
+            TabContent::Mux(_) => None,
+            TabContent::Proxy { target_pane, .. } => Some(*target_pane),
+        };
+        if let Some(pane_id) = target {
+            self.mux_for_pane_mut(pane_id).unwrap()
+        } else {
+            if let TabContent::Mux(mux) = &mut self.tabs[index].content {
+                mux
+            } else {
+                unreachable!()
+            }
+        }
+    }
+
     pub fn active_mux(&self) -> &MuxState {
-        &self.active_tab().mux
+        self.mux_for_tab(self.active_tab_index)
     }
 
     pub fn active_mux_mut(&mut self) -> &mut MuxState {
-        &mut self.active_tab_mut().mux
+        self.mux_for_tab_mut(self.active_tab_index)
     }
 
     /// Allocate a globally unique pane ID (unique across all tabs).
@@ -79,9 +148,10 @@ impl TabManager {
         let id = self.next_global_pane_id;
         self.next_global_pane_id = id.saturating_add(1);
         debug_assert!(
-            self.tabs
-                .iter()
-                .all(|tab| !tab.mux.panes.contains_key(&super::pane::PaneId::new(id))),
+            self.tabs.iter().all(|tab| match &tab.content {
+                TabContent::Mux(mux) => !mux.panes.contains_key(&super::pane::PaneId::new(id)),
+                _ => true,
+            }),
             "global pane ID allocator produced a duplicate"
         );
         super::pane::PaneId::new(id)
@@ -160,25 +230,26 @@ impl TabManager {
 
     /// Find which tab contains a given pane id. Returns the tab index.
     pub fn find_tab_for_pane(&self, pane_id: super::pane::PaneId) -> Option<usize> {
-        self.tabs
-            .iter()
-            .position(|tab| tab.mux.panes.contains_key(&pane_id))
+        self.tabs.iter().position(|tab| match &tab.content {
+            TabContent::Mux(mux) => mux.panes.contains_key(&pane_id),
+            _ => false,
+        })
     }
 
     /// Get a mux by pane id (searches all tabs)
     pub fn mux_for_pane(&self, pane_id: super::pane::PaneId) -> Option<&MuxState> {
-        self.tabs
-            .iter()
-            .find(|tab| tab.mux.panes.contains_key(&pane_id))
-            .map(|tab| &tab.mux)
+        self.tabs.iter().find_map(|tab| match &tab.content {
+            TabContent::Mux(mux) if mux.panes.contains_key(&pane_id) => Some(mux),
+            _ => None,
+        })
     }
 
     /// Get a mux_mut by pane id (searches all tabs)
     pub fn mux_for_pane_mut(&mut self, pane_id: super::pane::PaneId) -> Option<&mut MuxState> {
-        self.tabs
-            .iter_mut()
-            .find(|tab| tab.mux.panes.contains_key(&pane_id))
-            .map(|tab| &mut tab.mux)
+        self.tabs.iter_mut().find_map(|tab| match &mut tab.content {
+            TabContent::Mux(mux) if mux.panes.contains_key(&pane_id) => Some(mux),
+            _ => None,
+        })
     }
 
     pub fn move_detached_pane_to_tab(
@@ -197,26 +268,39 @@ impl TabManager {
             return false;
         };
         if source_index == destination_index
-            || self.tabs[source_index]
-                .mux
-                .floating_panes
-                .contains(&pane_id)
-            || self.tabs[destination_index]
-                .mux
-                .panes
-                .contains_key(&pane_id)
+            || match &self.tabs[source_index].content {
+                TabContent::Mux(mux) => mux.floating_panes.contains(&pane_id),
+                _ => false,
+            }
+            || match &self.tabs[destination_index].content {
+                TabContent::Mux(mux) => mux.panes.contains_key(&pane_id),
+                _ => false,
+            }
         {
             return false;
         }
 
-        let Some((pane, _)) = self.tabs[source_index].mux.take_detached_pane(pane_id) else {
-            return false;
+        let pane = {
+            if let TabContent::Mux(mux) = &mut self.tabs[source_index].content {
+                if let Some((p, _)) = mux.take_detached_pane(pane_id) {
+                    p
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
         };
-        self.tabs[destination_index].mux.insert_detached_pane(pane);
-        self.tabs[destination_index].mux.zoomed_pane = None;
 
-        if self.tabs[source_index].mux.panes.is_empty() {
-            self.tabs.remove(source_index);
+        if let TabContent::Mux(mux) = &mut self.tabs[destination_index].content {
+            mux.insert_detached_pane(pane);
+            mux.zoomed_pane = None;
+        }
+
+        if let TabContent::Mux(mux) = &self.tabs[source_index].content {
+            if mux.panes.is_empty() {
+                self.tabs.remove(source_index);
+            }
         }
         self.active_tab_index = self
             .tabs
@@ -362,7 +446,7 @@ mod tests {
 
         assert_eq!(mgr.tabs.len(), 2);
         assert_eq!(mgr.active_tab().id, destination_id);
-        assert!(!mgr.tabs[0].mux.panes.contains_key(&moved_id));
+        assert!(!mgr.tabs[0].active_mux().panes.contains_key(&moved_id));
         let moved = mgr.active_mux().panes.get(&moved_id).unwrap();
         assert_eq!(moved.grid_size, GridSize::new(37, 19));
         assert!(std::sync::Arc::ptr_eq(&moved.snapshot, &snapshot));

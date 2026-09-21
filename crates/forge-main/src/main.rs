@@ -1,3 +1,4 @@
+pub mod nvim_ipc;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// Log Levels Guide:
@@ -419,6 +420,14 @@ fn run(
     winsize.ws_xpixel = (cols as f64 * metrics.effective_cell_w) as u16;
     winsize.ws_ypixel = (rows as f64 * metrics.effective_cell_h) as u16;
 
+
+    // --- Create Event Loop here to get LoopSignal ---
+    let event_loop: calloop::EventLoop<crate::event_loop::AppData> =
+        calloop::EventLoop::try_new().map_err(|e| forge_core::ForgeError::Other(e.to_string()))?;
+    let loop_signal = event_loop.get_signal();
+
+    // Initialize Nvim IPC Server BEFORE PTY spawn so socket exists
+    let nvim_server = crate::nvim_ipc::NvimIpcServer::new(loop_signal.clone()).ok();
     let pty = {
         let _span = tracing::debug_span!(
             "startup.spawn_pty",
@@ -427,7 +436,12 @@ fn run(
             shell = %config.shell.program
         )
         .entered();
-        forge_pty::Pty::spawn(&config.shell, winsize)?
+        forge_pty::Pty::spawn(&config.shell, winsize, Some(&{
+            let mut m = std::collections::HashMap::new();
+            m.insert("FORGE_PANE_ID".to_string(), "1".to_string());
+            m.insert("FORGE_IPC_SOCKET".to_string(), format!("/tmp/forge-ipc-{}.sock", std::process::id()));
+            m
+        }))?
     };
     tracing::info!(
         "PTY spawned. Shell: {}, Cols: {}, Rows: {}",
@@ -500,11 +514,6 @@ fn run(
     // Drop the SHM buffer
     drop(wayland_state.shm_buffer.take());
     tracing::info!("SHM→Vulkan handover complete.");
-
-    // --- Create Event Loop here to get LoopSignal ---
-    let event_loop: calloop::EventLoop<crate::event_loop::AppData> =
-        calloop::EventLoop::try_new().map_err(|e| forge_core::ForgeError::Other(e.to_string()))?;
-    let loop_signal = event_loop.get_signal();
 
     // --- Background Font Loading ---
     let (font_tx, font_rx) = std::sync::mpsc::sync_channel(1);
@@ -582,6 +591,7 @@ fn run(
         key_rx,
         pointer_rx,
         paste_rx,
+        nvim_server,
         config,
         Some(renderer),
         Some(font_rx),

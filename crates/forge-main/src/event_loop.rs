@@ -216,6 +216,7 @@ pub struct AppData {
     pub key_receiver: std::sync::mpsc::Receiver<Vec<u8>>,
     pub pointer_receiver: std::sync::mpsc::Receiver<crate::wayland::connection::PointerEvent>,
     pub paste_receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+    pub nvim_server: Option<crate::nvim_ipc::NvimIpcServer>,
     pub config: forge_core::config_registry::ForgeConfig,
     pub renderer: Option<forge_renderer::Renderer>,
     pub queue_handle: wayland_client::QueueHandle<WaylandState>,
@@ -315,8 +316,8 @@ fn publish_pending_tab_spawn_error(
         .tab_manager
         .tabs
         .iter()
-        .find(|tab| tab.id == pending.tab_id)
-        .and_then(|tab| tab.mux.panes.get(&pane_id))
+        .position(|tab| tab.id == pending.tab_id)
+        .and_then(|i| app_data.tab_manager.mux_for_tab(i).panes.get(&pane_id))
     {
         pane.snapshot.store(std::sync::Arc::new(snapshot));
     }
@@ -362,9 +363,7 @@ fn process_pending_tab_spawns(app_data: &mut AppData) {
             }
             continue;
         };
-        let Some(grid_size) = app_data.tab_manager.tabs[tab_index]
-            .mux
-            .panes
+        let Some(grid_size) = app_data.tab_manager.mux_for_tab_mut(tab_index).panes
             .get(&completion.pane_id)
             .map(|pane| pane.grid_size)
         else {
@@ -412,9 +411,7 @@ fn process_pending_tab_spawns(app_data: &mut AppData) {
                 continue;
             }
         };
-        let snapshot = app_data.tab_manager.tabs[tab_index]
-            .mux
-            .panes
+        let snapshot = app_data.tab_manager.mux_for_tab_mut(tab_index).panes
             .get(&completion.pane_id)
             .expect("pending pane disappeared during spawn completion")
             .snapshot
@@ -422,9 +419,7 @@ fn process_pending_tab_spawns(app_data: &mut AppData) {
         snapshot.store(std::sync::Arc::new(
             pending.screen_buffer.generate_snapshot(),
         ));
-        app_data.tab_manager.tabs[tab_index]
-            .mux
-            .panes
+        app_data.tab_manager.mux_for_tab_mut(tab_index).panes
             .get_mut(&completion.pane_id)
             .expect("pending pane disappeared during spawn completion")
             .pty = Some(pty);
@@ -727,10 +722,14 @@ impl AppData {
         let active_tab = self.tab_manager.active_tab_index;
         let tabs_signature = self.tab_manager.tabs.iter().enumerate().fold(
             self.tab_manager.tabs.len() as u64,
-            |signature, (index, tab)| {
+            |signature, (index, _)| {
+                let is_zoomed = match &self.pane_runtime {
+                    crate::mux::PaneRuntime::Tiling => self.tab_manager.mux_for_tab(index).is_zoomed(),
+                    crate::mux::PaneRuntime::Scrolling(s) => s.tabs.get(index).map(|t| t.panes.is_zoomed()).unwrap_or(false),
+                };
                 signature.rotate_left(7)
                     ^ ((index as u64 + 1) << 1)
-                    ^ u64::from(tab.mux.is_zoomed())
+                    ^ u64::from(is_zoomed)
             },
         );
         if !self
@@ -745,10 +744,31 @@ impl AppData {
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, tab)| crate::statusbar::StatusbarTab {
-                index: i,
-                title: format!("Tab {}", i + 1),
-                is_zoomed: tab.mux.is_zoomed(),
+            .filter_map(|(i, tab)| {
+                let mut title = tab.title.clone().unwrap_or_else(|| format!("Tab {}", i + 1));
+                if let crate::mux::tab::TabContent::Mux(mux) = &tab.content {
+                    if mux.panes.len() == 1 {
+                        if let Some(server) = &self.nvim_server {
+                            let clients = server.clients.lock().unwrap();
+                            let has_nvim = clients.keys().any(|pane_id| mux.panes.contains_key(&crate::mux::pane::PaneId::new(*pane_id)));
+                            if has_nvim {
+                                match self.config.integrations.nvim.host_tab_behavior {
+                                    forge_core::config_registry::NvimHostTabBehavior::Hide => return None,
+                                    forge_core::config_registry::NvimHostTabBehavior::Dashboard => title = "Dashboard".to_string(),
+                                }
+                            }
+                        }
+                    }
+                }
+                let is_zoomed = match &self.pane_runtime {
+                    crate::mux::PaneRuntime::Tiling => self.tab_manager.mux_for_tab(i).is_zoomed(),
+                    crate::mux::PaneRuntime::Scrolling(s) => s.tabs.get(i).map(|t| t.panes.is_zoomed()).unwrap_or(false),
+                };
+                Some(crate::statusbar::StatusbarTab {
+                    index: i,
+                    title,
+                    is_zoomed,
+                })
             })
             .collect();
 
@@ -1007,9 +1027,7 @@ fn apply_scrolling_grid_changes_to_tab(
     };
 
     for (pane_id, grid_size) in &changes {
-        if let Some(pane) = app_data.tab_manager.tabs[tab_index]
-            .mux
-            .panes
+        if let Some(pane) = app_data.tab_manager.mux_for_tab_mut(tab_index).panes
             .get_mut(pane_id)
         {
             if pane.grid_size != *grid_size {
@@ -1024,9 +1042,7 @@ fn apply_scrolling_grid_changes_to_tab(
         .collect();
 
     for (pane_id, grid_size) in &changes {
-        if let Some(pty) = app_data.tab_manager.tabs[tab_index]
-            .mux
-            .panes
+        if let Some(pty) = app_data.tab_manager.mux_for_tab_mut(tab_index).panes
             .get_mut(pane_id)
             .and_then(|pane| pane.pty.as_mut())
         {
@@ -1446,8 +1462,7 @@ fn close_tab(app_data: &mut AppData, tab_id: crate::mux::TabId) {
         return;
     };
 
-    let pane_ids: Vec<_> = app_data.tab_manager.tabs[tab_idx]
-        .mux
+    let pane_ids: Vec<_> = app_data.tab_manager.mux_for_tab(tab_idx)
         .panes
         .keys()
         .copied()
@@ -2029,8 +2044,8 @@ fn prepare_scrolling_transfer_animation_history(
             rect.cols as f32 * metrics.effective_cell_w as f32,
             rect.rows as f32 * metrics.effective_cell_h as f32,
         );
-        let screen_rect = destination_tab
-            .and_then(|tab| tab.mux.panes.get(pane_id))
+        let screen_rect = app_data.tab_manager.tabs.iter().position(|t| t.id == destination_tab.unwrap().id)
+            .and_then(|i| app_data.tab_manager.mux_for_tab(i).panes.get(pane_id))
             .map(|pane| pane.rect)
             .unwrap_or(logical_rect);
         app_data
@@ -2141,8 +2156,9 @@ fn command_completion_tracking_enabled_for_config(
 }
 
 fn pane_zoomed_for_indicator(app_data: &AppData, pane_id: crate::mux::PaneId) -> bool {
-    app_data.tab_manager.tabs.iter().any(|tab| {
-        tab.mux.is_zoomed() && tab.mux.visible_pane_ids().first().copied() == Some(pane_id)
+    (0..app_data.tab_manager.tabs.len()).any(|i| {
+        let mux = app_data.tab_manager.mux_for_tab(i);
+        mux.is_zoomed() && mux.visible_pane_ids().first().copied() == Some(pane_id)
     })
 }
 
@@ -2156,7 +2172,7 @@ fn pane_tab_location(
         .iter()
         .enumerate()
         .find_map(|(index, tab)| {
-            tab.mux
+            app_data.tab_manager.mux_for_tab(index)
                 .panes
                 .contains_key(&pane_id)
                 .then_some((index, tab.id))
@@ -2621,6 +2637,7 @@ pub fn run_event_loop(
     key_receiver: std::sync::mpsc::Receiver<Vec<u8>>,
     pointer_receiver: std::sync::mpsc::Receiver<crate::wayland::connection::PointerEvent>,
     paste_receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+    nvim_server: Option<crate::nvim_ipc::NvimIpcServer>,
     config: forge_core::config_registry::ForgeConfig,
     renderer: Option<forge_renderer::Renderer>,
     font_atlas_receiver: Option<std::sync::mpsc::Receiver<forge_renderer::font::FontData>>,
@@ -2717,6 +2734,7 @@ pub fn run_event_loop(
         key_receiver,
         pointer_receiver,
         paste_receiver,
+        nvim_server,
         config: config.clone(),
         renderer,
         queue_handle,
@@ -2803,9 +2821,198 @@ pub fn run_event_loop(
         )
         .unwrap();
 
+    let mut last_active_tab_id = app_data.tab_manager.active_tab_index;
+    let mut frame_count = 0;
     while app_data.wayland_state.running {
+        frame_count += 1;
+        if frame_count == 30 {
+            if app_data.tab_manager.tabs.len() > 1 {
+                app_data.tab_manager.switch_to_index(1);
+            }
+        }
         process_pending_tab_spawns(&mut app_data);
-        process_command_completion_events(&mut app_data);
+
+        let mut update_sb = false;
+        if let Some(server) = &app_data.nvim_server {
+            while let Ok((pane_id, msg)) = server.receiver.try_recv() {
+                match msg {
+                    crate::nvim_ipc::PluginMessage::Handshake { .. } => {
+                        tracing::info!("Nvim IPC Handshake for pane {}", pane_id);
+                    }
+                    crate::nvim_ipc::PluginMessage::SyncState { buffers, .. } => {
+                        tracing::info!("Nvim IPC SyncState for pane {}: {} buffers", pane_id, buffers.len());
+                        
+                        let mut needs_removal_update = false;
+                        app_data.tab_manager.tabs.retain(|t| {
+                            match &t.content {
+                                crate::mux::tab::TabContent::Proxy { target_pane, buffer_id: bid, .. } => {
+                                    if target_pane.get() == pane_id {
+                                        let should_keep = buffers.iter().any(|b| b.id == *bid);
+                                        if !should_keep {
+                                            needs_removal_update = true;
+                                        }
+                                        should_keep
+                                    } else {
+                                        true
+                                    }
+                                }
+                                _ => true,
+                            }
+                        });
+                        if needs_removal_update {
+                            if app_data.tab_manager.active_tab_index >= app_data.tab_manager.tabs.len() {
+                                app_data.tab_manager.active_tab_index = app_data.tab_manager.tabs.len().saturating_sub(1);
+                            }
+                            update_sb = true;
+                            app_data.wayland_state.force_redraw = true;
+                        }
+                        
+                        for buf in buffers {
+                            let exists = app_data.tab_manager.tabs.iter().any(|t| {
+                                match &t.content {
+                                    crate::mux::tab::TabContent::Proxy { target_pane, buffer_id: bid, .. } => {
+                                        target_pane.get() == pane_id && *bid == buf.id
+                                    }
+                                    _ => false,
+                                }
+                            });
+                            if !exists {
+                                let tab_id = crate::mux::TabId::new(app_data.tab_manager.next_tab_id);
+                                app_data.tab_manager.next_tab_id += 1;
+                                let proxy_tab = crate::mux::tab::Tab::new_proxy(
+                                    tab_id,
+                                    crate::mux::PaneId::new(pane_id),
+                                    pane_id.to_string(),
+                                    buf.id,
+                                    buf.name,
+                                );
+                                app_data.tab_manager.tabs.push(proxy_tab);
+                                update_sb = true;
+                                app_data.wayland_state.force_redraw = true;
+                            }
+                        }
+                    }
+                    crate::nvim_ipc::PluginMessage::BufferAdded { buffer_id, name, .. } => {
+                        tracing::info!("Nvim IPC BufferAdded {} for pane {}", name, pane_id);
+                        let tab_id = crate::mux::TabId::new(app_data.tab_manager.next_tab_id);
+                        app_data.tab_manager.next_tab_id += 1;
+                        let proxy_tab = crate::mux::tab::Tab::new_proxy(
+                            tab_id,
+                            crate::mux::PaneId::new(pane_id),
+                            pane_id.to_string(),
+                            buffer_id,
+                            name,
+                        );
+                        app_data.tab_manager.tabs.push(proxy_tab);
+                        update_sb = true;
+                        app_data.wayland_state.force_redraw = true;
+                    }
+                    crate::nvim_ipc::PluginMessage::BufferRemoved { buffer_id } => {
+                        app_data.tab_manager.tabs.retain(|t| {
+                            match &t.content {
+                                crate::mux::tab::TabContent::Proxy { target_pane, buffer_id: bid, .. } => {
+                                    !(target_pane.get() == pane_id && *bid == buffer_id)
+                                }
+                                _ => true,
+                            }
+                        });
+                        if app_data.tab_manager.active_tab_index >= app_data.tab_manager.tabs.len() {
+                            app_data.tab_manager.active_tab_index = app_data.tab_manager.tabs.len().saturating_sub(1);
+                        }
+                        update_sb = true;
+                        app_data.wayland_state.force_redraw = true;
+                    }
+                    crate::nvim_ipc::PluginMessage::BufferEntered { buffer_id } => {
+                        if let Some(idx) = app_data.tab_manager.tabs.iter().position(|t| {
+                            match &t.content {
+                                crate::mux::tab::TabContent::Proxy { target_pane, buffer_id: bid, .. } => {
+                                    target_pane.get() == pane_id && *bid == buffer_id
+                                }
+                                _ => false,
+                            }
+                        }) {
+                            app_data.tab_manager.active_tab_index = idx;
+                            update_sb = true;
+                            app_data.wayland_state.force_redraw = true;
+                        }
+                    }
+                    crate::nvim_ipc::PluginMessage::BufferRenamed { buffer_id, name, .. } => {
+                        if let Some(tab) = app_data.tab_manager.tabs.iter_mut().find(|t| {
+                            match &t.content {
+                                crate::mux::tab::TabContent::Proxy { target_pane, buffer_id: bid, .. } => {
+                                    target_pane.get() == pane_id && *bid == buffer_id
+                                }
+                                _ => false,
+                            }
+                        }) {
+                            tab.title = Some(name);
+                            update_sb = true;
+                            app_data.wayland_state.force_redraw = true;
+                        }
+                    }
+                    crate::nvim_ipc::PluginMessage::Disconnected => {
+                        tracing::info!("Nvim IPC Disconnected for pane {}", pane_id);
+                        let mut needs_removal_update = false;
+                        app_data.tab_manager.tabs.retain(|t| {
+                            match &t.content {
+                                crate::mux::tab::TabContent::Proxy { target_pane, .. } => {
+                                    if target_pane.get() == pane_id {
+                                        needs_removal_update = true;
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
+                                _ => true,
+                            }
+                        });
+                        if needs_removal_update {
+                            if app_data.tab_manager.active_tab_index >= app_data.tab_manager.tabs.len() {
+                                app_data.tab_manager.active_tab_index = app_data.tab_manager.tabs.len().saturating_sub(1);
+                            }
+                            update_sb = true;
+                            app_data.wayland_state.force_redraw = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+                // Also check if focus changed to send command back to Nvim
+        if last_active_tab_id != app_data.tab_manager.active_tab_index {
+            last_active_tab_id = app_data.tab_manager.active_tab_index;
+            update_sb = true;
+            let active_tab = &app_data.tab_manager.tabs[app_data.tab_manager.active_tab_index];
+            match &active_tab.content {
+                crate::mux::tab::TabContent::Proxy { target_pane, buffer_id, .. } => {
+                    if let Some(server) = &app_data.nvim_server {
+                        server.send_command(target_pane.get(), crate::nvim_ipc::CommandMessage::FocusBuffer { buffer_id: *buffer_id });
+                    }
+                }
+                crate::mux::tab::TabContent::Mux(mux) => {
+                    if mux.panes.len() == 1 && app_data.config.integrations.nvim.host_tab_behavior == forge_core::config_registry::NvimHostTabBehavior::Dashboard {
+                        if let Some(server) = &app_data.nvim_server {
+                            let target = {
+                                let clients = server.clients.lock().unwrap();
+                                clients.keys().find(|pane_id| mux.panes.contains_key(&crate::mux::pane::PaneId::new(**pane_id))).copied()
+                            };
+                            if let Some(pane_id) = target {
+                                server.send_command(pane_id, crate::nvim_ipc::CommandMessage::FocusDashboard);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if update_sb {
+            app_data.update_statusbar(app_data.cached_grid_metrics.map(|m| m.sb_cols).unwrap_or(0));
+        }
+
+        
+        if update_sb {
+            app_data.update_statusbar(app_data.cached_grid_metrics.map(|m| m.sb_cols).unwrap_or(0));
+        }
+process_command_completion_events(&mut app_data);
         expire_command_completion_indicators(&mut app_data, std::time::Instant::now());
 
         // FIX 4: Use a u64 generation counter instead of allocating a HashSet every loop tick.
@@ -2833,15 +3040,41 @@ pub fn run_event_loop(
         };
         if !exited.is_empty() {
             for exited_pane in exited {
+
+                // Clean up any proxy tabs targeting this pane
+                let mut needs_sb_update = false;
+                app_data.tab_manager.tabs.retain(|t| {
+                    match &t.content {
+                        crate::mux::tab::TabContent::Proxy { target_pane, .. } => {
+                            if target_pane.get() == exited_pane.get() {
+                                needs_sb_update = true;
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                        _ => true,
+                    }
+                });
+                if needs_sb_update {
+                    if app_data.tab_manager.active_tab_index >= app_data.tab_manager.tabs.len() {
+                        app_data.tab_manager.active_tab_index = app_data.tab_manager.tabs.len().saturating_sub(1);
+                    }
+                    app_data.update_statusbar(app_data.cached_grid_metrics.map(|m| m.sb_cols).unwrap_or(0));
+                }
+
                 let mut closed_tab_idx = None;
                 let mut needs_relayout_in_tab = None;
 
                 let scrolling_mode = !app_data.pane_runtime.is_tiling();
-                for (i, tab) in app_data.tab_manager.tabs.iter_mut().enumerate() {
-                    let remove_result = if scrolling_mode {
-                        tab.mux.remove_detached_pane(exited_pane)
-                    } else {
-                        tab.mux.remove_pane(exited_pane)
+                for i in 0..app_data.tab_manager.tabs.len() {
+                    let remove_result = {
+                        let mux = app_data.tab_manager.mux_for_tab_mut(i);
+                        if scrolling_mode {
+                            mux.remove_detached_pane(exited_pane)
+                        } else {
+                            mux.remove_pane(exited_pane)
+                        }
                     };
                     match remove_result {
                         crate::mux::state::RemovePaneResult::RemovedLastPane => {
@@ -2887,7 +3120,7 @@ pub fn run_event_loop(
                         let removal = scrolling.remove_pane_any_with_changes(exited_pane);
                         let grid_changes = removal.grid_changes;
                         if let Some(active_pane) = scrolling.active_pane_id() {
-                            app_data.tab_manager.tabs[idx].mux.active_pane = active_pane;
+                            { let mux = app_data.tab_manager.mux_for_tab_mut(idx); mux.active_pane = active_pane; }
                         }
                         if let Some(metrics) = app_data.cached_grid_metrics {
                             apply_scrolling_grid_changes(&mut app_data, grid_changes, metrics);
@@ -2915,16 +3148,14 @@ pub fn run_event_loop(
                             app_data.effective_pane_padding(),
                         );
                         if let Ok(changes) =
-                            app_data.tab_manager.tabs[idx].mux.relayout(layout_params)
+                            app_data.tab_manager.mux_for_tab_mut(idx).relayout(layout_params)
                         {
                             for change in changes {
                                 // FIX #2: Reflow the screen buffer directly on the main thread.
                                 // This avoids an IPC round-trip (send → worker wakeup → reflow → ack → recv)
                                 // and instead executes the reflow synchronously here, atomically publishing
                                 // the reflowed snapshot into the ArcSwap before the next GPU frame.
-                                if let Some(pane) = app_data.tab_manager.tabs[idx]
-                                    .mux
-                                    .panes
+                                if let Some(pane) = app_data.tab_manager.mux_for_tab_mut(idx).panes
                                     .get_mut(&change.pane_id)
                                 {
                                     // The ScreenBuffer lives inside the PTY IO worker thread — we cannot
@@ -3498,11 +3729,13 @@ pub fn run_event_loop(
                         if let Err(err) = toggle_pane_zoom(&mut app_data, None) {
                             tracing::warn!(?err, "Failed to toggle pane zoom");
                         }
+                        update_sb = true;
                     }
                     forge_core::bindings::Action::TogglePaneFloating => {
                         if let Err(err) = toggle_pane_floating(&mut app_data, None) {
                             tracing::warn!(?err, "Failed to toggle pane floating");
                         }
+                        update_sb = true;
                     }
                     forge_core::bindings::Action::ToggleSidebar => {
                         app_data.sidebar.toggle();
@@ -3597,6 +3830,7 @@ pub fn run_event_loop(
                             &app_data.config.shell,
                             winsize,
                             working_directory.as_deref(),
+                            None,
                         ) {
                             Ok(pty) => {
                                 let mut screen_buffer = forge_pty::ScreenBuffer::new(
@@ -5341,9 +5575,24 @@ pub fn run_event_loop(
                         let tabs_signature = app_data.tab_manager.tabs.iter().enumerate().fold(
                             app_data.tab_manager.tabs.len() as u64,
                             |signature, (index, tab)| {
+                                if let crate::mux::tab::TabContent::Mux(mux) = &tab.content {
+                                    if mux.panes.len() == 1 {
+                                        if let Some(server) = &app_data.nvim_server {
+                                            let clients = server.clients.lock().unwrap();
+                                            let has_nvim = clients.keys().any(|pane_id| mux.panes.contains_key(&crate::mux::pane::PaneId::new(*pane_id)));
+                                            if has_nvim && app_data.config.integrations.nvim.host_tab_behavior == forge_core::config_registry::NvimHostTabBehavior::Hide {
+                                                return signature;
+                                            }
+                                        }
+                                    }
+                                }
+                                let is_zoomed = match &app_data.pane_runtime {
+                                    crate::mux::PaneRuntime::Tiling => app_data.tab_manager.mux_for_tab(index).is_zoomed(),
+                                    crate::mux::PaneRuntime::Scrolling(s) => s.tabs.get(index).map(|t| t.panes.is_zoomed()).unwrap_or(false),
+                                };
                                 signature.rotate_left(7)
                                     ^ ((index as u64 + 1) << 1)
-                                    ^ u64::from(tab.mux.is_zoomed())
+                                    ^ u64::from(is_zoomed)
                             },
                         );
                         let tabs: Vec<crate::statusbar::StatusbarTab> = app_data
@@ -5351,10 +5600,31 @@ pub fn run_event_loop(
                             .tabs
                             .iter()
                             .enumerate()
-                            .map(|(i, tab)| crate::statusbar::StatusbarTab {
-                                index: i,
-                                title: format!("Tab {}", i + 1),
-                                is_zoomed: tab.mux.is_zoomed(),
+                            .filter_map(|(i, tab)| {
+                                let mut title = tab.title.clone().unwrap_or_else(|| format!("Tab {}", i + 1));
+                                if let crate::mux::tab::TabContent::Mux(mux) = &tab.content {
+                                    if mux.panes.len() == 1 {
+                                        if let Some(server) = &app_data.nvim_server {
+                                            let clients = server.clients.lock().unwrap();
+                                            let has_nvim = clients.keys().any(|pane_id| mux.panes.contains_key(&crate::mux::pane::PaneId::new(*pane_id)));
+                                            if has_nvim {
+                                                match app_data.config.integrations.nvim.host_tab_behavior {
+                                                    forge_core::config_registry::NvimHostTabBehavior::Hide => return None,
+                                                    forge_core::config_registry::NvimHostTabBehavior::Dashboard => title = "Dashboard".to_string(),
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                let is_zoomed = match &app_data.pane_runtime {
+                                    crate::mux::PaneRuntime::Tiling => app_data.tab_manager.mux_for_tab(i).is_zoomed(),
+                                    crate::mux::PaneRuntime::Scrolling(s) => s.tabs.get(i).map(|t| t.panes.is_zoomed()).unwrap_or(false),
+                                };
+                                Some(crate::statusbar::StatusbarTab {
+                                    index: i,
+                                    title,
+                                    is_zoomed,
+                                })
                             })
                             .collect();
                         app_data.statusbar.rebuild(

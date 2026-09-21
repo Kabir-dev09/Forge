@@ -51,6 +51,12 @@ impl PtySpawnService {
                                     command,
                                     request.winsize,
                                     request.working_directory.as_deref(),
+                                    Some(&{
+                                        let mut m = std::collections::HashMap::new();
+                                        m.insert("FORGE_PANE_ID".to_string(), request.pane_id.get().to_string());
+                                        m.insert("FORGE_IPC_SOCKET".to_string(), format!("/tmp/forge-ipc-{}.sock", std::process::id()));
+                                        m
+                                    })
                                 )
                                 .map_err(|error| error.to_string()),
                                 Err(error) => Err(error.clone()),
